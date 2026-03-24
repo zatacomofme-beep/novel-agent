@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "default_preset_key": "balanced",
+  "guardian_consensus": {
+    "enabled": true,
+    "shadow_model": "gemini-3.1-pro-preview",
+    "shadow_reasoning_effort": "high",
+    "outline_enabled": true,
+    "realtime_enabled": true,
+    "final_enabled": true
+  },
+  "available_models": [
+    {
+      "id": "gpt-5.4",
+      "label": "GPT 5.4",
+      "provider": "openai-compatible",
+      "description": "综合稳定性最强，适合主线锁定、设定红线校验和终稿收束。",
+      "supports_reasoning_effort": true,
+      "recommended_roles": ["outline", "guardian", "anchor", "arbitrator", "stream_writer"]
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "label": "Gemini 3.1 Pro Preview",
+      "provider": "openai-compatible",
+      "description": "长文本风格辨识和语气贴合表现更稳，适合文风贴合场景。",
+      "supports_reasoning_effort": true,
+      "recommended_roles": ["style_guardian"]
+    },
+    {
+      "id": "claude-opus-4-6",
+      "label": "Claude Opus 4.6",
+      "provider": "openai-compatible",
+      "description": "适合长链路逻辑挑刺和压力测试，擅长找隐蔽矛盾。",
+      "supports_reasoning_effort": true,
+      "recommended_roles": ["logic_debunker"]
+    },
+    {
+      "id": "deepseek-v3.2",
+      "label": "DeepSeek V3.2",
+      "provider": "openai-compatible",
+      "description": "适合节奏补强、钩子提炼和连载感打磨。",
+      "supports_reasoning_effort": true,
+      "recommended_roles": ["commercial", "stream_writer"]
+    }
+  ],
+  "presets": [
+    {
+      "key": "balanced",
+      "label": "均衡稳稿",
+      "description": "当前推荐组合，优先保证设定稳定、逻辑闭环和终稿一致性。",
+      "routing": {
+        "outline": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "guardian": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "logic_debunker": { "model": "claude-opus-4-6", "reasoning_effort": "high" },
+        "commercial": { "model": "deepseek-v3.2", "reasoning_effort": "medium" },
+        "style_guardian": { "model": "gemini-3.1-pro-preview", "reasoning_effort": "medium" },
+        "anchor": { "model": "gpt-5.4", "reasoning_effort": "medium" },
+        "arbitrator": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "stream_writer": { "model": "gpt-5.4", "reasoning_effort": "medium" }
+      }
+    },
+    {
+      "key": "logic_extreme",
+      "label": "逻辑极限",
+      "description": "适合锁死世界规则、排查长线隐患，优先把漏洞挑干净。",
+      "routing": {
+        "outline": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "guardian": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "logic_debunker": { "model": "claude-opus-4-6", "reasoning_effort": "high" },
+        "commercial": { "model": "gpt-5.4", "reasoning_effort": "medium" },
+        "style_guardian": { "model": "gemini-3.1-pro-preview", "reasoning_effort": "medium" },
+        "anchor": { "model": "gpt-5.4", "reasoning_effort": "medium" },
+        "arbitrator": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "stream_writer": { "model": "gpt-5.4", "reasoning_effort": "medium" }
+      }
+    },
+    {
+      "key": "momentum_hook",
+      "label": "冲榜节奏",
+      "description": "适合连载期追更冲刺，优先提升爽点兑现、章末钩子和推进速度。",
+      "routing": {
+        "outline": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "guardian": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "logic_debunker": { "model": "claude-opus-4-6", "reasoning_effort": "medium" },
+        "commercial": { "model": "deepseek-v3.2", "reasoning_effort": "high" },
+        "style_guardian": { "model": "gemini-3.1-pro-preview", "reasoning_effort": "medium" },
+        "anchor": { "model": "gpt-5.4", "reasoning_effort": "medium" },
+        "arbitrator": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "stream_writer": { "model": "deepseek-v3.2", "reasoning_effort": "medium" }
+      }
+    }
+  ]
+}

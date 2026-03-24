@@ -31,6 +31,27 @@ class TaskPayloadTests(unittest.TestCase):
                     "needs_revision": False,
                     "issues": [{"dimension": "sentence_variation"}],
                 },
+                "canon_report": {
+                    "issue_count": 3,
+                    "blocking_issue_count": 1,
+                    "plugin_breakdown": {
+                        "character": 1,
+                        "timeline": 2,
+                    },
+                    "referenced_entities": [{"label": "林舟"}, {"label": "雾港爆炸"}],
+                },
+                "initial_canon_report": {
+                    "issue_count": 4,
+                    "blocking_issue_count": 2,
+                },
+                "story_bible_integrity_report": {
+                    "issue_count": 2,
+                    "blocking_issue_count": 0,
+                    "plugin_breakdown": {
+                        "relationship": 1,
+                        "item": 1,
+                    },
+                },
                 "revision_plan": {
                     "focus_dimensions": ["ai_taste_score", "plot_tightness"],
                     "priorities": [
@@ -38,6 +59,29 @@ class TaskPayloadTests(unittest.TestCase):
                         {"dimension": "plot_tightness"},
                     ],
                 },
+                "truth_layer_context": {
+                    "status": "blocked",
+                    "blocking_sources": ["canon"],
+                    "chapter_revision_targets": [
+                        {"dimension": "canon.timeline_order"},
+                        {"dimension": "canon.character_introduction"},
+                    ],
+                    "story_bible_followups": [
+                        {"dimension": "canon.relationship_integrity"},
+                    ],
+                },
+                "story_bible_followup_proposals": [
+                    {
+                        "trigger_type": "plot_thread_progressed",
+                        "changed_section": "plot_threads",
+                        "entity_key": "title:雾港爆炸",
+                    },
+                    {
+                        "trigger_type": "timeline_event_occurred",
+                        "changed_section": "timeline_events",
+                        "entity_key": "title:雾港爆炸",
+                    },
+                ],
                 "approval": {
                     "approved": True,
                     "release_recommendation": "可进入 review 阶段",
@@ -99,6 +143,24 @@ class TaskPayloadTests(unittest.TestCase):
         self.assertEqual(payload["final_issue_count"], 1)
         self.assertTrue(payload["initial_needs_revision"])
         self.assertFalse(payload["final_needs_revision"])
+        self.assertEqual(payload["initial_canon_issue_count"], 4)
+        self.assertEqual(payload["initial_canon_blocking_issue_count"], 2)
+        self.assertEqual(payload["integrity_issue_count"], 2)
+        self.assertEqual(payload["integrity_blocking_issue_count"], 0)
+        self.assertEqual(payload["integrity_plugins"], ["item", "relationship"])
+        self.assertEqual(payload["canon_issue_count"], 3)
+        self.assertEqual(payload["canon_blocking_issue_count"], 1)
+        self.assertEqual(payload["canon_plugins"], ["character", "timeline"])
+        self.assertEqual(payload["canon_referenced_entities"], 2)
+        self.assertEqual(payload["truth_layer_status"], "blocked")
+        self.assertEqual(payload["truth_layer_blocking_sources"], ["canon"])
+        self.assertEqual(payload["truth_layer_chapter_target_count"], 2)
+        self.assertEqual(payload["truth_layer_story_bible_followup_count"], 1)
+        self.assertEqual(payload["story_bible_followup_proposal_count"], 2)
+        self.assertEqual(
+            payload["story_bible_followup_trigger_types"],
+            ["plot_thread_progressed", "timeline_event_occurred"],
+        )
         self.assertEqual(payload["revision_plan_steps"], 2)
         self.assertEqual(
             payload["revision_focus_dimensions"],

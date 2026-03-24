@@ -45,6 +45,7 @@ class DebateAgent(BaseAgent):
         chapter_plan: dict[str, Any] = payload["chapter_plan"]
         context_brief: dict[str, Any] = payload["context_brief"]
         current_content: str = payload.get("content", "")
+        truth_layer_context: dict[str, Any] = payload.get("truth_layer_context") or {}
 
         issues = [
             issue
@@ -69,24 +70,27 @@ class DebateAgent(BaseAgent):
             issues=issues,
             chapter_plan=chapter_plan,
             context_brief=context_brief,
+            truth_layer_context=truth_layer_context,
         )
 
-        rounds = self._conduct_debate_rounds(
+        rounds = await self._conduct_debate_rounds(
             issues=issues,
             revision_plan=revision_plan,
             chapter_plan=chapter_plan,
             context_brief=context_brief,
             current_content=current_content,
+            truth_layer_context=truth_layer_context,
         )
 
         final_verdict = self._determine_final_verdict(rounds, review)
 
-        debate_summary = self._build_debate_summary(
+        debate_summary = await self._build_debate_summary(
             review=review,
             revision_plan=revision_plan,
             chapter_plan=chapter_plan,
             rounds=rounds,
             final_verdict=final_verdict,
+            truth_layer_context=truth_layer_context,
         )
 
         return AgentResponse(
@@ -102,13 +106,14 @@ class DebateAgent(BaseAgent):
             reasoning=f"完成 {len(rounds)} 轮辩论，最终判定: {final_verdict}",
         )
 
-    def _conduct_debate_rounds(
+    async def _conduct_debate_rounds(
         self,
         issues: list[dict[str, Any]],
         revision_plan: dict[str, Any],
         chapter_plan: dict[str, Any],
         context_brief: dict[str, Any],
         current_content: str,
+        truth_layer_context: dict[str, Any],
     ) -> list[DebateRound]:
         rounds: list[DebateRound] = []
         remaining_issues = list(issues)
@@ -117,11 +122,12 @@ class DebateAgent(BaseAgent):
         for round_num in range(1, self.max_rounds + 1):
             position = DebatePosition.ARCHITECT if round_num % 2 == 1 else DebatePosition.CRITIC
 
-            round_args = self._generate_debate_arguments(
+            round_args = await self._generate_debate_arguments(
                 issues=remaining_issues,
                 revision_plan=current_revision_plan,
                 chapter_plan=chapter_plan,
                 context_brief=context_brief,
+                truth_layer_context=truth_layer_context,
                 position=position,
                 round_number=round_num,
             )
@@ -163,12 +169,13 @@ class DebateAgent(BaseAgent):
 
         return rounds
 
-    def _generate_debate_arguments(
+    async def _generate_debate_arguments(
         self,
         issues: list[dict[str, Any]],
         revision_plan: dict[str, Any],
         chapter_plan: dict[str, Any],
         context_brief: dict[str, Any],
+        truth_layer_context: dict[str, Any],
         position: DebatePosition,
         round_number: int,
     ) -> str:
@@ -180,6 +187,7 @@ class DebateAgent(BaseAgent):
                 title=title,
                 objective=objective,
                 issues=issues,
+                truth_layer_context=truth_layer_context,
                 round_number=round_number,
             )
         else:
@@ -188,10 +196,11 @@ class DebateAgent(BaseAgent):
                 objective=objective,
                 issues=issues,
                 revision_plan=revision_plan,
+                truth_layer_context=truth_layer_context,
                 round_number=round_number,
             )
 
-        generation = model_gateway.generate_text_sync(
+        generation = await model_gateway.generate_text(
             GenerationRequest(
                 task_name=f"debate.position_{position.value}",
                 prompt=prompt,
@@ -207,12 +216,15 @@ class DebateAgent(BaseAgent):
         title: str,
         objective: str,
         issues: list[dict[str, Any]],
+        truth_layer_context: dict[str, Any],
         round_number: int,
     ) -> str:
         return f"""作为架构师 Agent，你需要为第 {round_number} 轮辩论辩护。
 
 章节：《{title}》
 章节目标：{objective}
+Truth Layer：
+{self._format_truth_layer_context(truth_layer_context)}
 
 需要处理的问题：
 {self._format_issues(issues)}
@@ -228,6 +240,7 @@ class DebateAgent(BaseAgent):
         objective: str,
         issues: list[dict[str, Any]],
         revision_plan: dict[str, Any],
+        truth_layer_context: dict[str, Any],
         round_number: int,
     ) -> str:
         priorities = revision_plan.get("focus_dimensions", [])
@@ -235,6 +248,8 @@ class DebateAgent(BaseAgent):
 
 章节：《{title}》
 章节目标：{objective}
+Truth Layer：
+{self._format_truth_layer_context(truth_layer_context)}
 
 已确定的重点维度：{', '.join(priorities)}
 
@@ -352,13 +367,14 @@ class DebateAgent(BaseAgent):
         updated_plan["last_resolution"] = resolution
         return updated_plan
 
-    def _build_debate_summary(
+    async def _build_debate_summary(
         self,
         review: dict[str, Any],
         revision_plan: dict[str, Any],
         chapter_plan: dict[str, Any],
         rounds: list[DebateRound],
         final_verdict: str,
+        truth_layer_context: dict[str, Any],
     ) -> dict[str, Any]:
         round_summaries = []
         for r in rounds:
@@ -370,13 +386,15 @@ class DebateAgent(BaseAgent):
                 "winner": r.winner.value if r.winner else None,
             })
 
-        generation = model_gateway.generate_text_sync(
+        generation = await model_gateway.generate_text(
             GenerationRequest(
                 task_name="debate.summary",
                 prompt=f"""总结以下辩论回合，为编辑生成一份清晰的修订指南。
 
 章节目标：{chapter_plan.get('objective')}
 最终判定：{final_verdict}
+Truth Layer：
+{self._format_truth_layer_context(truth_layer_context)}
 辩论回合：{round_summaries}
 
 请生成一份简洁的修订指南，包含：
@@ -397,6 +415,8 @@ class DebateAgent(BaseAgent):
             "architect_position": revision_plan.get("architect_position", ""),
             "critic_position": revision_plan.get("critic_position", ""),
             "resolution": revision_plan.get("resolution", ""),
+            "truth_layer_status": truth_layer_context.get("status"),
+            "truth_layer_blocking_sources": truth_layer_context.get("blocking_sources", []),
             "generation": {
                 "provider": getattr(generation, "provider", None),
                 "model": getattr(generation, "model", None),
@@ -431,22 +451,37 @@ class DebateAgent(BaseAgent):
         issues: list[dict[str, Any]],
         chapter_plan: dict[str, Any],
         context_brief: dict[str, Any],
+        truth_layer_context: dict[str, Any],
     ) -> dict[str, Any]:
         title = chapter_plan.get("title") or "当前章节"
         objective = chapter_plan.get("objective") or "推进主线"
         characters = context_brief.get("characters") or ["主角"]
         locations = context_brief.get("locations") or ["当前场景"]
+        chapter_revision_targets = truth_layer_context.get("chapter_revision_targets", [])
+        target_by_dimension = {
+            str(item.get("dimension")): item
+            for item in chapter_revision_targets
+            if isinstance(item, dict) and item.get("dimension")
+        }
 
         priorities: list[dict[str, Any]] = []
         focus_dimensions: list[str] = []
+        seen_dimensions: set[str] = set()
         for issue in issues:
             dimension = str(issue.get("dimension") or "unknown")
+            truth_target = (
+                target_by_dimension.get(dimension)
+                if isinstance(target_by_dimension.get(dimension), dict)
+                else {}
+            )
             focus_dimensions.append(dimension)
+            seen_dimensions.add(dimension)
             priorities.append(
                 {
                     "dimension": dimension,
-                    "severity": issue.get("severity") or "medium",
-                    "problem": issue.get("message") or "",
+                    "severity": truth_target.get("severity") or issue.get("severity") or "medium",
+                    "message": truth_target.get("message") or issue.get("message") or "",
+                    "problem": truth_target.get("message") or issue.get("message") or "",
                     "action": self._recommend_action(
                         dimension=dimension,
                         objective=objective,
@@ -457,6 +492,44 @@ class DebateAgent(BaseAgent):
                         dimension=dimension,
                         objective=objective,
                     ),
+                    "source": truth_target.get("source"),
+                    "action_scope": truth_target.get("action_scope"),
+                    "plugin_key": truth_target.get("plugin_key"),
+                    "code": truth_target.get("code"),
+                    "fix_hint": truth_target.get("fix_hint"),
+                    "entity_labels": truth_target.get("entity_labels", []),
+                }
+            )
+
+        for target in chapter_revision_targets:
+            if not isinstance(target, dict):
+                continue
+            dimension = str(target.get("dimension") or "unknown")
+            if dimension in seen_dimensions:
+                continue
+            focus_dimensions.append(dimension)
+            priorities.append(
+                {
+                    "dimension": dimension,
+                    "severity": target.get("severity") or "medium",
+                    "message": target.get("message") or "",
+                    "problem": target.get("message") or "",
+                    "action": self._recommend_action(
+                        dimension=dimension,
+                        objective=objective,
+                        protagonist=characters[0],
+                        location=locations[0],
+                    ),
+                    "acceptance_criteria": self._acceptance_criteria(
+                        dimension=dimension,
+                        objective=objective,
+                    ),
+                    "source": target.get("source"),
+                    "action_scope": target.get("action_scope"),
+                    "plugin_key": target.get("plugin_key"),
+                    "code": target.get("code"),
+                    "fix_hint": target.get("fix_hint"),
+                    "entity_labels": target.get("entity_labels", []),
                 }
             )
 
@@ -468,16 +541,47 @@ class DebateAgent(BaseAgent):
             ),
         )
         focus_dimensions = list(dict.fromkeys(focus_dimensions))
+        story_bible_followups = truth_layer_context.get("story_bible_followups", [])
 
         return {
             "chapter_title": title,
             "objective": objective,
             "focus_dimensions": focus_dimensions,
             "priorities": ordered_priorities,
+            "truth_layer_status": truth_layer_context.get("status"),
+            "chapter_revision_targets": chapter_revision_targets,
+            "story_bible_followups": story_bible_followups,
             "architect_position": f"优先守住章节目标「{objective}」，不要为修补问题而稀释本章推进。",
             "critic_position": "优先处理会暴露 AI 痕迹、削弱一致性或让情节失焦的问题。",
             "resolution": "先修高严重度问题，再压低 AI 痕迹，最后只做不改变主线的节奏微调。",
         }
+
+    def _format_truth_layer_context(self, truth_layer_context: dict[str, Any]) -> str:
+        if not truth_layer_context:
+            return "No structured truth-layer context."
+
+        status = truth_layer_context.get("status") or "unknown"
+        blocking_sources = truth_layer_context.get("blocking_sources") or []
+        chapter_targets = truth_layer_context.get("chapter_revision_targets") or []
+        story_bible_followups = truth_layer_context.get("story_bible_followups") or []
+
+        chapter_target_text = "；".join(
+            str(item.get("dimension") or item.get("message") or "")
+            for item in chapter_targets[:3]
+            if isinstance(item, dict)
+        ) or "none"
+        followup_text = "；".join(
+            str(item.get("dimension") or item.get("message") or "")
+            for item in story_bible_followups[:3]
+            if isinstance(item, dict)
+        ) or "none"
+
+        return (
+            f"status={status}; "
+            f"blocking_sources={','.join(blocking_sources) if isinstance(blocking_sources, list) and blocking_sources else 'none'}; "
+            f"chapter_targets={chapter_target_text}; "
+            f"story_bible_followups={followup_text}"
+        )
 
     def _recommend_action(
         self,
@@ -487,6 +591,20 @@ class DebateAgent(BaseAgent):
         protagonist: str,
         location: str,
     ) -> str:
+        if dimension.startswith("canon.character"):
+            return f"回到人物规范，校正 {protagonist} 或相关角色的登场顺序、状态与人设连续性。"
+        if dimension.startswith("canon.relationship"):
+            return "核对关系脉络，补足关系转折原因，避免人物之间的状态跳变。"
+        if dimension.startswith("canon.item"):
+            return "校正物品的归属、状态与使用条件，让关键道具的前后文连续。"
+        if dimension.startswith("canon.location"):
+            return f"回扣 {location} 的场景锚点与环境约束，让地点描写贴合既有设定。"
+        if dimension.startswith("canon.world_rule"):
+            return "修正世界规则冲突；若要打破规则，必须把破例条件和代价写清。"
+        if dimension.startswith("canon.timeline"):
+            return "校正时间线顺序，避免未来事件提前发生或被误写成既成事实。"
+        if dimension.startswith("canon.foreshadow"):
+            return "对齐伏笔的埋设与兑现节奏，不要提前泄露或无故拖延既定收束点。"
         mapping = {
             "ai_taste_score": "调整连接词、句长和重复表达，让语言更像人工修稿而不是一次性生成。",
             "plot_tightness": f"补入推动「{objective}」的动作节点，删掉只解释不推进的段落。",
@@ -507,6 +625,20 @@ class DebateAgent(BaseAgent):
         dimension: str,
         objective: str,
     ) -> str:
+        if dimension.startswith("canon.character"):
+            return "人物的登场、身份和当前状态与规范资料一致，不再出现提前登场或生死状态冲突。"
+        if dimension.startswith("canon.relationship"):
+            return "人物关系的方向、强度和阶段与既有脉络一致，转折都能在正文中找到原因。"
+        if dimension.startswith("canon.item"):
+            return "关键物品的归属、可用状态和使用者不再与规范事实冲突。"
+        if dimension.startswith("canon.location"):
+            return "地点描写能回扣既有环境锚点，不再出现违背设定的场景细节。"
+        if dimension.startswith("canon.world_rule"):
+            return "世界规则不再被无解释地打破；若存在破例，文本已明确说明条件与代价。"
+        if dimension.startswith("canon.timeline"):
+            return "事件顺序与章节时间锚点一致，未来事件不再被提前写成既成事实。"
+        if dimension.startswith("canon.foreshadow"):
+            return "伏笔的埋设与兑现节点重新对齐，不再提前泄露或延迟失控。"
         mapping = {
             "ai_taste_score": "删除明显模板化连接词，段落节奏不再整齐到机械。",
             "plot_tightness": f"读完后能明确感到本章把「{objective}」向前推进了一步。",

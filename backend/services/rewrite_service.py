@@ -50,7 +50,12 @@ async def rewrite_chapter_selection(
         learning_snapshot,
     )
     style_guidance = build_style_guidance(style_preferences, learning_snapshot)
-    story_bible = await load_story_bible_context(session, chapter.project_id, user_id)
+    story_bible = await load_story_bible_context(
+        session,
+        chapter.project_id,
+        user_id,
+        branch_id=chapter.branch_id,
+    )
     related_comments = await _load_overlapping_comments(
         session,
         chapter_id=chapter.id,

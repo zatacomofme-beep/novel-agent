@@ -6,14 +6,14 @@ export default function HomePage() {
       <div className="mx-auto flex max-w-5xl flex-col gap-8">
         <section className="rounded-3xl border border-black/10 bg-white/70 p-10 shadow-[0_20px_60px_rgba(16,20,23,0.08)] backdrop-blur">
           <p className="mb-3 text-sm uppercase tracking-[0.25em] text-copper">
-            Long Novel Agent
+            网文创作平台
           </p>
           <h1 className="max-w-3xl text-5xl font-semibold leading-tight">
-            为长篇小说创作搭建的多 Agent 工作台，当前处于基础工程搭建阶段。
+            一套工作台，写完大纲、正文、设定和终稿。
           </h1>
           <p className="mt-6 max-w-2xl text-lg leading-8 text-black/70">
-            当前已进入全量执行模式。下一步将落地数据模型、鉴权、Story Bible、
-            章节生成链路与质量评估体系。
+            这里不需要你理解后台怎么跑。你只管写脑洞、出正文、看优化稿和自动沉淀下来的设定圣经，
+            后台会把长篇创作里最容易崩的人设、剧情、伏笔和连续性收住。
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Link
@@ -32,28 +32,34 @@ export default function HomePage() {
               className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium"
               href="/dashboard"
             >
-              项目仪表板
+              进入项目页
             </Link>
           </div>
         </section>
 
-        <section className="grid gap-4 md:grid-cols-3">
+        <section className="grid gap-4 md:grid-cols-4">
           <div className="rounded-2xl border border-black/10 bg-white/60 p-6">
-            <h2 className="text-xl font-semibold">Phase 0 / 1</h2>
+            <h2 className="text-xl font-semibold">测大纲漏洞</h2>
             <p className="mt-3 text-sm leading-7 text-black/70">
-              执行版 PRD、前后端骨架、Docker、本地开发基础设施。
+              把模糊脑洞压成三级大纲，先把大坑和长线矛盾揪出来。
             </p>
           </div>
           <div className="rounded-2xl border border-black/10 bg-white/60 p-6">
-            <h2 className="text-xl font-semibold">Next Batch</h2>
+            <h2 className="text-xl font-semibold">开始写正文</h2>
             <p className="mt-3 text-sm leading-7 text-black/70">
-              数据模型、Alembic 迁移、认证、项目与 Story Bible API。
+              流式起稿、继续往下写、查人设 bug，全都在同一页完成。
             </p>
           </div>
           <div className="rounded-2xl border border-black/10 bg-white/60 p-6">
-            <h2 className="text-xl font-semibold">Target</h2>
+            <h2 className="text-xl font-semibold">自动记设定</h2>
             <p className="mt-3 text-sm leading-7 text-black/70">
-              打通长篇创作闭环：设定、生成、评估、反思、版本与导出。
+              人物、伏笔、物品、地点、势力、剧情线会自动收进设定圣经。
+            </p>
+          </div>
+          <div className="rounded-2xl border border-black/10 bg-white/60 p-6">
+            <h2 className="text-xl font-semibold">一键收终稿</h2>
+            <p className="mt-3 text-sm leading-7 text-black/70">
+              直接看原稿和优化稿对比，再拿到本章 100-300 字总结和设定更新清单。
             </p>
           </div>
         </section>

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 
 import {
@@ -17,6 +18,7 @@ import { clearAuthSession, loadAuthSession } from "@/lib/auth";
 import type {
   DashboardOverview,
   DashboardProjectQualityTrend,
+  Project,
   User,
 } from "@/types/api";
 
@@ -33,8 +35,8 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
             已评估 {trend.evaluated_chapter_count}/{trend.chapter_count} 章
           </p>
           <p className="mt-1 text-sm text-black/50">
-            角色：{trend.access_role}
-            {trend.owner_email ? ` · Owner ${trend.owner_email}` : ""}
+            当前身份：{trend.access_role}
+            {trend.owner_email ? ` · ${trend.owner_email}` : ""}
           </p>
         </div>
         <span
@@ -54,7 +56,7 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
           <p className="mt-2 text-sm text-black/70">{formatSignedDelta(trend.score_delta)}</p>
         </div>
         <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
-          <p className="text-xs uppercase tracking-[0.16em] text-copper">最新 AI 味</p>
+          <p className="text-xs uppercase tracking-[0.16em] text-copper">机械感</p>
           <p className="mt-2 text-sm text-black/70">{formatAiTaste(trend.latest_ai_taste_score)}</p>
         </div>
         <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
@@ -83,7 +85,7 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
 
       {trend.risk_chapter_numbers.length > 0 ? (
         <p className="mt-4 text-sm leading-7 text-amber-700">
-          风险章节：{trend.risk_chapter_numbers.map((value) => `Ch${value}`).join(" / ")}
+          重点回看章节：{trend.risk_chapter_numbers.map((value) => `Ch${value}`).join(" / ")}
         </p>
       ) : (
         <p className="mt-4 text-sm leading-7 text-emerald-700">
@@ -93,22 +95,10 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
 
       <div className="mt-4 flex flex-wrap gap-2">
         <Link
-          className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-          href={`/dashboard/projects/${trend.project_id}/quality`}
+          className="rounded-2xl border border-black/10 bg-[#f6f0e6] px-3 py-2 text-sm font-medium"
+          href={`/dashboard/projects/${trend.project_id}/story-room`}
         >
-          质量详情
-        </Link>
-        <Link
-          className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-          href={`/dashboard/projects/${trend.project_id}/collaborators`}
-        >
-          协作者
-        </Link>
-        <Link
-          className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-          href={`/dashboard/projects/${trend.project_id}/chapters`}
-        >
-          章节工作区
+          进入故事工作台
         </Link>
       </div>
     </article>
@@ -134,7 +124,33 @@ const preferenceValueLabels: Record<string, string> = {
   immersive: "沉浸细节",
 };
 
+const recentTaskTypeLabels: Record<string, string> = {
+  chapter_generation: "续写下一章",
+  "entity_generation.characters": "补几个人物",
+  "entity_generation.supporting": "补几个配角",
+  "entity_generation.items": "补几件物品",
+  "entity_generation.locations": "补几个地点",
+  "entity_generation.factions": "补一个势力",
+  "entity_generation.plot_threads": "补几条剧情线",
+};
+
+const recentTaskStatusLabels: Record<string, string> = {
+  queued: "排队中",
+  running: "处理中",
+  succeeded: "已完成",
+  failed: "已失败",
+};
+
+function formatRecentTaskType(taskType: string): string {
+  return recentTaskTypeLabels[taskType] ?? taskType.replaceAll(".", " / ");
+}
+
+function formatRecentTaskStatus(status: string): string {
+  return recentTaskStatusLabels[status] ?? status;
+}
+
 export default function DashboardPage() {
+  const router = useRouter();
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [title, setTitle] = useState("");
@@ -176,7 +192,7 @@ export default function DashboardPage() {
     setCreating(true);
     setError(null);
     try {
-      await apiFetchWithAuth("/api/v1/projects", {
+      const createdProject = await apiFetchWithAuth<Project>("/api/v1/projects", {
         method: "POST",
         body: JSON.stringify({
           title,
@@ -186,7 +202,8 @@ export default function DashboardPage() {
       });
       setTitle("");
       setGenre("");
-      await fetchOverview();
+      router.push(`/dashboard/projects/${createdProject.id}/story-room`);
+      router.refresh();
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -225,11 +242,11 @@ export default function DashboardPage() {
       <main className="flex min-h-screen items-center justify-center px-6 py-12">
         <div className="max-w-xl rounded-3xl border border-black/10 bg-white/75 p-8 text-center shadow-[0_18px_60px_rgba(16,20,23,0.08)] backdrop-blur">
           <p className="text-sm uppercase tracking-[0.24em] text-copper">
-            Dashboard
+            项目页
           </p>
           <h1 className="mt-3 text-3xl font-semibold">尚未登录</h1>
           <p className="mt-4 text-sm leading-7 text-black/65">
-            高级工作台已经接入聚合概览、项目摘要和风格偏好入口，先登录或注册后再进入创作空间。
+            登录后就能进入项目页，继续写正文、看终稿对比和自动沉淀设定。
           </p>
           <div className="mt-6 flex justify-center gap-3">
             <Link
@@ -261,22 +278,16 @@ export default function DashboardPage() {
         <section className="flex flex-col gap-4 rounded-3xl border border-black/10 bg-white/75 p-8 shadow-[0_18px_60px_rgba(16,20,23,0.08)] backdrop-blur md:flex-row md:items-end md:justify-between">
           <div>
             <p className="text-sm uppercase tracking-[0.24em] text-copper">
-              Advanced Workspace
+              项目页
             </p>
             <h1 className="mt-3 text-4xl font-semibold">项目工作台</h1>
             <p className="mt-3 text-sm leading-7 text-black/65">
               当前登录用户：{currentUser.email}
               {" "}
-              这一页现在聚合项目态势、最近任务和风格偏好，作为 Phase 10/11 的总控入口。
+              这一页只负责三件事：开新项目、看最近进度、回到正在写的故事工作台。
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
-            <Link
-              className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium"
-              href="/dashboard/preferences"
-            >
-              风格偏好
-            </Link>
             <button
               className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium"
               onClick={handleLogout}
@@ -311,11 +322,11 @@ export default function DashboardPage() {
             <p className="mt-3 text-3xl font-semibold">{overview?.active_task_count ?? 0}</p>
           </article>
           <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-            <p className="text-sm text-black/55">可进 Review</p>
+            <p className="text-sm text-black/55">待收口章节</p>
             <p className="mt-3 text-3xl font-semibold">{overview?.review_ready_chapters ?? 0}</p>
           </article>
           <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-            <p className="text-sm text-black/55">平均 AI 味</p>
+            <p className="text-sm text-black/55">平均机械感</p>
             <p className="mt-3 text-3xl font-semibold">
               {formatAiTaste(overview?.average_ai_taste_score ?? null)}
             </p>
@@ -325,9 +336,9 @@ export default function DashboardPage() {
         <section className="rounded-3xl border border-black/10 bg-white/75 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <h2 className="text-xl font-semibold">项目质量趋势</h2>
+              <h2 className="text-xl font-semibold">最近写作走势</h2>
               <p className="mt-2 text-sm leading-7 text-black/65">
-                这里按章节顺序显示最近质量轨迹，用当前章节评分快照判断项目是在抬升、走低还是持平。
+                这里按章节顺序展示最近的写作走势，方便你快速判断哪本书在抬升、哪本书需要回头补修。
               </p>
             </div>
             <button
@@ -364,7 +375,7 @@ export default function DashboardPage() {
             >
               <h2 className="text-xl font-semibold">创建项目</h2>
               <p className="mt-2 text-sm leading-7 text-black/65">
-                工作台已进入总览阶段，但项目创建仍然是后续所有 Story Bible、章节和生成链路的起点。
+                新建项目后会直接进入故事工作台，从脑洞压大纲、正文创作到设定沉淀都在同一处完成。
               </p>
 
               <div className="mt-6 flex flex-col gap-4">
@@ -401,22 +412,16 @@ export default function DashboardPage() {
             <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h2 className="text-xl font-semibold">风格偏好</h2>
+                  <h2 className="text-xl font-semibold">系统记住的写法</h2>
                   <p className="mt-2 text-sm leading-7 text-black/65">
-                    这些偏好会进入 architect / writer / editor 的生成输入，不只是展示。
+                    这里显示系统已经学到的写作倾向。它会自动影响后续起稿和优化，你不用再单独切出去配置。
                   </p>
                 </div>
-                <Link
-                  className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-                  href="/dashboard/preferences"
-                >
-                  编辑
-                </Link>
               </div>
 
               {!preferenceProfile ? (
                 <p className="mt-4 text-sm text-black/60">
-                  偏好配置加载中...
+                  正在整理你的写作习惯...
                 </p>
               ) : (
                 <>
@@ -426,11 +431,11 @@ export default function DashboardPage() {
                     </span>
                     {preferenceProfile.active_template ? (
                       <span className="rounded-full border border-copper/20 bg-[#f6ede3] px-3 py-1 text-xs text-copper">
-                        模板 {preferenceProfile.active_template.name}
+                        风格底稿 {preferenceProfile.active_template.name}
                       </span>
                     ) : null}
                     <span className="rounded-full border border-copper/20 bg-[#f6ede3] px-3 py-1 text-xs text-copper">
-                      学习观察 {preferenceProfile.learning_snapshot.observation_count}
+                      已观察 {preferenceProfile.learning_snapshot.observation_count} 次
                     </span>
                     <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/65">
                       文风 {preferenceValueLabels[preferenceProfile.prose_style] ?? preferenceProfile.prose_style}
@@ -451,13 +456,13 @@ export default function DashboardPage() {
 
                   {preferenceProfile.learning_snapshot.summary ? (
                     <p className="mt-3 text-sm leading-7 text-black/70">
-                      学习信号：{preferenceProfile.learning_snapshot.summary}
+                      当前判断：{preferenceProfile.learning_snapshot.summary}
                     </p>
                   ) : null}
 
                   {preferenceProfile.active_template ? (
                     <p className="mt-3 text-sm leading-7 text-black/70">
-                      当前模板：{preferenceProfile.active_template.name} / {preferenceProfile.active_template.tagline}
+                      当前风格底稿：{preferenceProfile.active_template.name} / {preferenceProfile.active_template.tagline}
                     </p>
                   ) : null}
 
@@ -467,7 +472,7 @@ export default function DashboardPage() {
                     </p>
                   ) : (
                     <p className="mt-3 text-sm leading-7 text-black/55">
-                      还没有额外风格备注，当前仍以系统默认风格指导生成。
+                      还没有额外风格备注，系统会先按当前已观察到的写法来收束文风。
                     </p>
                   )}
                 </>
@@ -505,14 +510,14 @@ export default function DashboardPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                          {task.task_type}
+                          {formatRecentTaskType(task.task_type)}
                         </p>
                         <p className="mt-2 text-sm leading-7 text-black/75">
                           {task.message ?? "No task message"}
                         </p>
                       </div>
                       <div className="text-right text-xs text-black/50">
-                        <p>{task.status}</p>
+                        <p>{formatRecentTaskStatus(task.status)}</p>
                         <p className="mt-1">{task.progress}%</p>
                       </div>
                     </div>
@@ -571,12 +576,12 @@ export default function DashboardPage() {
                         更新：{formatDateTime(project.updated_at)}
                       </p>
                       <p className="mt-1 text-sm text-black/45">
-                        Owner：{project.owner_email ?? "当前账号"}
+                        主理人：{project.owner_email ?? "当前账号"}
                       </p>
                     </div>
                     <div className="flex flex-wrap justify-end gap-2">
                       <span className="rounded-full bg-paper px-3 py-1 text-xs uppercase tracking-[0.18em] text-copper">
-                        chapters {project.chapter_count}
+                        章节 {project.chapter_count}
                       </span>
                       <span
                         className={`rounded-full border px-3 py-1 text-xs ${trendDirectionClassName(project.trend_direction)}`}
@@ -587,10 +592,10 @@ export default function DashboardPage() {
                         {project.access_role}
                       </span>
                       <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
-                        review {project.review_ready_chapters}
+                        待收口 {project.review_ready_chapters}
                       </span>
                       <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
-                        risk {project.risk_chapter_count}
+                        待回看 {project.risk_chapter_count}
                       </span>
                     </div>
                   </div>
@@ -624,7 +629,7 @@ export default function DashboardPage() {
                     </div>
                     <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
                       <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                        平均 AI 味
+                        平均机械感
                       </p>
                       <p className="mt-2 text-sm text-black/70">
                         {formatAiTaste(project.average_ai_taste_score)}
@@ -654,28 +659,10 @@ export default function DashboardPage() {
 
                   <div className="mt-4 flex flex-wrap gap-2">
                     <Link
-                      className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-                      href={`/dashboard/projects/${project.project_id}/quality`}
+                      className="rounded-2xl border border-black/10 bg-[#f6f0e6] px-3 py-2 text-sm font-medium"
+                      href={`/dashboard/projects/${project.project_id}/story-room`}
                     >
-                      质量详情
-                    </Link>
-                    <Link
-                      className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-                      href={`/dashboard/projects/${project.project_id}/collaborators`}
-                    >
-                      协作者
-                    </Link>
-                    <Link
-                      className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-                      href={`/dashboard/projects/${project.project_id}/bible`}
-                    >
-                      Story Bible
-                    </Link>
-                    <Link
-                      className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-                      href={`/dashboard/projects/${project.project_id}/chapters`}
-                    >
-                      章节工作区
+                      进入故事工作台
                     </Link>
                     <button
                       className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"

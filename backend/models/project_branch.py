@@ -34,7 +34,17 @@ class ProjectBranch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped["Project"] = relationship(back_populates="branches")
-    source_branch: Mapped["ProjectBranch | None"] = relationship(
+    source_branch: Mapped[Optional["ProjectBranch"]] = relationship(
         remote_side="ProjectBranch.id",
     )
     chapters: Mapped[list["Chapter"]] = relationship(back_populates="branch")
+    story_bible_versions: Mapped[list["StoryBibleVersion"]] = relationship(
+        back_populates="branch",
+        cascade="all, delete-orphan",
+        order_by="StoryBibleVersion.version_number.desc()",
+    )
+    story_bible_pending_changes: Mapped[list["StoryBiblePendingChange"]] = relationship(
+        back_populates="branch",
+        cascade="all, delete-orphan",
+        order_by="StoryBiblePendingChange.created_at.desc()",
+    )

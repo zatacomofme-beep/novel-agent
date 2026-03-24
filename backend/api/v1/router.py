@@ -6,6 +6,7 @@ from api.v1.dashboard import router as dashboard_router
 from api.v1.evaluation import router as evaluation_router
 from api.v1.profile import router as profile_router
 from api.v1.projects import router as projects_router
+from api.v1.story_engine import router as story_engine_router
 from api.v1.tasks import router as tasks_router
 
 
@@ -17,3 +18,4 @@ api_router.include_router(projects_router, prefix="/projects", tags=["projects"]
 api_router.include_router(chapters_router, tags=["chapters"])
 api_router.include_router(evaluation_router, tags=["evaluation"])
 api_router.include_router(tasks_router, tags=["tasks"])
+api_router.include_router(story_engine_router, tags=["story-engine"])

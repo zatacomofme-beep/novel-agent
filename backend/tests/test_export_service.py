@@ -176,6 +176,90 @@ def make_checkpointed_chapter():
     )
 
 
+def make_canon_blocked_chapter():
+    return SimpleNamespace(
+        chapter_number=4,
+        title="Canon Blocked",
+        status="review",
+        word_count=1800,
+        content="Continuity risk scene.",
+        outline={"objective": "Keep the canon stable"},
+        quality_metrics={
+            "evaluation_status": "fresh",
+            "canon_issue_count": 2,
+            "canon_blocking_issue_count": 1,
+            "canon_summary": "Canon 校验发现 2 个问题，其中 1 个会阻断后续修订判断。",
+        },
+        checkpoints=[],
+        review_decisions=[],
+    )
+
+
+def make_integrity_blocked_chapter():
+    return SimpleNamespace(
+        chapter_number=4,
+        title="Integrity Blocked",
+        status="review",
+        word_count=1800,
+        content="Truth layer risk scene.",
+        outline={"objective": "Repair the truth layer"},
+        quality_metrics={
+            "evaluation_status": "fresh",
+            "story_bible_integrity_issue_count": 3,
+            "story_bible_integrity_blocking_issue_count": 2,
+            "story_bible_integrity_summary": (
+                "Story Bible 自校验发现 3 个问题，其中 2 个会阻断后续章节校验。"
+            ),
+        },
+        checkpoints=[],
+        review_decisions=[],
+    )
+
+
+def make_evaluation_blocked_chapter():
+    return SimpleNamespace(
+        chapter_number=5,
+        title="Needs Recheck",
+        status="review",
+        word_count=1500,
+        content="Recently edited scene.",
+        outline={"objective": "Preserve continuity"},
+        quality_metrics={
+            "evaluation_status": "stale",
+            "evaluation_stale_reason": "The chapter content changed after the latest evaluation.",
+        },
+        checkpoints=[],
+        review_decisions=[],
+    )
+
+
+def make_checkpoint_stale_chapter():
+    now = datetime.now(timezone.utc)
+    return SimpleNamespace(
+        chapter_number=6,
+        title="Checkpoint Recheck",
+        status="review",
+        word_count=1500,
+        content="Recheck this scene.",
+        outline={"objective": "Reconfirm the turn"},
+        current_version_number=4,
+        quality_metrics={
+            "evaluation_status": "fresh",
+        },
+        checkpoints=[
+            SimpleNamespace(
+                status="approved",
+                title="Story turn gate",
+                checkpoint_type="story_turn",
+                chapter_version_number=3,
+                decision_note="旧版本已通过。",
+                created_at=now,
+            )
+        ],
+        review_decisions=[],
+    )
+
+
 class ExportServiceTests(unittest.TestCase):
     def test_render_project_markdown_contains_story_bible_and_sorted_chapters(self) -> None:
         project = make_project()
@@ -186,6 +270,30 @@ class ExportServiceTests(unittest.TestCase):
         self.assertIn("## Story Bible", content)
         self.assertIn("### Characters", content)
         self.assertLess(content.index("### Chapter 1: Departure"), content.index("### Chapter 2: Fog Harbor"))
+
+    def test_render_project_markdown_splits_virtual_item_and_faction_sections(self) -> None:
+        project = make_project()
+        project.world_settings = [
+            SimpleNamespace(title="Moon Oath", key="rule-1", data={"cost": "memory"}),
+            SimpleNamespace(
+                title="Tide Lamp",
+                key="item:tide-lamp",
+                data={"entity_type": "item", "name": "Tide Lamp"},
+            ),
+            SimpleNamespace(
+                title="Bell Keepers",
+                key="faction:bell-keepers",
+                data={"entity_type": "faction", "name": "Bell Keepers"},
+            ),
+        ]
+
+        content = render_project_export(project=project, export_format="md")
+
+        self.assertIn("### Items", content)
+        self.assertIn("### Factions", content)
+        self.assertIn("- Tide Lamp", content)
+        self.assertIn("- Bell Keepers", content)
+        self.assertEqual(content.count("- Moon Oath"), 1)
 
     def test_render_chapter_text_contains_outline_and_content(self) -> None:
         chapter = make_project().chapters[0]
@@ -284,3 +392,56 @@ class ExportServiceTests(unittest.TestCase):
         self.assertIn("LATEST REVIEW VERDICT: changes_requested", content)
         self.assertIn("CHECKPOINTS:", content)
         self.assertIn("[pending] | Plot twist gate | TYPE=story_turn", content)
+
+    def test_render_chapter_export_includes_canon_gate_summary(self) -> None:
+        chapter = make_canon_blocked_chapter()
+
+        content = render_chapter_export(
+            project_title="Star Harbor",
+            chapter=chapter,
+            export_format="txt",
+        )
+
+        self.assertIn("FINAL GATE: blocked_canon", content)
+        self.assertIn("GATE REASON:", content)
+        self.assertIn("blocking continuity issue", content)
+
+    def test_render_chapter_export_includes_integrity_gate_summary(self) -> None:
+        chapter = make_integrity_blocked_chapter()
+
+        content = render_chapter_export(
+            project_title="Star Harbor",
+            chapter=chapter,
+            export_format="txt",
+        )
+
+        self.assertIn("FINAL GATE: blocked_integrity", content)
+        self.assertIn("GATE REASON:", content)
+        self.assertIn("truth-layer issues", content)
+
+    def test_render_chapter_export_includes_evaluation_gate_summary(self) -> None:
+        chapter = make_evaluation_blocked_chapter()
+
+        content = render_chapter_export(
+            project_title="Star Harbor",
+            chapter=chapter,
+            export_format="txt",
+        )
+
+        self.assertIn("FINAL GATE: blocked_evaluation", content)
+        self.assertIn("GATE REASON:", content)
+        self.assertIn("outdated", content)
+
+    def test_render_chapter_export_includes_checkpoint_recheck_summary(self) -> None:
+        chapter = make_checkpoint_stale_chapter()
+
+        content = render_chapter_export(
+            project_title="Star Harbor",
+            chapter=chapter,
+            export_format="txt",
+        )
+
+        self.assertIn("FINAL GATE: blocked_checkpoint", content)
+        self.assertIn("GATE REASON:", content)
+        self.assertIn("version 3", content)
+        self.assertIn("version 4", content)

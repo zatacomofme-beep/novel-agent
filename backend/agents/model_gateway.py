@@ -12,6 +12,8 @@ class GenerationRequest:
     task_name: str
     prompt: str
     system_prompt: Optional[str] = None
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 1200
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -52,13 +54,15 @@ class ModelGateway:
     def __init__(self) -> None:
         settings = get_settings()
         self.default_model = settings.default_model
+        self.gateway_api_key = settings.model_gateway_api_key or settings.openai_api_key
+        self.gateway_base_url = settings.model_gateway_base_url
         self.openai_api_key = settings.openai_api_key
         self.anthropic_api_key = settings.anthropic_api_key
         self.request_timeout_seconds = settings.model_request_timeout_seconds
         self.max_retries = settings.model_max_retries
 
     def is_remote_available(self) -> bool:
-        return bool(self.openai_api_key or self.anthropic_api_key)
+        return bool(self.gateway_api_key or self.openai_api_key or self.anthropic_api_key)
 
     async def generate_text(
         self,
@@ -67,7 +71,7 @@ class ModelGateway:
         fallback: Callable[[], str],
     ) -> GenerationResult:
         remote_error: Optional[GenerationErrorInfo] = None
-        selected_provider = self._select_provider()
+        selected_provider = self._select_provider_compat(request)
         if self.is_remote_available():
             remote_result, remote_error = await self._try_remote_generation(request)
             if remote_result is not None:
@@ -94,11 +98,41 @@ class ModelGateway:
             metadata=metadata,
         )
 
+    async def generate_text_async(
+        self,
+        request: GenerationRequest,
+        *,
+        fallback: Callable[[], str],
+    ) -> GenerationResult:
+        return await self.generate_text(request, fallback=fallback)
+
+    def generate_text_sync(
+        self,
+        request: GenerationRequest,
+        *,
+        fallback: Callable[[], str],
+    ) -> GenerationResult:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is None:
+            return asyncio.run(self.generate_text(request, fallback=fallback))
+
+        import concurrent.futures
+
+        def _run_in_worker() -> GenerationResult:
+            return asyncio.run(self.generate_text(request, fallback=fallback))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_run_in_worker).result()
+
     async def _try_remote_generation(
         self,
         request: GenerationRequest,
     ) -> tuple[Optional[GenerationResult], Optional[GenerationErrorInfo]]:
-        provider = self._select_provider()
+        provider = self._select_provider_compat(request)
         if provider is None:
             return None, None
 
@@ -107,8 +141,8 @@ class ModelGateway:
             try:
                 if provider == "anthropic":
                     result = await self._generate_with_anthropic(request)
-                elif provider == "openai":
-                    result = await self._generate_with_openai(request)
+                elif provider == "openai-compatible":
+                    result = await self._generate_with_openai_compatible(request)
                 else:
                     result = None
                 if result is not None:
@@ -138,11 +172,12 @@ class ModelGateway:
             return False
         return "claude" in self.default_model.lower()
 
-    def _select_provider(self) -> Optional[str]:
-        if self._should_use_anthropic():
+    def _select_provider(self, request: Optional[GenerationRequest] = None) -> Optional[str]:
+        requested_model = self._resolve_model(request).lower()
+        if self.gateway_api_key or self.openai_api_key:
+            return "openai-compatible"
+        if "claude" in requested_model and self.anthropic_api_key:
             return "anthropic"
-        if self.openai_api_key:
-            return "openai"
         if self.anthropic_api_key:
             return "anthropic"
         return None
@@ -150,8 +185,24 @@ class ModelGateway:
     def _base_metadata(self, request: GenerationRequest) -> dict[str, Any]:
         return {
             "task_name": request.task_name,
+            "requested_model": self._resolve_model(request),
             **request.metadata,
         }
+
+    def _resolve_model(self, request: Optional[GenerationRequest]) -> str:
+        if request is None:
+            return self.default_model
+        return request.model or self.default_model
+
+    def _select_provider_compat(
+        self,
+        request: Optional[GenerationRequest] = None,
+    ) -> Optional[str]:
+        try:
+            return self._select_provider(request)
+        except TypeError:
+            # 兼容旧测试中把 _select_provider monkeypatch 成无参 lambda 的写法。
+            return self._select_provider()  # type: ignore[misc]
 
     def _classify_remote_error(
         self,
@@ -245,32 +296,123 @@ class ModelGateway:
             status_code=status_code,
         )
 
-    async def _generate_with_openai(
+    async def _generate_with_openai_compatible(
         self,
         request: GenerationRequest,
     ) -> GenerationResult:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
-        response = await asyncio.wait_for(
-            client.responses.create(
-                model=self.default_model,
-                instructions=request.system_prompt,
-                input=request.prompt,
-                temperature=request.temperature,
-                max_output_tokens=request.max_tokens,
-            ),
-            timeout=self.request_timeout_seconds,
-        )
-        content = getattr(response, "output_text", "") or ""
-        if not content:
-            raise RuntimeError("OpenAI returned empty output_text.")
+        client_kwargs: dict[str, Any] = {
+            "api_key": self.gateway_api_key or self.openai_api_key,
+            "max_retries": 0,
+            "timeout": self.request_timeout_seconds,
+        }
+        if self.gateway_base_url:
+            client_kwargs["base_url"] = self.gateway_base_url
+        client = AsyncOpenAI(**client_kwargs)
+        api_mode = self._resolve_openai_compatible_api_mode(request)
+
+        if api_mode == "chat_completions":
+            request_kwargs: dict[str, Any] = {
+                "model": self._resolve_model(request),
+                "messages": self._build_chat_messages(request),
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+            }
+            if request.reasoning_effort and self._supports_chat_reasoning_effort(request):
+                # 云雾的 chat 兼容格式支持直接携带 reasoning_effort。
+                request_kwargs["reasoning_effort"] = request.reasoning_effort
+            response = await asyncio.wait_for(
+                client.chat.completions.create(**request_kwargs),
+                timeout=self.request_timeout_seconds,
+            )
+            content = self._extract_chat_completion_text(response)
+            if not content:
+                raise RuntimeError("OpenAI-compatible chat provider returned empty content.")
+        else:
+            request_kwargs = {
+                "model": self._resolve_model(request),
+                "instructions": request.system_prompt,
+                "input": request.prompt,
+                "temperature": request.temperature,
+                "max_output_tokens": request.max_tokens,
+            }
+            if request.reasoning_effort:
+                request_kwargs["reasoning"] = {"effort": request.reasoning_effort}
+            response = await asyncio.wait_for(
+                client.responses.create(**request_kwargs),
+                timeout=self.request_timeout_seconds,
+            )
+            content = getattr(response, "output_text", "") or ""
+            if not content:
+                raise RuntimeError("OpenAI-compatible provider returned empty output_text.")
         return GenerationResult(
             content=content,
-            provider="openai",
-            model=self.default_model,
-            metadata={},
+            provider="openai-compatible",
+            model=self._resolve_model(request),
+            metadata={
+                "base_url": self.gateway_base_url,
+                "api_mode": api_mode,
+            },
         )
+
+    def _resolve_openai_compatible_api_mode(
+        self,
+        request: Optional[GenerationRequest] = None,
+    ) -> str:
+        model_name = self._resolve_model(request).lower()
+        if any(token in model_name for token in ("gemini", "claude", "deepseek")):
+            return "chat_completions"
+        return "responses"
+
+    def _build_chat_messages(
+        self,
+        request: GenerationRequest,
+    ) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        if request.system_prompt:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": request.system_prompt,
+                }
+            )
+        messages.append(
+            {
+                "role": "user",
+                "content": request.prompt,
+            }
+        )
+        return messages
+
+    def _supports_chat_reasoning_effort(
+        self,
+        request: Optional[GenerationRequest] = None,
+    ) -> bool:
+        model_name = self._resolve_model(request).lower()
+        if "claude" in model_name:
+            return False
+        return True
+
+    def _extract_chat_completion_text(self, response: Any) -> str:
+        choices = getattr(response, "choices", None) or []
+        for choice in choices:
+            message = getattr(choice, "message", None)
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                    else:
+                        text = getattr(item, "text", None)
+                    if text:
+                        parts.append(str(text))
+                if parts:
+                    return "".join(parts).strip()
+        return ""
 
     async def _generate_with_anthropic(
         self,
@@ -281,7 +423,7 @@ class ModelGateway:
         client = AsyncAnthropic(api_key=self.anthropic_api_key)
         response = await asyncio.wait_for(
             client.messages.create(
-                model=self.default_model,
+                model=self._resolve_model(request),
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 system=request.system_prompt or "",
@@ -305,7 +447,7 @@ class ModelGateway:
         return GenerationResult(
             content=content,
             provider="anthropic",
-            model=self.default_model,
+            model=self._resolve_model(request),
             metadata={},
         )
 

@@ -1,0 +1,523 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any, Optional, Type
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ValidationError
+
+from db.session import AsyncSessionLocal
+from schemas.project import (
+    CharacterGenerationRequest,
+    FactionGenerationRequest,
+    ItemGenerationRequest,
+    LocationGenerationRequest,
+    PlotThreadGenerationRequest,
+)
+from services.entity_generation_service import (
+    generate_characters,
+    generate_factions,
+    generate_items,
+    generate_locations,
+    generate_plot_threads,
+)
+from services.task_service import (
+    create_task_event,
+    create_task_run,
+    get_task_run_by_task_id,
+    update_task_run,
+)
+from tasks.celery_app import celery_app
+from tasks.schemas import TaskState
+from tasks.state_store import task_state_store
+
+
+@dataclass(frozen=True)
+class EntityGenerationConfig:
+    generation_type: str
+    task_type: str
+    result_key: str
+    request_model: Type[BaseModel]
+    generator_name: str
+    display_label: str
+
+
+ENTITY_GENERATION_CONFIGS: dict[str, EntityGenerationConfig] = {
+    "characters": EntityGenerationConfig(
+        generation_type="characters",
+        task_type="entity_generation.characters",
+        result_key="characters",
+        request_model=CharacterGenerationRequest,
+        generator_name="generate_characters",
+        display_label="人物候选",
+    ),
+    "supporting": EntityGenerationConfig(
+        generation_type="supporting",
+        task_type="entity_generation.supporting",
+        result_key="characters",
+        request_model=CharacterGenerationRequest,
+        generator_name="generate_characters",
+        display_label="配角候选",
+    ),
+    "items": EntityGenerationConfig(
+        generation_type="items",
+        task_type="entity_generation.items",
+        result_key="items",
+        request_model=ItemGenerationRequest,
+        generator_name="generate_items",
+        display_label="物品候选",
+    ),
+    "locations": EntityGenerationConfig(
+        generation_type="locations",
+        task_type="entity_generation.locations",
+        result_key="locations",
+        request_model=LocationGenerationRequest,
+        generator_name="generate_locations",
+        display_label="地点候选",
+    ),
+    "factions": EntityGenerationConfig(
+        generation_type="factions",
+        task_type="entity_generation.factions",
+        result_key="factions",
+        request_model=FactionGenerationRequest,
+        generator_name="generate_factions",
+        display_label="势力候选",
+    ),
+    "plot_threads": EntityGenerationConfig(
+        generation_type="plot_threads",
+        task_type="entity_generation.plot_threads",
+        result_key="plot_threads",
+        request_model=PlotThreadGenerationRequest,
+        generator_name="generate_plot_threads",
+        display_label="剧情线候选",
+    ),
+}
+
+
+async def enqueue_entity_generation_task(
+    project_id: str,
+    user_id: str,
+    generation_type: str,
+    payload: dict[str, Any],
+) -> TaskState:
+    config = _get_entity_generation_config(generation_type)
+    task_state = TaskState(
+        task_id=str(uuid4()),
+        task_type=config.task_type,
+        status="queued",
+        progress=0,
+        message=f"已进入队列，准备补一批{config.display_label}。",
+        result={
+            "project_id": project_id,
+            "user_id": user_id,
+            "generation_type": generation_type,
+            "request_payload": payload,
+        },
+    )
+    task_state_store.set(task_state)
+    async with AsyncSessionLocal() as session:
+        await create_task_run(
+            session,
+            task_state=task_state,
+            project_id=UUID(project_id),
+            user_id=UUID(user_id),
+            commit=False,
+        )
+        await create_task_event(
+            session,
+            task_state=task_state,
+            event_type="queued",
+            payload={
+                "phase": "enqueue",
+                "generation_type": generation_type,
+                "request_payload": payload,
+            },
+            project_id=UUID(project_id),
+            user_id=UUID(user_id),
+            commit=False,
+        )
+        await session.commit()
+    return task_state
+
+
+def mark_task_dispatched(
+    task_id: str,
+    *,
+    message: str,
+    result_patch: Optional[dict[str, Any]] = None,
+) -> TaskState:
+    state = _require_task(task_id)
+    state.message = message
+    state.progress = max(state.progress, 5)
+    if result_patch:
+        next_result = dict(state.result or {})
+        next_result.update(result_patch)
+        state.result = next_result
+    return task_state_store.set(state)
+
+
+def mark_task_running(task_id: str, message: str) -> TaskState:
+    state = _require_task(task_id)
+    state.status = "running"
+    state.message = message
+    state.progress = max(state.progress, 10)
+    return task_state_store.set(state)
+
+
+def mark_task_progress(
+    task_id: str,
+    *,
+    progress: int,
+    message: str,
+    result_patch: Optional[dict[str, Any]] = None,
+) -> TaskState:
+    state = _require_task(task_id)
+    state.progress = progress
+    state.message = message
+    if result_patch:
+        next_result = dict(state.result or {})
+        next_result.update(result_patch)
+        state.result = next_result
+    return task_state_store.set(state)
+
+
+def mark_task_failed(
+    task_id: str,
+    error: str,
+    *,
+    result_patch: Optional[dict[str, Any]] = None,
+) -> TaskState:
+    state = _require_task(task_id)
+    state.status = "failed"
+    state.error = error
+    state.message = "这轮补设定没跑通。"
+    if result_patch:
+        next_result = dict(state.result or {})
+        next_result.update(result_patch)
+        state.result = next_result
+    return task_state_store.set(state)
+
+
+def mark_task_succeeded(task_id: str, result: dict[str, Any], message: str) -> TaskState:
+    state = _require_task(task_id)
+    state.status = "succeeded"
+    state.progress = 100
+    state.message = message
+    state.result = result
+    state.error = None
+    return task_state_store.set(state)
+
+
+async def process_entity_generation_task(
+    *,
+    task_id: str,
+    project_id: str,
+    user_id: str,
+    generation_type: str,
+) -> TaskState:
+    config = _get_entity_generation_config(generation_type)
+    state = await hydrate_task_state(task_id)
+    state = mark_task_running(task_id, f"正在读取现有设定，准备补{config.display_label}。")
+    await persist_task_state(
+        state,
+        project_id=project_id,
+        user_id=user_id,
+        event_type="started",
+        event_payload={
+            "phase": "bootstrap",
+            "generation_type": generation_type,
+        },
+    )
+    state = mark_task_progress(
+        task_id,
+        progress=25,
+        message="已整理当前项目的设定上下文。",
+    )
+    await persist_task_state(
+        state,
+        project_id=project_id,
+        user_id=user_id,
+        event_type="context_loaded",
+        event_payload={
+            "phase": "context",
+            "generation_type": generation_type,
+        },
+    )
+
+    payload_data = dict((state.result or {}).get("request_payload") or {})
+
+    try:
+        request_payload = config.request_model.model_validate(payload_data)
+    except ValidationError as exc:
+        state = mark_task_failed(
+            task_id,
+            "生成参数不完整，暂时没法继续补设定。",
+            result_patch={
+                "generation_type": generation_type,
+                "validation_error": exc.errors(),
+            },
+        )
+        await persist_task_state(
+            state,
+            project_id=project_id,
+            user_id=user_id,
+            event_type="failed",
+            event_payload={
+                "phase": "payload_validation",
+                "generation_type": generation_type,
+                "error_type": exc.__class__.__name__,
+            },
+        )
+        return state
+
+    state = mark_task_progress(
+        task_id,
+        progress=55,
+        message=f"正在生成{config.display_label}。",
+    )
+    await persist_task_state(
+        state,
+        project_id=project_id,
+        user_id=user_id,
+        event_type="generation_started",
+        event_payload={
+            "phase": "generation",
+            "generation_type": generation_type,
+        },
+    )
+
+    async with AsyncSessionLocal() as session:
+        try:
+            generator = _resolve_generator(config)
+            response_model = await generator(
+                session,
+                UUID(project_id),
+                UUID(user_id),
+                request_payload,
+            )
+        except Exception as exc:  # pragma: no cover - 运行时仍需要保留失败分支
+            state = mark_task_failed(
+                task_id,
+                str(exc),
+                result_patch={
+                    "generation_type": generation_type,
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+            await persist_task_state(
+                state,
+                project_id=project_id,
+                user_id=user_id,
+                event_type="failed",
+                event_payload={
+                    "phase": "generation",
+                    "generation_type": generation_type,
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+            return state
+
+    response_payload = response_model.model_dump(mode="json")
+    candidates = list(response_payload.get(config.result_key) or [])
+    result = {
+        "project_id": project_id,
+        "user_id": user_id,
+        "generation_type": generation_type,
+        "request_payload": request_payload.model_dump(mode="json"),
+        config.result_key: candidates,
+        "candidate_count": len(candidates),
+        "entity_preview": _collect_entity_preview(candidates),
+    }
+
+    state = mark_task_progress(
+        task_id,
+        progress=85,
+        message=f"已整理出 {len(candidates)} 条{config.display_label}，准备回传。",
+        result_patch=result,
+    )
+    await persist_task_state(
+        state,
+        project_id=project_id,
+        user_id=user_id,
+        event_type="outputs_ready",
+        event_payload=_build_result_event_payload(result),
+    )
+
+    state = mark_task_succeeded(
+        task_id,
+        result,
+        f"{config.display_label}已经整理好了。",
+    )
+    await persist_task_state(
+        state,
+        project_id=project_id,
+        user_id=user_id,
+        event_type="succeeded",
+        event_payload=_build_result_event_payload(result),
+    )
+    return state
+
+
+async def dispatch_entity_generation_task(
+    *,
+    task_id: str,
+    project_id: str,
+    user_id: str,
+    generation_type: str,
+) -> TaskState:
+    try:
+        process_entity_generation_task_celery.apply_async(
+            kwargs={
+                "task_id": task_id,
+                "project_id": project_id,
+                "user_id": user_id,
+                "generation_type": generation_type,
+            },
+            task_id=task_id,
+        )
+        state = mark_task_dispatched(
+            task_id,
+            message="补设定任务已发出，马上开始处理。",
+            result_patch={"dispatch_strategy": "celery", "celery_task_id": task_id},
+        )
+        await persist_task_state(
+            state,
+            project_id=project_id,
+            user_id=user_id,
+            event_type="dispatched",
+            event_payload={
+                "phase": "dispatch",
+                "generation_type": generation_type,
+                "dispatch_strategy": "celery",
+                "celery_task_id": task_id,
+            },
+        )
+        return state
+    except Exception as exc:  # pragma: no cover - 依赖 broker 可用性
+        state = mark_task_dispatched(
+            task_id,
+            message="队列暂时不可用，已经改成当前进程直接处理。",
+            result_patch={
+                "dispatch_strategy": "local_async_fallback",
+                "dispatch_error": exc.__class__.__name__,
+            },
+        )
+        await persist_task_state(
+            state,
+            project_id=project_id,
+            user_id=user_id,
+            event_type="dispatched",
+            event_payload={
+                "phase": "dispatch",
+                "generation_type": generation_type,
+                "dispatch_strategy": "local_async_fallback",
+                "dispatch_error": exc.__class__.__name__,
+            },
+        )
+        asyncio.create_task(
+            process_entity_generation_task(
+                task_id=task_id,
+                project_id=project_id,
+                user_id=user_id,
+                generation_type=generation_type,
+            )
+        )
+        return state
+
+
+@celery_app.task(name="entity_generation.process")
+def process_entity_generation_task_celery(
+    task_id: str,
+    project_id: str,
+    user_id: str,
+    generation_type: str,
+) -> dict[str, Any]:
+    state = asyncio.run(
+        process_entity_generation_task(
+            task_id=task_id,
+            project_id=project_id,
+            user_id=user_id,
+            generation_type=generation_type,
+        )
+    )
+    return state.model_dump()
+
+
+def _get_entity_generation_config(generation_type: str) -> EntityGenerationConfig:
+    config = ENTITY_GENERATION_CONFIGS.get(generation_type)
+    if config is None:
+        raise KeyError(f"Unsupported entity generation type: {generation_type}")
+    return config
+
+
+def _resolve_generator(config: EntityGenerationConfig) -> Any:
+    return globals()[config.generator_name]
+
+
+def _require_task(task_id: str) -> TaskState:
+    state = task_state_store.get(task_id)
+    if state is None:
+        raise KeyError(f"Task {task_id} not found")
+    return state
+
+
+async def hydrate_task_state(task_id: str) -> TaskState:
+    state = task_state_store.get(task_id)
+    if state is not None:
+        return state
+
+    async with AsyncSessionLocal() as session:
+        task_run = await get_task_run_by_task_id(session, task_id)
+
+    if task_run is None:
+        raise KeyError(f"Task {task_id} not found")
+
+    state = TaskState.from_task_run(task_run)
+    task_state_store.set(state)
+    return state
+
+
+async def persist_task_state(
+    task_state: TaskState,
+    *,
+    project_id: str,
+    user_id: str,
+    event_type: str,
+    event_payload: Optional[dict[str, Any]] = None,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        await update_task_run(
+            session,
+            task_state=task_state,
+            commit=False,
+        )
+        await create_task_event(
+            session,
+            task_state=task_state,
+            event_type=event_type,
+            payload=event_payload,
+            project_id=UUID(project_id),
+            user_id=UUID(user_id),
+            commit=False,
+        )
+        await session.commit()
+
+
+def _build_result_event_payload(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "generation_type": result.get("generation_type"),
+        "candidate_count": result.get("candidate_count"),
+        "entity_preview": result.get("entity_preview"),
+    }
+
+
+def _collect_entity_preview(candidates: list[dict[str, Any]]) -> list[str]:
+    preview: list[str] = []
+    for item in candidates[:5]:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("name") or item.get("title")
+        if isinstance(label, str) and label.strip():
+            preview.append(label.strip())
+    return preview

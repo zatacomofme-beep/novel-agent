@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 
 from sqlalchemy import ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -24,6 +24,9 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     theme: Mapped[Optional[str]] = mapped_column(Text)
     tone: Mapped[Optional[str]] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
+    bootstrap_profile: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    novel_blueprint: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    story_engine_settings: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="projects")
     characters: Mapped[list["Character"]] = relationship(
@@ -31,6 +34,14 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     world_settings: Mapped[list["WorldSetting"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    items: Mapped[list["ProjectItem"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    factions: Mapped[list["ProjectFaction"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
     )
@@ -69,4 +80,14 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="Chapter.chapter_number",
+    )
+    story_bible_versions: Mapped[list["StoryBibleVersion"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="StoryBibleVersion.version_number.desc()",
+    )
+    story_bible_pending_changes: Mapped[list["StoryBiblePendingChange"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="StoryBiblePendingChange.created_at.desc()",
     )

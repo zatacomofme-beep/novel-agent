@@ -3,15 +3,18 @@ from __future__ import annotations
 from typing import Any
 
 from bus.protocol import AgentResponse
+from core.config import get_settings
 
 from agents.architect import ArchitectAgent
 from agents.approver import ApproverAgent
 from agents.base import AgentRunContext, BaseAgent
+from agents.canon_guardian import CanonGuardianAgent
 from agents.critic import CriticAgent
 from agents.debate import DebateAgent
 from agents.editor import EditorAgent
 from agents.librarian import LibrarianAgent
 from agents.writer import WriterAgent
+from services.truth_layer_service import build_truth_layer_context
 
 
 class CoordinatorAgent(BaseAgent):
@@ -24,18 +27,22 @@ class CoordinatorAgent(BaseAgent):
         min_ai_taste_threshold: float | None = None,
     ) -> None:
         super().__init__(name="coordinator", role="orchestrator")
+        settings = get_settings()
+        self.max_revision_rounds = max_revision_rounds or self.DEFAULT_MAX_REVISION_ROUNDS
+        self.min_ai_taste_threshold = min_ai_taste_threshold or self.DEFAULT_MIN_AI_TASTE_THRESHOLD
+        self.critic_score_threshold = settings.revision_min_overall_score_threshold
+        self.critic_ai_taste_threshold = settings.revision_max_ai_taste_score_threshold
         self.librarian = LibrarianAgent()
         self.architect = ArchitectAgent()
         self.writer = WriterAgent()
+        self.canon_guardian = CanonGuardianAgent()
         self.critic = CriticAgent()
         self.debate = DebateAgent(
-            max_rounds=max_revision_rounds or self.DEFAULT_MAX_REVISION_ROUNDS,
-            min_confidence_threshold=min_ai_taste_threshold or self.DEFAULT_MIN_AI_TASTE_THRESHOLD,
+            max_rounds=self.max_revision_rounds,
+            min_confidence_threshold=self.min_ai_taste_threshold,
         )
         self.editor = EditorAgent()
         self.approver = ApproverAgent()
-        self.max_revision_rounds = max_revision_rounds or self.DEFAULT_MAX_REVISION_ROUNDS
-        self.min_ai_taste_threshold = min_ai_taste_threshold or self.DEFAULT_MIN_AI_TASTE_THRESHOLD
 
     async def _run(
         self,
@@ -81,6 +88,11 @@ class CoordinatorAgent(BaseAgent):
 
         content = writer_response.data["content"]
         outline = writer_response.data["outline"]
+        integrity_report = (
+            payload.get("story_bible_integrity_report")
+            if isinstance(payload.get("story_bible_integrity_report"), dict)
+            else None
+        )
 
         revision_loop_result = await self._run_revision_loop(
             context=context,
@@ -89,11 +101,16 @@ class CoordinatorAgent(BaseAgent):
             chapter_plan=chapter_plan,
             context_brief=context_brief,
             context_bundle=context_bundle,
+            integrity_report=integrity_report,
         )
 
         content = revision_loop_result["content"]
         final_review = revision_loop_result["final_review"]
         initial_review = revision_loop_result["initial_review"]
+        final_canon_report = revision_loop_result["final_canon_report"]
+        initial_canon_report = revision_loop_result["initial_canon_report"]
+        initial_truth_layer_context = revision_loop_result["initial_truth_layer_context"]
+        final_truth_layer_context = revision_loop_result["final_truth_layer_context"]
         all_debate_summaries = revision_loop_result["debate_summaries"]
         all_revision_plans = revision_loop_result["revision_plans"]
         revision_rounds_completed = revision_loop_result["rounds_completed"]
@@ -109,6 +126,8 @@ class CoordinatorAgent(BaseAgent):
                 "content": content,
                 "revision_rounds": revision_rounds_completed,
                 "debate_summaries": all_debate_summaries,
+                "final_canon_report": final_canon_report,
+                "final_truth_layer_context": final_truth_layer_context,
             },
         )
         if not approver_response.success:
@@ -125,6 +144,12 @@ class CoordinatorAgent(BaseAgent):
                     "message": item.get("problem"),
                     "action": item.get("action"),
                     "acceptance_criteria": item.get("acceptance_criteria"),
+                    "source": item.get("source"),
+                    "action_scope": item.get("action_scope"),
+                    "plugin_key": item.get("plugin_key"),
+                    "code": item.get("code"),
+                    "fix_hint": item.get("fix_hint"),
+                    "entity_labels": item.get("entity_labels", []),
                 }
                 for item in latest_plan.get("priorities", [])
                 if isinstance(item, dict)
@@ -138,6 +163,13 @@ class CoordinatorAgent(BaseAgent):
                 "review": final_review,
                 "initial_review": initial_review,
                 "final_review": final_review,
+                "canon_report": final_canon_report,
+                "initial_canon_report": initial_canon_report,
+                "final_canon_report": final_canon_report,
+                "story_bible_integrity_report": integrity_report,
+                "truth_layer_context": final_truth_layer_context,
+                "initial_truth_layer_context": initial_truth_layer_context,
+                "final_truth_layer_context": final_truth_layer_context,
                 "revision_focus": revision_focus,
                 "revision_plan": all_revision_plans[-1] if all_revision_plans else None,
                 "revision_plans": all_revision_plans,
@@ -151,7 +183,7 @@ class CoordinatorAgent(BaseAgent):
                 "trace": context.trace,
             },
             confidence=0.79 + (0.05 * min(revision_rounds_completed, 3)),
-            reasoning=f"协调 librarian、writer、critic 三个角色，形成 {revision_rounds_completed} 轮可追踪的章节生成与自检流程。",
+            reasoning=f"协调 librarian、writer、canon_guardian、critic 等角色，形成 {revision_rounds_completed} 轮可追踪的章节生成、自检与规范校验流程。",
         )
 
     async def _run_revision_loop(
@@ -162,6 +194,7 @@ class CoordinatorAgent(BaseAgent):
         chapter_plan: dict[str, Any],
         context_brief: dict[str, Any],
         context_bundle: dict[str, Any],
+        integrity_report: dict[str, Any] | None,
     ) -> dict[str, Any]:
         content = initial_content
         all_debate_summaries: list[dict[str, Any]] = []
@@ -171,13 +204,43 @@ class CoordinatorAgent(BaseAgent):
 
         initial_review = None
         final_review = None
+        initial_canon_report = None
+        final_canon_report = None
+        initial_truth_layer_context = build_truth_layer_context(
+            integrity_report=integrity_report,
+            canon_report=None,
+        )
+        final_truth_layer_context = initial_truth_layer_context
 
         for round_num in range(1, self.max_revision_rounds + 2):
+            canon_response = await self.canon_guardian.run(
+                context,
+                {
+                    "story_bible": payload["story_bible"],
+                    "content": content,
+                    "chapter_number": payload["chapter_number"],
+                    "chapter_title": payload.get("chapter_title"),
+                },
+            )
+            canon_report = (
+                canon_response.data.get("canon_report")
+                if canon_response.success and isinstance(canon_response.data, dict)
+                else self._empty_canon_report(payload)
+            )
+            final_canon_report = canon_report
+            round_truth_layer_context = build_truth_layer_context(
+                integrity_report=integrity_report,
+                canon_report=canon_report,
+            )
+            final_truth_layer_context = round_truth_layer_context
             critic_response = await self.critic.run(
                 context,
                 {
                     "story_bible": payload["story_bible"],
                     "content": content,
+                    "story_bible_integrity_report": integrity_report,
+                    "canon_report": canon_report,
+                    "truth_layer_context": round_truth_layer_context,
                     "revision_context": {
                         "round": round_num,
                         "previous_revision_plan": current_revision_plan,
@@ -192,6 +255,8 @@ class CoordinatorAgent(BaseAgent):
 
             if round_num == 1:
                 initial_review = review
+                initial_canon_report = canon_report
+                initial_truth_layer_context = round_truth_layer_context
 
             if not review.get("needs_revision", False):
                 final_review = review
@@ -213,6 +278,9 @@ class CoordinatorAgent(BaseAgent):
                     "chapter_plan": chapter_plan,
                     "context_brief": context_brief,
                     "content": content,
+                    "story_bible_integrity_report": integrity_report,
+                    "canon_report": canon_report,
+                    "truth_layer_context": round_truth_layer_context,
                     "round_number": round_num,
                     "previous_debate_summaries": all_debate_summaries,
                 },
@@ -240,6 +308,8 @@ class CoordinatorAgent(BaseAgent):
                     "revision_plan": revision_plan,
                     "style_guidance": payload.get("style_guidance"),
                     "style_preferences": payload.get("style_preferences"),
+                    "canon_report": canon_report,
+                    "truth_layer_context": round_truth_layer_context,
                     "debate_summary": debate_summary,
                     "revision_round": round_num,
                 },
@@ -257,12 +327,30 @@ class CoordinatorAgent(BaseAgent):
 
         if final_review is None:
             final_review = initial_review
+        if final_canon_report is None:
+            final_canon_report = initial_canon_report or self._empty_canon_report(payload)
 
         return {
             "content": content,
             "final_review": final_review,
             "initial_review": initial_review,
+            "final_canon_report": final_canon_report,
+            "initial_canon_report": initial_canon_report or final_canon_report,
             "debate_summaries": all_debate_summaries,
             "revision_plans": all_revision_plans,
             "rounds_completed": rounds_completed,
+            "initial_truth_layer_context": initial_truth_layer_context,
+            "final_truth_layer_context": final_truth_layer_context,
+        }
+
+    def _empty_canon_report(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "chapter_number": int(payload.get("chapter_number") or 1),
+            "chapter_title": payload.get("chapter_title"),
+            "issue_count": 0,
+            "blocking_issue_count": 0,
+            "plugin_breakdown": {},
+            "referenced_entities": [],
+            "issues": [],
+            "summary": "Canon 校验未产生结构化结果，当前回合按无阻断问题处理。",
         }

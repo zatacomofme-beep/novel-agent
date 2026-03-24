@@ -335,14 +335,7 @@ def _render_chapter_text(*, project_title: str, chapter) -> str:
 
 
 def _render_story_bible_markdown(project) -> list[str]:
-    sections = [
-        ("Characters", [item.name for item in project.characters]),
-        ("World Settings", [item.title for item in project.world_settings]),
-        ("Locations", [item.name for item in project.locations]),
-        ("Plot Threads", [item.title for item in project.plot_threads]),
-        ("Foreshadowing", [item.content for item in project.foreshadowing_items]),
-        ("Timeline", [item.title for item in project.timeline_events]),
-    ]
+    sections = _story_bible_export_sections(project, export_format="md")
 
     lines: list[str] = ["", "## Story Bible"]
     for title, items in sections:
@@ -355,14 +348,7 @@ def _render_story_bible_markdown(project) -> list[str]:
 
 
 def _render_story_bible_text(project) -> list[str]:
-    sections = [
-        ("CHARACTERS", [item.name for item in project.characters]),
-        ("WORLD SETTINGS", [item.title for item in project.world_settings]),
-        ("LOCATIONS", [item.name for item in project.locations]),
-        ("PLOT THREADS", [item.title for item in project.plot_threads]),
-        ("FORESHADOWING", [item.content for item in project.foreshadowing_items]),
-        ("TIMELINE", [item.title for item in project.timeline_events]),
-    ]
+    sections = _story_bible_export_sections(project, export_format="txt")
 
     lines: list[str] = ["", "STORY BIBLE", "-----------"]
     for title, items in sections:
@@ -372,6 +358,108 @@ def _render_story_bible_text(project) -> list[str]:
             continue
         lines.extend(f"- {item}" for item in items)
     return lines
+
+
+def _story_bible_export_sections(
+    project,
+    *,
+    export_format: ExportFormat,
+) -> list[tuple[str, list[str]]]:
+    world_settings_labels: list[str] = []
+    item_labels = _story_bible_export_labels(getattr(project, "items", []) or [], ("name", "title", "key"))
+    faction_labels = _story_bible_export_labels(getattr(project, "factions", []) or [], ("name", "title", "key"))
+
+    for world_setting in getattr(project, "world_settings", []) or []:
+        data = _read_export_value(world_setting, "data")
+        entity_type = (
+            str(data.get("entity_type") or "").strip().lower()
+            if isinstance(data, dict)
+            else ""
+        )
+        if entity_type == "item":
+            item_labels.append(
+                _first_story_bible_export_label(
+                    data.get("name") if isinstance(data, dict) else None,
+                    _read_export_value(world_setting, "name"),
+                    _read_export_value(world_setting, "title"),
+                    _read_export_value(world_setting, "key"),
+                )
+            )
+            continue
+        if entity_type == "faction":
+            faction_labels.append(
+                _first_story_bible_export_label(
+                    data.get("name") if isinstance(data, dict) else None,
+                    _read_export_value(world_setting, "name"),
+                    _read_export_value(world_setting, "title"),
+                    _read_export_value(world_setting, "key"),
+                )
+            )
+            continue
+        world_settings_labels.append(
+            _first_story_bible_export_label(
+                _read_export_value(world_setting, "title"),
+                _read_export_value(world_setting, "key"),
+                _read_export_value(world_setting, "name"),
+            )
+        )
+
+    sections = [
+        ("Characters", _story_bible_export_labels(getattr(project, "characters", []) or [], ("name", "title", "key"))),
+        ("World Settings", world_settings_labels),
+        ("Items", item_labels),
+        ("Factions", faction_labels),
+        ("Locations", _story_bible_export_labels(getattr(project, "locations", []) or [], ("name", "title", "key"))),
+        ("Plot Threads", _story_bible_export_labels(getattr(project, "plot_threads", []) or [], ("title", "name", "key"))),
+        ("Foreshadowing", _story_bible_export_labels(getattr(project, "foreshadowing_items", []) or [], ("content", "title", "name"))),
+        ("Timeline", _story_bible_export_labels(getattr(project, "timeline_events", []) or [], ("title", "name", "key"))),
+    ]
+    sections = [
+        (title, _dedupe_story_bible_export_labels(items))
+        for title, items in sections
+    ]
+    if export_format == "txt":
+        return [(title.upper(), items) for title, items in sections]
+    return sections
+
+
+def _story_bible_export_labels(
+    items,
+    fields: tuple[str, ...],
+) -> list[str]:
+    labels = [
+        _first_story_bible_export_label(
+            *(_read_export_value(item, field) for field in fields),
+        )
+        for item in items
+    ]
+    return [label for label in _dedupe_story_bible_export_labels(labels) if label]
+
+
+def _read_export_value(item, field: str):
+    if isinstance(item, dict):
+        return item.get(field)
+    return getattr(item, field, None)
+
+
+def _first_story_bible_export_label(*candidates) -> str:
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            cleaned = candidate.strip()
+            if cleaned:
+                return cleaned
+    return ""
+
+
+def _dedupe_story_bible_export_labels(labels: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        deduped.append(label)
+    return deduped
 
 
 def _render_chapter_gate_summary_markdown(chapter) -> list[str]:
@@ -503,8 +591,16 @@ def _final_gate_label(status: str) -> str:
         return "blocked_pending"
     if status == "blocked_rejected":
         return "blocked_rejected"
+    if status == "blocked_checkpoint":
+        return "blocked_checkpoint"
     if status == "blocked_review":
         return "blocked_review"
+    if status == "blocked_evaluation":
+        return "blocked_evaluation"
+    if status == "blocked_integrity":
+        return "blocked_integrity"
+    if status == "blocked_canon":
+        return "blocked_canon"
     return "ready"
 
 

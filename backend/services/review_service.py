@@ -3,15 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.errors import AppError
+from models.chapter import Chapter
 from models.chapter_checkpoint import ChapterCheckpoint
 from models.chapter_comment import ChapterComment
 from models.chapter_review_decision import ChapterReviewDecision
-from models.chapter_version import ChapterVersion
 from schemas.chapter import (
     ChapterCheckpointCreate,
     ChapterCheckpointRead,
@@ -48,6 +48,7 @@ from services.project_service import (
 
 
 COMMENT_STATUS_OPEN = "open"
+COMMENT_STATUS_IN_PROGRESS = "in_progress"
 COMMENT_STATUS_RESOLVED = "resolved"
 VALID_CHECKPOINT_TYPES = {
     "story_turn",
@@ -58,6 +59,7 @@ VALID_CHECKPOINT_TYPES = {
 }
 VALID_COMMENT_STATUSES = {
     COMMENT_STATUS_OPEN,
+    COMMENT_STATUS_IN_PROGRESS,
     COMMENT_STATUS_RESOLVED,
 }
 VALID_REVIEW_VERDICTS = {
@@ -88,6 +90,7 @@ async def get_chapter_review_workspace(
         session,
         chapter.project_id,
         user_id,
+        with_relations=True,
         permission=PROJECT_PERMISSION_READ,
     )
     comments = await _list_chapter_comments(session, chapter.id)
@@ -119,6 +122,7 @@ async def create_chapter_comment(
         session,
         chapter.project_id,
         user_id,
+        with_relations=True,
         permission=PROJECT_PERMISSION_EVALUATE,
     )
     parent_comment = None
@@ -134,6 +138,8 @@ async def create_chapter_comment(
                 chapter_id=chapter.id,
                 comment_id=parent_comment.parent_comment_id,
             )
+    if payload.assignee_user_id is not None:
+        _validate_comment_assignee(project, payload.assignee_user_id)
     selection_start, selection_end, selection_text = _normalize_comment_anchor(payload)
     comment = ChapterComment(
         id=uuid4(),
@@ -146,6 +152,9 @@ async def create_chapter_comment(
         selection_start=selection_start,
         selection_end=selection_end,
         selection_text=selection_text,
+        assignee_user_id=payload.assignee_user_id,
+        assigned_by_user_id=user_id if payload.assignee_user_id else None,
+        assigned_at=datetime.now(timezone.utc) if payload.assignee_user_id else None,
     )
     session.add(comment)
     await session.commit()
@@ -170,6 +179,7 @@ async def update_chapter_comment(
         session,
         comment.chapter.project_id,
         user_id,
+        with_relations=True,
         permission=PROJECT_PERMISSION_READ,
     )
     role = str(getattr(project, "access_role", PROJECT_ROLE_OWNER))
@@ -191,10 +201,25 @@ async def update_chapter_comment(
             comment.status = COMMENT_STATUS_RESOLVED
             comment.resolved_by_user_id = user_id
             comment.resolved_at = datetime.now(timezone.utc)
+        elif next_status == COMMENT_STATUS_IN_PROGRESS:
+            comment.status = COMMENT_STATUS_IN_PROGRESS
+            comment.resolved_by_user_id = None
+            comment.resolved_at = None
         else:
             comment.status = COMMENT_STATUS_OPEN
             comment.resolved_by_user_id = None
             comment.resolved_at = None
+
+    if "assignee_user_id" in payload.model_fields_set:
+        if payload.assignee_user_id is None:
+            comment.assignee_user_id = None
+            comment.assigned_by_user_id = None
+            comment.assigned_at = None
+        else:
+            _validate_comment_assignee(project, payload.assignee_user_id)
+            comment.assignee_user_id = payload.assignee_user_id
+            comment.assigned_by_user_id = user_id
+            comment.assigned_at = datetime.now(timezone.utc)
 
     await session.commit()
     hydrated = await _get_comment(
@@ -389,9 +414,13 @@ def build_chapter_review_workspace_payload(
     role = str(getattr(project, "access_role", PROJECT_ROLE_OWNER))
     can_edit_chapter = project_role_has_permission(role, PROJECT_PERMISSION_EDIT)
     can_evaluate = project_role_has_permission(role, PROJECT_PERMISSION_EVALUATE)
+    assignable_members = build_chapter_review_assignable_members_payload(project)
     open_comments = [item for item in comments if item.status == COMMENT_STATUS_OPEN]
-    resolved_comments = [item for item in comments if item.status != COMMENT_STATUS_OPEN]
-    ordered_comments = _order_comments_for_workspace(open_comments + resolved_comments)
+    in_progress_comments = [item for item in comments if item.status == COMMENT_STATUS_IN_PROGRESS]
+    resolved_comments = [item for item in comments if item.status == COMMENT_STATUS_RESOLVED]
+    ordered_comments = _order_comments_for_workspace(
+        open_comments + in_progress_comments + resolved_comments
+    )
     decision_payloads = [build_chapter_review_decision_payload(item) for item in decisions]
     pending_checkpoints = [
         item for item in checkpoints if item.status == CHECKPOINT_STATUS_PENDING
@@ -417,6 +446,7 @@ def build_chapter_review_workspace_payload(
         can_run_generation=can_edit_chapter,
         can_run_evaluation=can_evaluate,
         can_comment=can_evaluate,
+        can_assign_comment=can_evaluate,
         can_decide=can_evaluate,
         can_request_checkpoint=can_evaluate,
         can_decide_checkpoint=can_evaluate,
@@ -427,6 +457,7 @@ def build_chapter_review_workspace_payload(
         latest_pending_checkpoint=(
             pending_checkpoint_payloads[0] if pending_checkpoint_payloads else None
         ),
+        assignable_members=assignable_members,
         comments=[
             build_chapter_review_comment_payload(
                 item,
@@ -463,6 +494,11 @@ def build_chapter_review_comment_payload(
         selection_start=comment.selection_start,
         selection_end=comment.selection_end,
         selection_text=comment.selection_text,
+        assignee_user_id=getattr(comment, "assignee_user_id", None),
+        assignee_email=getattr(getattr(comment, "assignee", None), "email", None),
+        assigned_by_user_id=getattr(comment, "assigned_by_user_id", None),
+        assigned_by_email=getattr(getattr(comment, "assigned_by", None), "email", None),
+        assigned_at=getattr(comment, "assigned_at", None),
         resolved_by_user_id=comment.resolved_by_user_id,
         resolved_by_email=getattr(getattr(comment, "resolved_by", None), "email", None),
         resolved_at=comment.resolved_at,
@@ -470,9 +506,53 @@ def build_chapter_review_comment_payload(
         updated_at=comment.updated_at,
         reply_count=reply_count,
         can_edit=can_manage_all or can_manage_own,
+        can_assign=can_manage_all or can_manage_own,
         can_change_status=can_manage_all or can_manage_own,
         can_delete=(can_manage_all or can_manage_own) and reply_count == 0,
     )
+
+
+def build_chapter_review_assignable_members_payload(
+    project,
+) -> list[ChapterReviewAssignableMemberRead]:
+    members: list[ChapterReviewAssignableMemberRead] = []
+    seen_user_ids: set[UUID] = set()
+
+    owner_user_id = getattr(project, "user_id", None)
+    if owner_user_id is not None:
+        members.append(
+            ChapterReviewAssignableMemberRead(
+                user_id=owner_user_id,
+                email=(
+                    getattr(getattr(project, "user", None), "email", None)
+                    or getattr(project, "owner_email", None)
+                    or ""
+                ),
+                role=PROJECT_ROLE_OWNER,
+                is_owner=True,
+            )
+        )
+        seen_user_ids.add(owner_user_id)
+
+    collaborators = sorted(
+        getattr(project, "collaborators", []) or [],
+        key=lambda item: (str(getattr(item, "role", "")), str(getattr(item, "user_id", ""))),
+    )
+    for collaborator in collaborators:
+        collaborator_user_id = getattr(collaborator, "user_id", None)
+        if collaborator_user_id is None or collaborator_user_id in seen_user_ids:
+            continue
+        members.append(
+            ChapterReviewAssignableMemberRead(
+                user_id=collaborator_user_id,
+                email=getattr(getattr(collaborator, "user", None), "email", "") or "",
+                role=str(getattr(collaborator, "role", "")),
+                is_owner=False,
+            )
+        )
+        seen_user_ids.add(collaborator_user_id)
+
+    return members
 
 
 def build_chapter_review_decision_payload(
@@ -533,6 +613,8 @@ async def _list_chapter_comments(
         .where(ChapterComment.chapter_id == chapter_id)
         .options(
             selectinload(ChapterComment.user),
+            selectinload(ChapterComment.assignee),
+            selectinload(ChapterComment.assigned_by),
             selectinload(ChapterComment.resolved_by),
         )
         .order_by(ChapterComment.created_at.asc())
@@ -584,6 +666,8 @@ async def _get_comment(
         .options(
             selectinload(ChapterComment.chapter),
             selectinload(ChapterComment.user),
+            selectinload(ChapterComment.assignee),
+            selectinload(ChapterComment.assigned_by),
             selectinload(ChapterComment.resolved_by),
         )
     )
@@ -654,9 +738,7 @@ async def _current_chapter_version_number(
     chapter_id: UUID,
 ) -> int:
     result = await session.execute(
-        select(func.max(ChapterVersion.version_number)).where(
-            ChapterVersion.chapter_id == chapter_id
-        )
+        select(Chapter.current_version_number).where(Chapter.id == chapter_id)
     )
     return int(result.scalar_one_or_none() or 1)
 
@@ -701,11 +783,12 @@ def _order_comments_for_workspace(comments: list[ChapterComment]) -> list[Chapte
             replies_by_parent.pop(parent_id, None)
 
     open_roots = [item for item in roots if item.status == COMMENT_STATUS_OPEN]
-    resolved_roots = [item for item in roots if item.status != COMMENT_STATUS_OPEN]
-    ordered_roots = sorted(open_roots, key=lambda item: item.created_at, reverse=True) + sorted(
-        resolved_roots,
-        key=lambda item: item.created_at,
-        reverse=True,
+    in_progress_roots = [item for item in roots if item.status == COMMENT_STATUS_IN_PROGRESS]
+    resolved_roots = [item for item in roots if item.status == COMMENT_STATUS_RESOLVED]
+    ordered_roots = (
+        sorted(open_roots, key=lambda item: item.created_at, reverse=True)
+        + sorted(in_progress_roots, key=lambda item: item.created_at, reverse=True)
+        + sorted(resolved_roots, key=lambda item: item.created_at, reverse=True)
     )
 
     ordered: list[ChapterComment] = []
@@ -736,6 +819,21 @@ def _normalize_comment_anchor(
         )
     selection_text = payload.selection_text.strip() if payload.selection_text else None
     return payload.selection_start, payload.selection_end, selection_text or None
+
+
+def _validate_comment_assignee(project, assignee_user_id: UUID) -> None:
+    allowed_user_ids = {getattr(project, "user_id", None)}
+    allowed_user_ids.update(
+        getattr(collaborator, "user_id", None)
+        for collaborator in getattr(project, "collaborators", []) or []
+    )
+    if assignee_user_id in allowed_user_ids:
+        return
+    raise AppError(
+        code="chapter.comment_assignee_not_in_project",
+        message="Comment assignee must be a project member.",
+        status_code=400,
+    )
 
 
 def _normalize_comment_status(value: str) -> str:

@@ -28,6 +28,14 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
+  chroma:
+    image: chromadb/chroma:0.5.23
+    container_name: novel-agent-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+
   backend:
     build:
       context: ./backend
@@ -35,7 +43,10 @@ services:
     container_name: novel-agent-backend
     working_dir: /app
     env_file:
-      - backend/.env.example
+      - path: backend/.env.compose.example
+        required: true
+      - path: backend/.env.compose
+        required: false
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./backend:/app
@@ -45,6 +56,27 @@ services:
       - postgres
       - redis
       - qdrant
+      - chroma
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: ../infrastructure/docker/Dockerfile.backend
+    container_name: novel-agent-celery
+    working_dir: /app
+    env_file:
+      - path: backend/.env.compose.example
+        required: true
+      - path: backend/.env.compose
+        required: false
+    command: celery -A tasks.celery_app worker --loglevel=info --pool=solo
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+      - chroma
 
   frontend:
     build:
@@ -53,7 +85,10 @@ services:
     container_name: novel-agent-frontend
     working_dir: /app
     env_file:
-      - frontend/.env.example
+      - path: frontend/.env.example
+        required: true
+      - path: frontend/.env.compose
+        required: false
     command: npm run dev
     volumes:
       - ./frontend:/app
@@ -63,8 +98,10 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+      - celery_worker
 
 volumes:
   postgres-data:
   redis-data:
   qdrant-data:
+  chroma-data:

@@ -8,6 +8,9 @@ asyncpg==0.29.0
 redis==5.1.1
 celery==5.4.0
 qdrant-client==1.11.3
+chromadb==0.5.23
+langgraph==0.2.56
+langchain-core==0.3.21
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 email-validator==2.2.0

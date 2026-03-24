@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from models.project import Project
 from models.task_run import TaskRun
+from schemas.quality import ChapterQualityMetricsSnapshot
 from services.preference_service import (
     get_preference_learning_snapshot,
     get_or_create_user_preference,
@@ -335,13 +336,10 @@ def build_project_quality_trend_payload(
 
 
 def _quality_metric(chapter: Any, key: str) -> Optional[float]:
-    quality_metrics = getattr(chapter, "quality_metrics", None)
-    if not isinstance(quality_metrics, dict):
-        return None
-    value = quality_metrics.get(key)
-    if value is None:
-        return None
-    return float(value)
+    quality_metrics = ChapterQualityMetricsSnapshot.from_payload(
+        getattr(chapter, "quality_metrics", None),
+    )
+    return quality_metrics.metric_float(key)
 
 
 def _mean(values: list[float]) -> Optional[float]:

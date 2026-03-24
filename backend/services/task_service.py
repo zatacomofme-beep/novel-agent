@@ -94,6 +94,25 @@ async def list_task_runs_for_chapter(
     return list(result.scalars().all())
 
 
+async def list_task_runs_for_project(
+    session: AsyncSession,
+    project_id: UUID,
+    *,
+    user_id: Optional[UUID] = None,
+    limit: int = 20,
+    task_type_prefix: Optional[str] = None,
+) -> list[TaskRun]:
+    statement = select(TaskRun).where(TaskRun.project_id == project_id)
+    if user_id is not None:
+        statement = statement.where(TaskRun.user_id == user_id)
+    if task_type_prefix:
+        statement = statement.where(TaskRun.task_type.like(f"{task_type_prefix}%"))
+    result = await session.execute(
+        statement.order_by(TaskRun.updated_at.desc()).limit(limit)
+    )
+    return list(result.scalars().all())
+
+
 async def create_task_event(
     session: AsyncSession,
     *,

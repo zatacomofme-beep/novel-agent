@@ -6,25 +6,46 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from schemas.chapter import ChapterReviewCommentCreate, ChapterReviewDecisionCreate
+from core.errors import AppError
+from schemas.chapter import (
+    ChapterReviewCommentCreate,
+    ChapterReviewCommentUpdate,
+    ChapterReviewDecisionCreate,
+)
 from services.review_service import (
     build_chapter_review_workspace_payload,
     create_chapter_comment,
     create_chapter_review_decision,
+    update_chapter_comment,
 )
 
 
 class ReviewServiceTests(unittest.TestCase):
     def test_workspace_payload_exposes_reviewer_permissions_and_latest_decision(self) -> None:
         chapter_id = uuid4()
+        project_id = uuid4()
+        owner_id = uuid4()
         reviewer_id = uuid4()
         other_user_id = uuid4()
         now = datetime.now(timezone.utc)
         payload = build_chapter_review_workspace_payload(
             chapter_id=chapter_id,
             project=SimpleNamespace(
+                id=project_id,
+                user_id=owner_id,
                 access_role="reviewer",
                 owner_email="owner@example.com",
+                user=SimpleNamespace(email="owner@example.com"),
+                collaborators=[
+                    SimpleNamespace(
+                        id=uuid4(),
+                        project_id=project_id,
+                        user_id=other_user_id,
+                        added_by_user_id=owner_id,
+                        role="editor",
+                        user=SimpleNamespace(email="editor@example.com"),
+                    )
+                ],
             ),
             comments=[
                 SimpleNamespace(
@@ -102,14 +123,19 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertTrue(payload.can_run_evaluation)
         self.assertFalse(payload.can_run_generation)
         self.assertTrue(payload.can_comment)
+        self.assertTrue(payload.can_assign_comment)
         self.assertTrue(payload.can_decide)
         self.assertEqual(payload.open_comment_count, 1)
         self.assertEqual(payload.resolved_comment_count, 1)
         self.assertEqual(payload.pending_checkpoint_count, 1)
         self.assertEqual(payload.latest_decision.verdict, "changes_requested")
         self.assertEqual(payload.latest_pending_checkpoint.title, "主角是否暴露身份")
+        self.assertEqual(payload.assignable_members[0].email, "owner@example.com")
+        self.assertEqual(payload.assignable_members[1].email, "editor@example.com")
         self.assertEqual(payload.comments[0].author_email, "reviewer@example.com")
+        self.assertTrue(payload.comments[0].can_assign)
         self.assertTrue(payload.comments[0].can_change_status)
+        self.assertFalse(payload.comments[1].can_assign)
         self.assertFalse(payload.comments[1].can_delete)
         self.assertTrue(payload.checkpoints[0].can_decide)
         self.assertTrue(payload.checkpoints[0].can_cancel)
@@ -170,7 +196,9 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertTrue(payload.can_edit_chapter)
         self.assertTrue(payload.can_run_generation)
         self.assertTrue(payload.can_run_evaluation)
+        self.assertTrue(payload.can_assign_comment)
         self.assertTrue(payload.comments[0].can_edit)
+        self.assertTrue(payload.comments[0].can_assign)
         self.assertTrue(payload.comments[0].can_change_status)
         self.assertTrue(payload.comments[0].can_delete)
         self.assertTrue(payload.checkpoints[0].can_decide)
@@ -395,6 +423,106 @@ class ReviewServiceAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(added_items), 1)
         self.assertEqual(added_items[0].parent_comment_id, root_comment_id)
         self.assertEqual(result.parent_comment_id, root_comment_id)
+
+    async def test_create_comment_rejects_assignee_outside_project(self) -> None:
+        session = SimpleNamespace(
+            add=MagicMock(),
+            commit=AsyncMock(),
+        )
+        chapter_id = uuid4()
+        project_id = uuid4()
+        owner_id = uuid4()
+        reviewer_id = uuid4()
+        outsider_id = uuid4()
+        chapter = SimpleNamespace(
+            id=chapter_id,
+            project_id=project_id,
+        )
+        project = SimpleNamespace(
+            user_id=owner_id,
+            collaborators=[SimpleNamespace(user_id=reviewer_id)],
+            access_role="reviewer",
+        )
+
+        with patch(
+            "services.review_service.get_owned_chapter",
+            new=AsyncMock(return_value=chapter),
+        ), patch(
+            "services.review_service.get_owned_project",
+            new=AsyncMock(return_value=project),
+        ):
+            with self.assertRaises(AppError) as raised:
+                await create_chapter_comment(
+                    session,
+                    chapter_id,
+                    reviewer_id,
+                    ChapterReviewCommentCreate(
+                        body="请你跟进这个问题。",
+                        assignee_user_id=outsider_id,
+                    ),
+                )
+
+        self.assertEqual(raised.exception.code, "chapter.comment_assignee_not_in_project")
+        session.add.assert_not_called()
+        session.commit.assert_not_awaited()
+
+    async def test_update_comment_allows_clearing_assignee(self) -> None:
+        chapter_id = uuid4()
+        project_id = uuid4()
+        owner_id = uuid4()
+        assignee_id = uuid4()
+        assigned_at = datetime.now(timezone.utc)
+        comment = SimpleNamespace(
+            id=uuid4(),
+            chapter=SimpleNamespace(project_id=project_id),
+            chapter_id=chapter_id,
+            user_id=owner_id,
+            parent_comment_id=None,
+            chapter_version_number=4,
+            body="这里补一段动机。",
+            status="open",
+            selection_start=None,
+            selection_end=None,
+            selection_text=None,
+            assignee_user_id=assignee_id,
+            assignee=None,
+            assigned_by_user_id=owner_id,
+            assigned_by=None,
+            assigned_at=assigned_at,
+            resolved_by_user_id=None,
+            resolved_by=None,
+            resolved_at=None,
+            created_at=assigned_at,
+            updated_at=assigned_at,
+            user=SimpleNamespace(email="owner@example.com"),
+        )
+        project = SimpleNamespace(
+            user_id=owner_id,
+            collaborators=[],
+            access_role="owner",
+        )
+        session = SimpleNamespace(commit=AsyncMock())
+
+        with patch(
+            "services.review_service._get_comment",
+            new=AsyncMock(side_effect=[comment, comment]),
+        ), patch(
+            "services.review_service.get_owned_project",
+            new=AsyncMock(return_value=project),
+        ):
+            result = await update_chapter_comment(
+                session,
+                chapter_id,
+                comment.id,
+                owner_id,
+                ChapterReviewCommentUpdate(assignee_user_id=None),
+            )
+
+        self.assertIsNone(comment.assignee_user_id)
+        self.assertIsNone(comment.assigned_by_user_id)
+        self.assertIsNone(comment.assigned_at)
+        self.assertIsNone(result.assignee_user_id)
+        session.commit.assert_awaited_once()
 
     async def test_create_review_decision_downgrades_final_chapter_when_verdict_blocks(self) -> None:
         session = SimpleNamespace(

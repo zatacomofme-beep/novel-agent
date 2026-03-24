@@ -26,6 +26,74 @@ class InternalServerError(Exception):
 
 
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
+    def test_openai_compatible_api_mode_routing(self) -> None:
+        gateway = ModelGateway()
+
+        self.assertEqual(
+            gateway._resolve_openai_compatible_api_mode(
+                GenerationRequest(task_name="x", prompt="hi", model="gpt-5.4")
+            ),
+            "responses",
+        )
+        self.assertEqual(
+            gateway._resolve_openai_compatible_api_mode(
+                GenerationRequest(task_name="x", prompt="hi", model="gemini-3.1-pro-preview")
+            ),
+            "chat_completions",
+        )
+        self.assertEqual(
+            gateway._resolve_openai_compatible_api_mode(
+                GenerationRequest(task_name="x", prompt="hi", model="claude-opus-4-6")
+            ),
+            "chat_completions",
+        )
+        self.assertEqual(
+            gateway._resolve_openai_compatible_api_mode(
+                GenerationRequest(task_name="x", prompt="hi", model="deepseek-v3.2")
+            ),
+            "chat_completions",
+        )
+
+    def test_extract_chat_completion_text_supports_string_and_part_list(self) -> None:
+        gateway = ModelGateway()
+
+        class _Message:
+            def __init__(self, content):
+                self.content = content
+
+        class _Choice:
+            def __init__(self, content):
+                self.message = _Message(content)
+
+        class _Response:
+            def __init__(self, choices):
+                self.choices = choices
+
+        string_response = _Response([_Choice("直接字符串内容")])
+        list_response = _Response([_Choice([{"text": "分片"}, {"text": "拼接"}])])
+
+        self.assertEqual(gateway._extract_chat_completion_text(string_response), "直接字符串内容")
+        self.assertEqual(gateway._extract_chat_completion_text(list_response), "分片拼接")
+
+    def test_supports_chat_reasoning_effort_is_disabled_for_claude(self) -> None:
+        gateway = ModelGateway()
+
+        self.assertTrue(
+            gateway._supports_chat_reasoning_effort(
+                GenerationRequest(task_name="x", prompt="hi", model="gemini-3.1-pro-preview")
+            )
+        )
+        self.assertTrue(
+            gateway._supports_chat_reasoning_effort(
+                GenerationRequest(task_name="x", prompt="hi", model="deepseek-v3.2")
+            )
+        )
+        self.assertFalse(
+            gateway._supports_chat_reasoning_effort(
+                GenerationRequest(task_name="x", prompt="hi", model="claude-opus-4-6")
+            )
+        )
+
     async def test_generate_text_marks_skipped_remote_when_no_provider(self) -> None:
         gateway = ModelGateway()
         gateway.openai_api_key = None
@@ -68,6 +136,19 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.used_fallback)
         self.assertEqual(result.metadata["remote_error"]["error_type"], "rate_limit")
         self.assertEqual(result.metadata["remote_error"]["status_code"], 429)
+
+    async def test_generate_text_sync_returns_result_inside_running_loop(self) -> None:
+        gateway = ModelGateway()
+        gateway.openai_api_key = None
+        gateway.anthropic_api_key = None
+
+        result = gateway.generate_text_sync(
+            GenerationRequest(task_name="writer.draft", prompt="hello"),
+            fallback=lambda: "fallback content",
+        )
+
+        self.assertEqual(result.content, "fallback content")
+        self.assertTrue(result.used_fallback)
 
     def test_classify_remote_errors(self) -> None:
         gateway = ModelGateway()

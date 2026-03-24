@@ -8,11 +8,32 @@ from models.evaluation import Evaluation
 from models.foreshadowing import Foreshadowing
 from models.location import Location
 from models.preference_observation import PreferenceObservation
+from models.project_faction import ProjectFaction
+from models.project_item import ProjectItem
 from models.project_branch import ProjectBranch
+from models.project_branch_story_bible import ProjectBranchStoryBible
 from models.project_collaborator import ProjectCollaborator
 from models.plot_thread import PlotThread
 from models.project import Project
 from models.project_volume import ProjectVolume
+from models.story_bible_version import (
+    StoryBibleChangeSource,
+    StoryBibleChangeType,
+    StoryBiblePendingChange,
+    StoryBiblePendingChangeStatus,
+    StoryBibleSection,
+    StoryBibleVersion,
+)
+from models.story_engine import (
+    StoryChapterSummary,
+    StoryCharacter,
+    StoryForeshadow,
+    StoryItem,
+    StoryKnowledgeVersion,
+    StoryOutline,
+    StoryTimelineMapEvent,
+    StoryWorldRule,
+)
 from models.task_event import TaskEvent
 from models.task_run import TaskRun
 from models.timeline_event import TimelineEvent
@@ -31,11 +52,28 @@ __all__ = [
     "Foreshadowing",
     "Location",
     "PreferenceObservation",
+    "ProjectFaction",
+    "ProjectItem",
     "ProjectBranch",
+    "ProjectBranchStoryBible",
     "ProjectCollaborator",
     "PlotThread",
     "Project",
     "ProjectVolume",
+    "StoryBibleChangeSource",
+    "StoryBibleChangeType",
+    "StoryBiblePendingChange",
+    "StoryBiblePendingChangeStatus",
+    "StoryBibleSection",
+    "StoryBibleVersion",
+    "StoryChapterSummary",
+    "StoryCharacter",
+    "StoryForeshadow",
+    "StoryItem",
+    "StoryKnowledgeVersion",
+    "StoryOutline",
+    "StoryTimelineMapEvent",
+    "StoryWorldRule",
     "TaskEvent",
     "TaskRun",
     "TimelineEvent",

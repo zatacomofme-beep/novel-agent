@@ -14,8 +14,10 @@ from models.project import Project
 from schemas.chapter import ChapterCreate, ChapterUpdate
 from services.chapter_gate_service import (
     CHAPTER_STATUS_FINAL,
+    CHAPTER_STATUS_REVIEW,
     apply_chapter_gate_metadata,
     apply_chapter_gate_metadata_many,
+    mark_quality_metrics_stale,
 )
 from services.preference_service import record_preference_observation
 from services.project_service import (
@@ -165,6 +167,7 @@ async def create_chapter(
         outline=payload.outline,
         status=payload.status,
         word_count=_count_words(content),
+        current_version_number=1,
     )
     session.add(chapter)
     await session.flush()
@@ -178,7 +181,12 @@ async def create_chapter(
         )
     )
     await session.commit()
-    await session.refresh(chapter)
+    result = await session.execute(
+        select(Chapter)
+        .where(Chapter.id == chapter.id)
+        .options(selectinload(Chapter.checkpoints), selectinload(Chapter.review_decisions))
+    )
+    chapter = result.scalar_one()
     apply_chapter_gate_metadata(chapter)
     await record_preference_observation(
         session,
@@ -202,7 +210,15 @@ async def update_chapter(
 ) -> Chapter:
     data = payload.model_dump(exclude_unset=True)
     previous_content = chapter.content
-    content_changed = "content" in data and data["content"] is not None and data["content"] != chapter.content
+    previous_title = chapter.title
+    previous_branch_id = chapter.branch_id
+    content_changed = (
+        "content" in data
+        and data["content"] is not None
+        and data["content"] != chapter.content
+    )
+    title_changed = "title" in data and data["title"] != chapter.title
+    branch_scope_changed = False
     project = await session.get(Project, chapter.project_id)
 
     if project is not None and ("volume_id" in data or "branch_id" in data):
@@ -229,11 +245,28 @@ async def update_chapter(
                     code="chapter.number_conflict",
                     message="Chapter number already exists in this branch and volume.",
                     status_code=409,
-                )
+                    )
             chapter.volume_id = volume.id
             chapter.branch_id = branch.id
+            branch_scope_changed = branch.id != previous_branch_id
 
-    if data.get("status") == CHAPTER_STATUS_FINAL:
+    for field in ("title", "content", "outline", "status", "quality_metrics"):
+        if field in data:
+            setattr(chapter, field, data[field])
+
+    if content_changed or title_changed or branch_scope_changed:
+        chapter.quality_metrics = mark_quality_metrics_stale(
+            chapter.quality_metrics,
+            reason=_build_evaluation_stale_reason(
+                content_changed=content_changed,
+                title_changed=title_changed,
+                branch_scope_changed=branch_scope_changed,
+            ),
+        )
+        if "status" not in data and chapter.status == CHAPTER_STATUS_FINAL:
+            chapter.status = CHAPTER_STATUS_REVIEW
+
+    if chapter.status == CHAPTER_STATUS_FINAL:
         gate_summary = apply_chapter_gate_metadata(chapter)
         if not gate_summary.final_ready:
             raise AppError(
@@ -243,15 +276,13 @@ async def update_chapter(
                 status_code=409,
             )
 
-    for field in ("title", "content", "outline", "status", "quality_metrics"):
-        if field in data:
-            setattr(chapter, field, data[field])
-
+    next_version_number: Optional[int] = None
     if content_changed:
+        next_version_number = int(getattr(chapter, "current_version_number", 1) or 1) + 1
+        chapter.current_version_number = next_version_number
         chapter.word_count = _count_words(chapter.content)
 
-    if payload.create_version and content_changed:
-        next_version_number = await _next_version_number(session, chapter.id)
+    if content_changed and next_version_number is not None and payload.create_version:
         session.add(
             ChapterVersion(
                 chapter_id=chapter.id,
@@ -262,7 +293,12 @@ async def update_chapter(
         )
 
     await session.commit()
-    await session.refresh(chapter)
+    result = await session.execute(
+        select(Chapter)
+        .where(Chapter.id == chapter.id)
+        .options(selectinload(Chapter.checkpoints), selectinload(Chapter.review_decisions))
+    )
+    chapter = result.scalar_one()
     apply_chapter_gate_metadata(chapter)
     if content_changed and preference_learning_user_id is not None:
         await record_preference_observation(
@@ -320,16 +356,29 @@ async def rollback_to_version(
 
     chapter.content = version.content
     chapter.word_count = _count_words(version.content)
+    next_version_number = int(getattr(chapter, "current_version_number", 1) or 1) + 1
+    chapter.current_version_number = next_version_number
+    chapter.quality_metrics = mark_quality_metrics_stale(
+        chapter.quality_metrics,
+        reason=(
+            "The chapter was rolled back to a different saved version after the latest evaluation."
+        ),
+    )
 
     restored_version = ChapterVersion(
         chapter_id=chapter.id,
-        version_number=await _next_version_number(session, chapter.id),
+        version_number=next_version_number,
         content=version.content,
         change_reason=f"Rollback to version {version.version_number}",
     )
     session.add(restored_version)
     await session.commit()
-    await session.refresh(chapter)
+    result = await session.execute(
+        select(Chapter)
+        .where(Chapter.id == chapter.id)
+        .options(selectinload(Chapter.checkpoints), selectinload(Chapter.review_decisions))
+    )
+    chapter = result.scalar_one()
     apply_chapter_gate_metadata(chapter)
     await session.refresh(restored_version)
     await record_preference_observation(
@@ -343,6 +392,34 @@ async def rollback_to_version(
         previous_content=previous_content,
     )
     return chapter, restored_version
+
+
+def _build_evaluation_stale_reason(
+    *,
+    content_changed: bool,
+    title_changed: bool,
+    branch_scope_changed: bool,
+) -> str:
+    changed_parts: list[str] = []
+    if content_changed:
+        changed_parts.append("content")
+    if title_changed:
+        changed_parts.append("title")
+    if branch_scope_changed:
+        changed_parts.append("branch scope")
+
+    if not changed_parts:
+        return "The latest evaluation no longer matches the current chapter state."
+    if len(changed_parts) == 1:
+        return (
+            "The latest evaluation is outdated because the chapter "
+            f"{changed_parts[0]} changed."
+        )
+    if len(changed_parts) == 2:
+        joined = " and ".join(changed_parts)
+        return f"The latest evaluation is outdated because the chapter {joined} changed."
+    joined = ", ".join(changed_parts[:-1]) + f", and {changed_parts[-1]}"
+    return f"The latest evaluation is outdated because the chapter {joined} changed."
 
 
 async def _next_version_number(session: AsyncSession, chapter_id: UUID) -> int:

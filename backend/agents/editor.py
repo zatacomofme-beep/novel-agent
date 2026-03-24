@@ -23,13 +23,15 @@ class EditorAgent(BaseAgent):
         revision_plan: dict[str, Any] = payload.get("revision_plan") or {}
         style_guidance = payload.get("style_guidance") or ""
         style_preferences = payload.get("style_preferences") or {}
+        truth_layer_context = payload.get("truth_layer_context") or {}
 
         generation = await model_gateway.generate_text(
             GenerationRequest(
                 task_name="editor.revise",
                 prompt=(
                     f"Issues={issues} | Context={context_brief} | "
-                    f"RevisionPlan={revision_plan} | StyleGuidance={style_guidance}"
+                    f"RevisionPlan={revision_plan} | TruthLayer={truth_layer_context} | "
+                    f"StyleGuidance={style_guidance}"
                 ),
                 metadata={"agent": self.name},
             ),
@@ -39,6 +41,7 @@ class EditorAgent(BaseAgent):
                 context_brief,
                 revision_plan,
                 style_preferences,
+                truth_layer_context,
             ),
         )
         revised = generation.content
@@ -66,10 +69,13 @@ class EditorAgent(BaseAgent):
         context_brief: dict[str, Any],
         revision_plan: dict[str, Any],
         style_preferences: dict[str, Any],
+        truth_layer_context: dict[str, Any],
     ) -> str:
         revised = content
         priorities = revision_plan.get("priorities")
         banned_patterns = style_preferences.get("banned_patterns") or []
+        chapter_revision_targets = truth_layer_context.get("chapter_revision_targets") or []
+        story_bible_followups = truth_layer_context.get("story_bible_followups") or []
         if isinstance(priorities, list):
             for priority in priorities[:3]:
                 if not isinstance(priority, dict):
@@ -94,6 +100,25 @@ class EditorAgent(BaseAgent):
             revised += "\n\n编辑注：局部调整连接词和句长，削弱过于均匀的生成痕迹。"
         if any(issue["dimension"] == "plot_tightness" for issue in issues):
             revised += "\n\n编辑注：补上动作推进句，避免章节停留在说明而非事件中。"
+        if isinstance(chapter_revision_targets, list):
+            for target in chapter_revision_targets[:2]:
+                if not isinstance(target, dict):
+                    continue
+                hint = target.get("fix_hint") or target.get("message")
+                if hint:
+                    revised += f"\n\n编辑注：连续性修订重点：{hint}"
+        if isinstance(story_bible_followups, list) and story_bible_followups:
+            followup_notes = [
+                str(item.get("fix_hint") or item.get("message") or "").strip()
+                for item in story_bible_followups[:2]
+                if isinstance(item, dict)
+            ]
+            followup_notes = [note for note in followup_notes if note]
+            if followup_notes:
+                revised += (
+                    "\n\n编辑注：以下问题需要先回写 Story Bible 基座，再决定是否继续强修正文："
+                    f"{'；'.join(followup_notes)}。"
+                )
         for pattern in banned_patterns[:5]:
             if isinstance(pattern, str) and pattern.strip():
                 revised = revised.replace(pattern.strip(), "")

@@ -1,423 +1,234 @@
-# 长篇小说 Agent - 开发文档
+# 开发说明
 
-## 开发环境设置
+这份文档只描述当前真实可用的开发方式，不再沿用旧工作流页面和旧环境假设。
 
-### 1. 前置要求
+## 先建立统一认知
 
-- **Node.js**: 18.x 或更高版本
-- **Python**: 3.9.x 或更高版本
-- **Docker**: 24.x 或更高版本
-- **Docker Compose**: 2.x 或更高版本
+当前项目有三条最重要的事实：
 
-### 2. 快速开始
+1. 写手前台主入口已经收口到 `story-room`
+2. `story-room` 里的正文现在会写入正式 `Chapter` 主链，而不是只停留在本地状态
+3. 模型路由属于后台管理员 / 系统配置层，不属于写手前台功能
 
-#### 2.1 克隆项目
+## 环境矩阵
 
-```bash
-git clone <repository-url>
-cd novels
-```
+| 场景 | 后端环境文件 | 前端环境文件 | 说明 |
+| --- | --- | --- | --- |
+| 本机直跑 | `backend/.env` | `frontend/.env` | 适合直接调试 Python / Next |
+| Docker Compose | `backend/.env.compose` | `frontend/.env.compose` | 适合一键启动整套服务 |
+| 参考模板 | `backend/.env.example` / `backend/.env.compose.example` | `frontend/.env.example` | 示例文件不要直接存密钥 |
 
-#### 2.2 配置环境变量
+注意：
 
-**后端环境变量** (`backend/.env`):
-```bash
-# 数据库
-DATABASE_URL=postgresql://postgres:password@localhost:5432/novel_agent
-REDIS_URL=redis://localhost:6379/0
-QDRANT_URL=http://localhost:6333
+- `backend/.env.example` 面向本机直跑，默认走 `localhost`
+- `backend/.env.compose.example` 面向容器内运行，默认走 `postgres / redis / qdrant / chroma`
+- 不要把真实 API Key 提交进仓库
+- 不要把模型配置暴露到写手前台
 
-# JWT 配置
-JWT_SECRET_KEY=your-secret-key-here
-JWT_ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+## Docker Compose 开发
 
-# AI 模型
-OPENAI_API_KEY=your-openai-key
-ANTHROPIC_API_KEY=your-anthropic-key
-DEFAULT_MODEL=claude-3-5-sonnet
-
-# Celery
-CELERY_BROKER_URL=redis://localhost:6379/1
-CELERY_RESULT_BACKEND=redis://localhost:6379/2
-
-# 日志
-LOG_LEVEL=DEBUG
-```
-
-**前端环境变量** (`frontend/.env`):
-```bash
-NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
-```
-
-#### 2.3 使用 Docker 启动（推荐）
+### 1. 准备环境文件
 
 ```bash
-# 启动所有服务
-docker-compose up -d
-
-# 查看日志
-docker-compose logs -f
-
-# 停止服务
-docker-compose down
-
-# 重启服务
-docker-compose restart
+cp backend/.env.compose.example backend/.env.compose
 ```
 
-#### 2.4 本地开发（不使用 Docker）
+如果前端需要自定义地址，再额外创建：
 
-**启动数据库服务**（需要预先安装）:
 ```bash
-# PostgreSQL
-brew install postgresql@15
-brew services start postgresql@15
-
-# 创建数据库
-createdb novel_agent
-
-# Qdrant
-brew install qdrant
-brew services start qdrant
-
-# Redis
-brew install redis
-brew services start redis
+cp frontend/.env.example frontend/.env.compose
 ```
 
-**启动后端**:
+### 2. 启动服务
+
+```bash
+docker compose up -d
+docker compose exec backend alembic upgrade head
+```
+
+### 3. 常用命令
+
+```bash
+docker compose ps
+docker compose logs -f backend
+docker compose logs -f celery_worker
+docker compose logs -f frontend
+docker compose down
+```
+
+### 4. Compose 配置验证
+
+```bash
+docker compose config
+docker compose -f infrastructure/docker/docker-compose.prod.yml config
+```
+
+## 本机直跑开发
+
+### 1. 准备环境文件
+
+```bash
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+```
+
+### 2. 后端
+
 ```bash
 cd backend
-
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 安装依赖
+python3.11 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-
-# 运行数据库迁移
 alembic upgrade head
-
-# 启动开发服务器
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-**启动前端**:
+### 3. Celery Worker
+
+```bash
+cd backend
+source venv/bin/activate
+celery -A tasks.celery_app worker --loglevel=info --pool=solo
+```
+
+### 4. 前端
+
 ```bash
 cd frontend
-
-# 安装依赖
 npm install
-
-# 启动开发服务器
 npm run dev
 ```
 
-#### 2.5 无基础设施验证链
+## 生产部署
 
-如果当前机器没有安装 `Docker / PostgreSQL / Redis / Qdrant`，可以先跑下面这条最小验证链，确认仓库本身处于可开发状态：
+生产 Compose 入口：
 
 ```bash
-# 后端
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# 运行单元测试
-PYTHONPATH=. \
-APP_NAME='Long Novel Agent' \
-APP_ENV=development \
-APP_DEBUG=true \
-API_V1_PREFIX=/api/v1 \
-DATABASE_URL='postgresql+asyncpg://postgres:password@localhost:5432/novel_agent' \
-REDIS_URL='redis://localhost:6379/0' \
-CELERY_BROKER_URL='redis://localhost:6379/1' \
-CELERY_RESULT_BACKEND='redis://localhost:6379/2' \
-QDRANT_URL='http://localhost:6333' \
-JWT_SECRET_KEY='replace-me' \
-python -m unittest discover -s tests -p 'test_*.py' -v
-
-# 验证迁移链可生成离线 SQL
-APP_NAME='Long Novel Agent' \
-APP_ENV=development \
-APP_DEBUG=true \
-API_V1_PREFIX=/api/v1 \
-DATABASE_URL='postgresql+asyncpg://postgres:password@localhost:5432/novel_agent' \
-REDIS_URL='redis://localhost:6379/0' \
-CELERY_BROKER_URL='redis://localhost:6379/1' \
-CELERY_RESULT_BACKEND='redis://localhost:6379/2' \
-QDRANT_URL='http://localhost:6333' \
-JWT_SECRET_KEY='replace-me' \
-alembic -c alembic.ini upgrade head --sql > /tmp/novels-alembic.sql
-
-# 前端
-cd ../frontend
-npm install
-npm run type-check
+cp backend/.env.compose.example backend/.env.compose
+docker compose -f infrastructure/docker/docker-compose.prod.yml up -d --build
 ```
 
-**启动 Celery Worker**:
+当前生产编排已经补齐这些组件：
+
+- PostgreSQL
+- Redis
+- Qdrant
+- Chroma
+- FastAPI
+- Celery Worker
+- Next.js
+- Nginx
+
+## 关键开发入口
+
+### 写手工作台
+
+- [story-room/page.tsx](./frontend/app/dashboard/projects/[projectId]/story-room/page.tsx)
+- [draft-studio.tsx](./frontend/components/story-engine/draft-studio.tsx)
+- [knowledge-base-board.tsx](./frontend/components/story-engine/knowledge-base-board.tsx)
+
+### 正式章节主链
+
+- [router.py](./backend/api/v1/router.py)
+- [chapters.py](./backend/api/v1/chapters.py)
+- [chapter_service.py](./backend/services/chapter_service.py)
+- [review_service.py](./backend/services/review_service.py)
+- [chapter-lifecycle.md](./docs/architecture/chapter-lifecycle.md)
+
+### Story Engine 工作流与知识库
+
+- [story_engine.py](./backend/api/v1/story_engine.py)
+- [story_engine_kb_service.py](./backend/services/story_engine_kb_service.py)
+- [story_engine_workflow_service.py](./backend/services/story_engine_workflow_service.py)
+- [story_engine.py](./backend/models/story_engine.py)
+
+### 后台模型路由
+
+- [story_engine_settings_service.py](./backend/services/story_engine_settings_service.py)
+- [story_engine_model_profiles.json](./backend/config/story_engine_model_profiles.json)
+- [story-engine-models.md](./docs/setup/story-engine-models.md)
+
+## 验证命令
+
+### 前端
+
 ```bash
-cd backend
-source venv/bin/activate
-
-# 启动 worker
-celery -A tasks.celery_app worker --loglevel=info --pool=solo
-
-# 启动 flower（监控）
-celery -A tasks.celery_app flower --port=5555
-```
-
-### 3. 访问服务
-
-启动后，访问以下地址：
-
-- **前端**: http://localhost:3000
-- **后端 API**: http://localhost:8000
-- **API 文档**: http://localhost:8000/docs (Swagger UI)
-- **ReDoc**: http://localhost:8000/redoc
-- **Celery Flower**: http://localhost:5555
-
-### 4. 数据库迁移
-
-```bash
-cd backend
-source venv/bin/activate
-
-# 创建新迁移
-alembic revision --autogenerate -m "描述"
-
-# 应用迁移
-alembic upgrade head
-
-# 回滚迁移
-alembic downgrade -1
-
-# 查看迁移历史
-alembic history
-```
-
-### 5. 运行测试
-
-```bash
-# 后端测试
-cd backend
-python -m unittest discover -s tests -p 'test_*.py' -v
-
-# 前端静态验证
 cd frontend
 npm run type-check
 ```
 
-### 6. 代码质量检查
+### 后端语法与测试
 
 ```bash
-# 后端
 cd backend
-black . --check
-flake8
-mypy .
-
-# 前端
-cd frontend
-npm run lint
-npm run type-check
+python3 -m py_compile api/main.py api/v1/router.py
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-### 7. 常用命令
-
-#### 后端
+### Story Engine 模型连通性
 
 ```bash
-# 格式化代码
-black .
-
-# 运行特定测试
-python -m unittest backend.tests.test_model_gateway -v
-
-# 查看数据库
-psql -h localhost -U postgres -d novel_agent
+cd backend
+PYTHONPATH=. python3 scripts/verify_story_engine_models.py
 ```
 
-#### 前端
+### Story Engine 端到端烟雾测试
 
 ```bash
-# 构建生产版本
-npm run build
-
-# 启动生产服务器
-npm start
-
-# 格式化代码
-npm run format
-
-# 清理构建缓存
-npm run clean
+cd backend
+PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 scripts/story_engine_live_smoke.py
 ```
 
-### 8. 调试技巧
+## 当前开发约束
 
-#### 后端调试
+### 写手前台
 
-1. **使用断点**:
-```python
-import pdb; pdb.set_trace()
-```
+- 不暴露 Agent、模型、路由策略等技术术语
+- 统一以“测大纲漏洞”“查人设 bug”“优化爽点”“自动记设定”这类文案呈现
+- `story-room` 是优先维护对象，旧页面更多承担兼容与补充职责
 
-2. **查看日志**:
-```bash
-docker-compose logs -f backend
-```
+### 后台模型配置
 
-3. **进入容器**:
-```bash
-docker-compose exec backend bash
-```
+- 当前没有写手可见的模型配置页
+- 模型预设与角色路由由后端配置文件和 API 承担
+- 真正的配置入口是项目级 `story_engine_settings` 和全局 `story_engine_model_profiles.json`
 
-#### 前端调试
+### 章节真相源
 
-1. **React DevTools**: 安装浏览器扩展
-2. **查看网络请求**: 浏览器开发者工具
-3. **调试模式**:
-```bash
-npm run dev -- --debug
-```
+- 编辑区文本必须优先落入 `Chapter`
+- 章节发布判断以 `final_gate_status` 为准，不以 `status=final` 单独作为真相
+- 内容变更会触发版本递增和部分 gate stale，这是预期行为，不要绕开
 
-### 9. 性能优化
+## 常见排查
 
-#### 后端
+### 1. Docker 里模型请求总是没走真实 Key
 
-1. **数据库索引**:
-```sql
-CREATE INDEX CONCURRENTLY idx_chapters_project ON chapters(project_id, chapter_number);
-```
+优先检查：
 
-2. **缓存策略**:
-```python
-from functools import lru_cache
+- 是否创建了 `backend/.env.compose`
+- `docker compose config` 里是否出现你期望的模型字段
+- 是否误把密钥只写进了 `backend/.env`
 
-@lru_cache(maxsize=128)
-def get_story_bible(project_id: str):
-    # ...
-```
+### 2. Story Engine 在容器里检索不到知识库
 
-3. **异步处理**:
-```python
-@app.post("/chapters/generate")
-async def generate_chapter():
-    task = generate_chapter_task.delay(chapter_id)
-    return {"task_id": task.id}
-```
+优先检查：
 
-#### 前端
+- `chroma` 服务是否正常启动
+- 容器内使用的 `CHROMA_HOST / CHROMA_PORT` 是否是 `chroma:8000`
+- 是否只是退回到了内存索引
 
-1. **代码分割**:
-```typescript
-const Editor = dynamic(() => import('@/components/editor'), {
-  ssr: false,
-})
-```
+### 3. `story-room` 保存了正文，但状态看起来不对
 
-2. **图片优化**:
-```typescript
-import Image from 'next/image'
-```
+优先检查：
 
-3. **状态管理优化**:
-```typescript
-// 使用 shallow equal
-const { data } = useStore((state) => ({ data: state.data }), shallow)
-```
+- 当前章节是否已经创建为正式 `Chapter`
+- 这次保存是否触发了新版本
+- `final_gate_status` 是否因为评估 stale / review / checkpoint 被阻塞
 
-### 10. 部署
+## 推荐阅读顺序
 
-#### 生产环境配置
-
-1. **更新环境变量**:
-```bash
-# .env.production
-DATABASE_URL=postgresql://user:pass@prod-db:5432/novel_agent
-JWT_SECRET_KEY=<strong-random-key>
-LOG_LEVEL=INFO
-```
-
-2. **构建 Docker 镜像**:
-```bash
-docker-compose -f docker-compose.prod.yml build
-```
-
-3. **部署**:
-```bash
-docker-compose -f docker-compose.prod.yml up -d
-```
-
-#### 监控
-
-1. **Prometheus + Grafana**:
-```bash
-docker-compose up -d prometheus grafana
-```
-
-2. **日志收集**:
-```bash
-docker-compose up -d elasticsearch logstash kibana
-```
-
-### 11. 故障排查
-
-#### 常见问题
-
-**问题 1: 数据库连接失败**
-```bash
-# 检查数据库是否运行
-docker-compose ps postgres
-
-# 查看数据库日志
-docker-compose logs postgres
-
-# 测试连接
-psql -h localhost -U postgres -d novel_agent
-```
-
-**问题 2: Celery 任务不执行**
-```bash
-# 检查 Celery worker 是否运行
-docker-compose ps celery
-
-# 查看 Celery 日志
-docker-compose logs celery
-
-# 测试任务
-celery -A tasks.celery_app inspect ping
-```
-
-**问题 3: 向量检索失败**
-```bash
-# 检查 Qdrant 状态
-curl http://localhost:6333/
-
-# 查看集合
-curl http://localhost:6333/collections
-```
-
-### 12. 贡献指南
-
-1. **Fork 项目**
-2. **创建特性分支**: `git checkout -b feature/amazing-feature`
-3. **提交更改**: `git commit -m 'Add amazing feature'`
-4. **推送到分支**: `git push origin feature/amazing-feature`
-5. **开启 Pull Request**
-
-### 13. 相关文档
-
-- [PRD.md](./PRD.md) - 产品需求文档
-- [PROJECT_STRUCTURE.md](./PROJECT_STRUCTURE.md) - 项目结构说明
-- [README.md](./README.md) - 项目说明
-
----
-
-**最后更新**: 2026-03-18
+1. [README.md](./README.md)
+2. [docs/architecture/README.md](./docs/architecture/README.md)
+3. [docs/architecture/chapter-lifecycle.md](./docs/architecture/chapter-lifecycle.md)
+4. [docs/architecture/api-contract-map.md](./docs/architecture/api-contract-map.md)
+5. [docs/setup/story-engine-models.md](./docs/setup/story-engine-models.md)

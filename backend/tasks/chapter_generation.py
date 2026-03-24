@@ -6,8 +6,13 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from db.session import AsyncSessionLocal
-from services.generation_service import run_generation_pipeline
-from services.task_service import create_task_event, create_task_run, update_task_run
+from services.generation_service import StoryBibleIntegrityError, run_generation_pipeline
+from services.task_service import (
+    create_task_event,
+    create_task_run,
+    get_task_run_by_task_id,
+    update_task_run,
+)
 from tasks.celery_app import celery_app
 from tasks.schemas import TaskState
 from tasks.state_store import task_state_store
@@ -59,6 +64,22 @@ async def enqueue_chapter_generation_task(
     return task_state
 
 
+def mark_task_dispatched(
+    task_id: str,
+    *,
+    message: str,
+    result_patch: Optional[dict[str, Any]] = None,
+) -> TaskState:
+    state = _require_task(task_id)
+    state.message = message
+    state.progress = max(state.progress, 5)
+    if result_patch:
+        next_result = dict(state.result or {})
+        next_result.update(result_patch)
+        state.result = next_result
+    return task_state_store.set(state)
+
+
 def mark_task_running(task_id: str, message: str) -> TaskState:
     state = _require_task(task_id)
     state.status = "running"
@@ -84,11 +105,20 @@ def mark_task_progress(
     return task_state_store.set(state)
 
 
-def mark_task_failed(task_id: str, error: str) -> TaskState:
+def mark_task_failed(
+    task_id: str,
+    error: str,
+    *,
+    result_patch: Optional[dict[str, Any]] = None,
+) -> TaskState:
     state = _require_task(task_id)
     state.status = "failed"
     state.error = error
     state.message = "Generation pipeline failed."
+    if result_patch:
+        next_result = dict(state.result or {})
+        next_result.update(result_patch)
+        state.result = next_result
     return task_state_store.set(state)
 
 
@@ -109,6 +139,7 @@ async def process_generation_task(
     project_id: str,
     user_id: str,
 ) -> TaskState:
+    await hydrate_task_state(task_id)
     state = mark_task_running(task_id, "Loading chapter and Story Bible context.")
     await persist_task_state(
         state,
@@ -154,7 +185,31 @@ async def process_generation_task(
                 task_id=task_id,
             )
         except Exception as exc:  # pragma: no cover - error path still useful in runtime
-            state = mark_task_failed(task_id, str(exc))
+            result_patch: dict[str, Any] | None = None
+            failure_phase = "agent_pipeline"
+            event_payload: dict[str, Any] = {
+                "error_type": exc.__class__.__name__,
+            }
+            if isinstance(exc, StoryBibleIntegrityError):
+                failure_phase = "story_bible_integrity"
+                integrity_report = exc.report.model_dump(mode="json")
+                result_patch = {
+                    "story_bible_integrity_report": integrity_report,
+                }
+                event_payload.update(
+                    {
+                        "integrity_issue_count": integrity_report["issue_count"],
+                        "integrity_blocking_issue_count": integrity_report["blocking_issue_count"],
+                        "integrity_plugins": sorted(
+                            integrity_report["plugin_breakdown"].keys()
+                        ),
+                    }
+                )
+            state = mark_task_failed(
+                task_id,
+                str(exc),
+                result_patch=result_patch,
+            )
             await persist_task_state(
                 state,
                 chapter_id=chapter_id,
@@ -162,8 +217,8 @@ async def process_generation_task(
                 user_id=user_id,
                 event_type="failed",
                 event_payload={
-                    "phase": "agent_pipeline",
-                    "error_type": exc.__class__.__name__,
+                    "phase": failure_phase,
+                    **event_payload,
                 },
             )
             return state
@@ -197,6 +252,73 @@ async def process_generation_task(
     return state
 
 
+async def dispatch_generation_task(
+    *,
+    task_id: str,
+    chapter_id: str,
+    project_id: str,
+    user_id: str,
+) -> TaskState:
+    try:
+        process_generation_task_celery.apply_async(
+            kwargs={
+                "task_id": task_id,
+                "chapter_id": chapter_id,
+                "project_id": project_id,
+                "user_id": user_id,
+            },
+            task_id=task_id,
+        )
+        state = mark_task_dispatched(
+            task_id,
+            message="Generation task queued for Celery worker.",
+            result_patch={"dispatch_strategy": "celery", "celery_task_id": task_id},
+        )
+        await persist_task_state(
+            state,
+            chapter_id=chapter_id,
+            project_id=project_id,
+            user_id=user_id,
+            event_type="dispatched",
+            event_payload={
+                "phase": "dispatch",
+                "dispatch_strategy": "celery",
+                "celery_task_id": task_id,
+            },
+        )
+        return state
+    except Exception as exc:  # pragma: no cover - depends on broker availability
+        state = mark_task_dispatched(
+            task_id,
+            message="Celery dispatch unavailable; running in local async fallback.",
+            result_patch={
+                "dispatch_strategy": "local_async_fallback",
+                "dispatch_error": exc.__class__.__name__,
+            },
+        )
+        await persist_task_state(
+            state,
+            chapter_id=chapter_id,
+            project_id=project_id,
+            user_id=user_id,
+            event_type="dispatched",
+            event_payload={
+                "phase": "dispatch",
+                "dispatch_strategy": "local_async_fallback",
+                "dispatch_error": exc.__class__.__name__,
+            },
+        )
+        asyncio.create_task(
+            process_generation_task(
+                task_id=task_id,
+                chapter_id=chapter_id,
+                project_id=project_id,
+                user_id=user_id,
+            )
+        )
+        return state
+
+
 @celery_app.task(name="chapter_generation.process")
 def process_generation_task_celery(
     task_id: str,
@@ -219,6 +341,22 @@ def _require_task(task_id: str) -> TaskState:
     state = task_state_store.get(task_id)
     if state is None:
         raise KeyError(f"Task {task_id} not found")
+    return state
+
+
+async def hydrate_task_state(task_id: str) -> TaskState:
+    state = task_state_store.get(task_id)
+    if state is not None:
+        return state
+
+    async with AsyncSessionLocal() as session:
+        task_run = await get_task_run_by_task_id(session, task_id)
+
+    if task_run is None:
+        raise KeyError(f"Task {task_id} not found")
+
+    state = TaskState.from_task_run(task_run)
+    task_state_store.set(state)
     return state
 
 
@@ -255,9 +393,14 @@ def _build_result_event_payload(result: dict[str, Any]) -> dict[str, Any]:
     context_bundle = result.get("context_bundle")
     initial_review = result.get("initial_review")
     final_review = result.get("final_review") or result.get("review")
+    canon_report = result.get("canon_report") or result.get("final_canon_report")
+    initial_canon_report = result.get("initial_canon_report")
+    integrity_report = result.get("story_bible_integrity_report")
     revision_plan = result.get("revision_plan")
     approval = result.get("approval")
     agent_trace = result.get("agent_trace")
+    truth_layer_context = result.get("truth_layer_context") or result.get("final_truth_layer_context")
+    story_bible_followup_proposals = result.get("story_bible_followup_proposals")
 
     payload: dict[str, Any] = {
         "chapter_id": result.get("chapter_id"),
@@ -323,6 +466,27 @@ def _build_result_event_payload(result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(final_issues, list):
             payload["final_issue_count"] = len(final_issues)
 
+    if isinstance(initial_canon_report, dict):
+        payload["initial_canon_issue_count"] = initial_canon_report.get("issue_count")
+        payload["initial_canon_blocking_issue_count"] = initial_canon_report.get("blocking_issue_count")
+
+    if isinstance(integrity_report, dict):
+        payload["integrity_issue_count"] = integrity_report.get("issue_count")
+        payload["integrity_blocking_issue_count"] = integrity_report.get("blocking_issue_count")
+        plugin_breakdown = integrity_report.get("plugin_breakdown")
+        if isinstance(plugin_breakdown, dict):
+            payload["integrity_plugins"] = sorted(plugin_breakdown.keys())
+
+    if isinstance(canon_report, dict):
+        payload["canon_issue_count"] = canon_report.get("issue_count")
+        payload["canon_blocking_issue_count"] = canon_report.get("blocking_issue_count")
+        plugin_breakdown = canon_report.get("plugin_breakdown")
+        referenced_entities = canon_report.get("referenced_entities")
+        if isinstance(plugin_breakdown, dict):
+            payload["canon_plugins"] = sorted(plugin_breakdown.keys())
+        if isinstance(referenced_entities, list):
+            payload["canon_referenced_entities"] = len(referenced_entities)
+
     if isinstance(revision_plan, dict):
         priorities = revision_plan.get("priorities")
         focus_dimensions = revision_plan.get("focus_dimensions")
@@ -330,6 +494,26 @@ def _build_result_event_payload(result: dict[str, Any]) -> dict[str, Any]:
             payload["revision_plan_steps"] = len(priorities)
         if isinstance(focus_dimensions, list):
             payload["revision_focus_dimensions"] = focus_dimensions
+
+    if isinstance(truth_layer_context, dict):
+        payload["truth_layer_status"] = truth_layer_context.get("status")
+        blocking_sources = truth_layer_context.get("blocking_sources")
+        if isinstance(blocking_sources, list):
+            payload["truth_layer_blocking_sources"] = blocking_sources
+        chapter_targets = truth_layer_context.get("chapter_revision_targets")
+        if isinstance(chapter_targets, list):
+            payload["truth_layer_chapter_target_count"] = len(chapter_targets)
+        story_bible_followups = truth_layer_context.get("story_bible_followups")
+        if isinstance(story_bible_followups, list):
+            payload["truth_layer_story_bible_followup_count"] = len(story_bible_followups)
+
+    if isinstance(story_bible_followup_proposals, list):
+        payload["story_bible_followup_proposal_count"] = len(story_bible_followup_proposals)
+        payload["story_bible_followup_trigger_types"] = [
+            str(item.get("trigger_type"))
+            for item in story_bible_followup_proposals
+            if isinstance(item, dict) and item.get("trigger_type")
+        ]
 
     if isinstance(approval, dict):
         payload["approved"] = approval.get("approved")

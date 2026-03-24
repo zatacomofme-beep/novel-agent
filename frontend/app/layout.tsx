@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Long Novel Agent",
-  description: "A deep AI collaboration system for long-form fiction writing.",
+  title: "网文创作平台",
+  description: "面向长篇网文创作的一体化写作工作台。",
 };
 
 export default function RootLayout({

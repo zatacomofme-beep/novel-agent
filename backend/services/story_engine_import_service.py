@@ -1,0 +1,751 @@
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.errors import AppError
+from models.story_engine import (
+    StoryChapterSummary,
+    StoryCharacter,
+    StoryForeshadow,
+    StoryItem,
+    StoryOutline,
+    StoryTimelineMapEvent,
+    StoryWorldRule,
+)
+from schemas.story_engine import StoryBulkImportPayload
+from services.story_engine_kb_service import (
+    get_story_engine_project,
+    list_entities,
+)
+from services.project_service import PROJECT_PERMISSION_EDIT
+from services.story_engine_settings_service import (
+    build_story_engine_settings_for_preset,
+    get_story_engine_model_preset_label,
+)
+from services.story_engine_unified_knowledge_service import (
+    delete_story_knowledge,
+    save_story_knowledge,
+)
+
+
+IMPORTABLE_SECTIONS = (
+    "characters",
+    "foreshadows",
+    "items",
+    "world_rules",
+    "timeline_events",
+    "outlines",
+    "chapter_summaries",
+)
+
+SECTION_MODEL_MAP = {
+    "characters": StoryCharacter,
+    "foreshadows": StoryForeshadow,
+    "items": StoryItem,
+    "world_rules": StoryWorldRule,
+    "timeline_events": StoryTimelineMapEvent,
+    "outlines": StoryOutline,
+    "chapter_summaries": StoryChapterSummary,
+}
+
+SECTION_ID_FIELD_MAP = {
+    "characters": "character_id",
+    "foreshadows": "foreshadow_id",
+    "items": "item_id",
+    "world_rules": "rule_id",
+    "timeline_events": "event_id",
+    "outlines": "outline_id",
+    "chapter_summaries": "summary_id",
+}
+
+SECTION_LABEL_MAP = {
+    "characters": "人物",
+    "foreshadows": "伏笔",
+    "items": "物品",
+    "world_rules": "规则",
+    "timeline_events": "时间线",
+    "outlines": "大纲",
+    "chapter_summaries": "章节总结",
+}
+
+
+def list_import_templates() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "blank_minimal",
+            "label": "空白起盘模板",
+            "description": "只给出最基础的 JSON 结构，适合你已经有自己设定时直接往里填。",
+            "usage_notes": [
+                "一级大纲建议只保留 1 条，它会在导入后自动锁死。",
+                "人物关系可以先填 target_name，后续再细化为更复杂的关系网。",
+                "replace_existing_sections 填要覆盖的区块，不填就走增量导入。",
+            ],
+            "recommended_model_preset_key": "balanced",
+            "recommended_model_preset_label": get_story_engine_model_preset_label("balanced"),
+            "payload": {
+                "characters": [
+                    {
+                        "name": "主角",
+                        "appearance": "",
+                        "personality": "",
+                        "micro_habits": [],
+                        "abilities": {},
+                        "relationships": [],
+                        "status": "active",
+                        "arc_stage": "initial",
+                        "arc_boundaries": [],
+                    }
+                ],
+                "foreshadows": [],
+                "items": [],
+                "world_rules": [],
+                "timeline_events": [],
+                "outlines": [
+                    {
+                        "level": "level_1",
+                        "title": "全本主线圣经",
+                        "content": "这里写整本书不允许动摇的主线目标、终局方向和核心代价。",
+                        "status": "todo",
+                        "node_order": 1,
+                        "locked": True,
+                        "immutable_reason": "一级大纲导入后自动锁定。",
+                    }
+                ],
+                "chapter_summaries": [],
+            },
+        },
+        {
+            "key": "xuanhuan_upgrade",
+            "label": "玄幻升级流模板",
+            "description": "预置升级代价、宿敌线和卷级推进结构，适合玄幻/仙侠/高武类网文起盘。",
+            "usage_notes": [
+                "可以先导入，再把人物名和设定名替换成你自己的。",
+                "世界规则里已经预埋了升级代价，后续不要轻易删掉。",
+            ],
+            "recommended_model_preset_key": "momentum_hook",
+            "recommended_model_preset_label": get_story_engine_model_preset_label("momentum_hook"),
+            "payload": {
+                "characters": [
+                    {
+                        "name": "主角",
+                        "appearance": "初看平平，却有让人过目不忘的伤痕或标记。",
+                        "personality": "表面克制，内里极度执拗。",
+                        "micro_habits": ["压怒时会摩挲指节"],
+                        "abilities": {"core": "成长型功法", "ceiling": "后期可触及世界顶端"},
+                        "relationships": [],
+                        "status": "active",
+                        "arc_stage": "initial",
+                        "arc_boundaries": [
+                            {
+                                "stage": "initial",
+                                "forbidden_behaviors": ["无代价越阶乱杀", "毫无铺垫地舍己救所有人"],
+                                "allowed_behaviors": ["谨慎试探", "为了执念冒险"],
+                            }
+                        ],
+                    },
+                    {
+                        "name": "宿敌",
+                        "appearance": "出场自带压迫感。",
+                        "personality": "冷硬、强控制欲、信奉弱肉强食。",
+                        "micro_habits": ["说话前会停半拍"],
+                        "abilities": {"core": "规则压制型战力"},
+                        "relationships": [{"target_name": "主角", "relation": "宿敌", "intensity": "high"}],
+                        "status": "active",
+                        "arc_stage": "initial",
+                        "arc_boundaries": [],
+                    },
+                ],
+                "foreshadows": [
+                    {
+                        "content": "主角体内或身世里藏着一条会在中后期爆开的核心真相。",
+                        "chapter_planted": 1,
+                        "chapter_planned_reveal": 80,
+                        "status": "pending",
+                        "related_characters": ["主角"],
+                        "related_items": [],
+                    }
+                ],
+                "items": [
+                    {
+                        "name": "起始机缘",
+                        "features": "看似普通，却绑定主线秘密。",
+                        "owner": "主角",
+                        "location": "主角身边",
+                        "special_rules": ["越级使用必须付出反噬"],
+                    }
+                ],
+                "world_rules": [
+                    {
+                        "rule_name": "越级爆发必有代价",
+                        "rule_content": "任何超出当前层级的爆发都要支付真实代价，不能白送。",
+                        "negative_list": ["无代价开挂", "大战后秒恢复"],
+                        "scope": "battle",
+                    }
+                ],
+                "timeline_events": [],
+                "outlines": [
+                    {
+                        "level": "level_1",
+                        "title": "主线圣经",
+                        "content": "主角从被压制到站上顶峰，但每次升级都必须换来真实损失。",
+                        "status": "todo",
+                        "node_order": 1,
+                        "locked": True,
+                        "immutable_reason": "一级大纲导入后自动锁定。",
+                    },
+                    {
+                        "level": "level_2",
+                        "title": "卷一：被逼入局",
+                        "content": "前期受压制，先立世界规则，再给第一波痛快反击。",
+                        "status": "todo",
+                        "node_order": 1,
+                        "parent_title": "主线圣经",
+                    },
+                    {
+                        "level": "level_3",
+                        "title": "第一章：开局吃亏",
+                        "content": "先吃亏，再埋下翻盘锚点。",
+                        "status": "todo",
+                        "node_order": 1,
+                        "parent_title": "卷一：被逼入局",
+                    },
+                ],
+                "chapter_summaries": [],
+            },
+        },
+    ]
+
+
+def get_import_template(template_key: str) -> dict[str, Any]:
+    for item in list_import_templates():
+        if item["key"] == template_key:
+            return item
+    raise AppError(
+        code="story_engine.import_template_not_found",
+        message=f"导入模板不存在：{template_key}",
+        status_code=404,
+    )
+
+
+async def bulk_import_story_payload(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    user_id: UUID,
+    payload: StoryBulkImportPayload,
+    replace_existing_sections: list[str],
+    model_preset_key: str | None = None,
+) -> dict[str, Any]:
+    await get_story_engine_project(session, project_id, user_id)
+    normalized_replace_sections = [item for item in replace_existing_sections if item in IMPORTABLE_SECTIONS]
+    existing_entities_by_section: dict[str, list[Any]] = {}
+
+    warnings: list[str] = []
+    if len(normalized_replace_sections) != len(replace_existing_sections):
+        _append_import_warning(warnings, "部分 replace_existing_sections 无效，已自动忽略。")
+
+    for section in normalized_replace_sections:
+        existing_entities_by_section[section] = await list_entities(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            entity_type=section,
+        )
+        if section == "outlines" and any(
+            getattr(entity, "locked", False) for entity in existing_entities_by_section[section]
+        ):
+            _append_import_warning(
+                warnings,
+                "一级大纲已锁定；覆盖导入时只会替换可编辑卷纲和章纲，主线圣经保持不动。",
+            )
+
+    imported_counts = {section: 0 for section in IMPORTABLE_SECTIONS}
+    imported_signatures = {section: set() for section in IMPORTABLE_SECTIONS}
+
+    for item in payload.characters:
+        item_payload = item.model_dump()
+        imported_signatures["characters"].add(
+            _build_import_payload_signature("characters", item_payload)
+        )
+        existing = await _find_by_field(
+            session,
+            project_id=project_id,
+            entity_type="characters",
+            field_name="name",
+            field_value=item.name,
+        )
+        mutation_result = await save_story_knowledge(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key="characters",
+            item=item_payload,
+            entity_id=str(existing.character_id) if existing is not None else None,
+            source_workflow="bulk_import",
+            guard_operation="导入",
+        )
+        _extend_import_guard_warnings(
+            warnings,
+            section_key="characters",
+            item_label=item.name,
+            mutation_result=mutation_result,
+        )
+        imported_counts["characters"] += 1
+
+    for item in payload.foreshadows:
+        item_payload = item.model_dump()
+        imported_signatures["foreshadows"].add(
+            _build_import_payload_signature("foreshadows", item_payload)
+        )
+        existing = await _find_by_field(
+            session,
+            project_id=project_id,
+            entity_type="foreshadows",
+            field_name="content",
+            field_value=item.content,
+        )
+        mutation_result = await save_story_knowledge(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key="foreshadows",
+            item=item_payload,
+            entity_id=str(existing.foreshadow_id) if existing is not None else None,
+            source_workflow="bulk_import",
+            guard_operation="导入",
+        )
+        _extend_import_guard_warnings(
+            warnings,
+            section_key="foreshadows",
+            item_label=_build_import_item_label("foreshadows", item_payload),
+            mutation_result=mutation_result,
+        )
+        imported_counts["foreshadows"] += 1
+
+    for item in payload.items:
+        item_payload = item.model_dump()
+        imported_signatures["items"].add(
+            _build_import_payload_signature("items", item_payload)
+        )
+        existing = await _find_by_field(
+            session,
+            project_id=project_id,
+            entity_type="items",
+            field_name="name",
+            field_value=item.name,
+        )
+        mutation_result = await save_story_knowledge(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key="items",
+            item=item_payload,
+            entity_id=str(existing.item_id) if existing is not None else None,
+            source_workflow="bulk_import",
+            guard_operation="导入",
+        )
+        _extend_import_guard_warnings(
+            warnings,
+            section_key="items",
+            item_label=item.name,
+            mutation_result=mutation_result,
+        )
+        imported_counts["items"] += 1
+
+    for item in payload.world_rules:
+        item_payload = item.model_dump()
+        imported_signatures["world_rules"].add(
+            _build_import_payload_signature("world_rules", item_payload)
+        )
+        existing = await _find_by_field(
+            session,
+            project_id=project_id,
+            entity_type="world_rules",
+            field_name="rule_name",
+            field_value=item.rule_name,
+        )
+        mutation_result = await save_story_knowledge(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key="world_rules",
+            item=item_payload,
+            entity_id=str(existing.rule_id) if existing is not None else None,
+            source_workflow="bulk_import",
+            guard_operation="导入",
+        )
+        _extend_import_guard_warnings(
+            warnings,
+            section_key="world_rules",
+            item_label=item.rule_name,
+            mutation_result=mutation_result,
+        )
+        imported_counts["world_rules"] += 1
+
+    for item in payload.timeline_events:
+        item_payload = item.model_dump()
+        imported_signatures["timeline_events"].add(
+            _build_import_payload_signature("timeline_events", item_payload)
+        )
+        existing = await _find_timeline_event(
+            session,
+            project_id=project_id,
+            chapter_number=item.chapter_number,
+            core_event=item.core_event,
+        )
+        mutation_result = await save_story_knowledge(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key="timeline_events",
+            item=item_payload,
+            entity_id=str(existing.event_id) if existing is not None else None,
+            source_workflow="bulk_import",
+            guard_operation="导入",
+        )
+        _extend_import_guard_warnings(
+            warnings,
+            section_key="timeline_events",
+            item_label=_build_import_item_label("timeline_events", item_payload),
+            mutation_result=mutation_result,
+        )
+        imported_counts["timeline_events"] += 1
+
+    outline_parent_map: dict[str, UUID] = {}
+    for level in ("level_1", "level_2", "level_3"):
+        for item in [outline for outline in payload.outlines if outline.level == level]:
+            parent_id = outline_parent_map.get(item.parent_title or "")
+            if parent_id is None and item.parent_title:
+                parent_outline = await _find_outline_by_title(
+                    session,
+                    project_id=project_id,
+                    title=item.parent_title,
+                )
+                if parent_outline is not None:
+                    parent_id = parent_outline.outline_id
+            outline_payload = item.model_dump(exclude={"parent_title"})
+            if parent_id is not None:
+                outline_payload["parent_id"] = parent_id
+            imported_signatures["outlines"].add(
+                _build_import_payload_signature("outlines", outline_payload)
+            )
+            existing = await _find_outline(
+                session,
+                project_id=project_id,
+                title=item.title,
+                level=item.level,
+            )
+            target_outline = existing
+            if item.level == "level_1" and target_outline is None:
+                target_outline = await _find_any_level_1_outline(session, project_id=project_id)
+            if target_outline is None:
+                mutation_result = await save_story_knowledge(
+                    session,
+                    project_id=project_id,
+                    user_id=user_id,
+                    section_key="outlines",
+                    item=outline_payload,
+                    source_workflow="bulk_import",
+                    guard_operation="导入",
+                )
+                _extend_import_guard_warnings(
+                    warnings,
+                    section_key="outlines",
+                    item_label=item.title,
+                    mutation_result=mutation_result,
+                )
+                created = await _find_outline(
+                    session,
+                    project_id=project_id,
+                    title=item.title,
+                    level=item.level,
+                )
+                if created is None:
+                    raise AppError(
+                        code="story_engine.import_outline_not_found",
+                        message=f"大纲《{item.title}》导入后未能成功落库，请重试。",
+                        status_code=500,
+                    )
+            else:
+                if item.level == "level_1" and getattr(target_outline, "locked", False):
+                    _append_import_warning(
+                        warnings,
+                        f"一级大纲《{target_outline.title}》已锁定，这次导入保留原主线不覆盖。",
+                    )
+                    created = target_outline
+                else:
+                    mutation_result = await save_story_knowledge(
+                        session,
+                        project_id=project_id,
+                        user_id=user_id,
+                        section_key="outlines",
+                        item=outline_payload,
+                        entity_id=str(target_outline.outline_id),
+                        source_workflow="bulk_import",
+                        guard_operation="导入",
+                    )
+                    _extend_import_guard_warnings(
+                        warnings,
+                        section_key="outlines",
+                        item_label=item.title,
+                        mutation_result=mutation_result,
+                    )
+                    created = await _find_outline(
+                        session,
+                        project_id=project_id,
+                        title=item.title,
+                        level=item.level,
+                    ) or target_outline
+            outline_parent_map[item.title] = created.outline_id
+            imported_counts["outlines"] += 1
+
+    for item in payload.chapter_summaries:
+        item_payload = item.model_dump()
+        imported_signatures["chapter_summaries"].add(
+            _build_import_payload_signature("chapter_summaries", item_payload)
+        )
+        existing = await _find_chapter_summary(
+            session,
+            project_id=project_id,
+            chapter_number=item.chapter_number,
+        )
+        mutation_result = await save_story_knowledge(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key="chapter_summaries",
+            item=item_payload,
+            entity_id=str(existing.summary_id) if existing is not None else None,
+            source_workflow="bulk_import",
+            guard_operation="导入",
+        )
+        _extend_import_guard_warnings(
+            warnings,
+            section_key="chapter_summaries",
+            item_label=_build_import_item_label("chapter_summaries", item_payload),
+            mutation_result=mutation_result,
+        )
+        imported_counts["chapter_summaries"] += 1
+
+    for section in normalized_replace_sections:
+        for entity in existing_entities_by_section.get(section, []):
+            if section == "outlines" and getattr(entity, "locked", False):
+                continue
+            identity_signature = _build_import_entity_signature(section, entity)
+            if identity_signature in imported_signatures[section]:
+                continue
+            await delete_story_knowledge(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                section_key=section,
+                entity_id=str(getattr(entity, SECTION_ID_FIELD_MAP[section])),
+                source_workflow="bulk_import",
+            )
+
+    applied_model_preset_label: str | None = None
+    if model_preset_key:
+        project = await get_story_engine_project(
+            session,
+            project_id,
+            user_id,
+            permission=PROJECT_PERMISSION_EDIT,
+        )
+        project.story_engine_settings = build_story_engine_settings_for_preset(model_preset_key)
+        session.add(project)
+        await session.commit()
+        await session.refresh(project)
+        applied_model_preset_label = get_story_engine_model_preset_label(model_preset_key)
+
+    return {
+        "imported_counts": imported_counts,
+        "replaced_sections": normalized_replace_sections,
+        "applied_model_preset_key": model_preset_key,
+        "applied_model_preset_label": applied_model_preset_label,
+        "warnings": warnings,
+    }
+def _append_import_warning(warnings: list[str], message: str) -> None:
+    normalized = str(message or "").strip()
+    if not normalized or normalized in warnings:
+        return
+    if len(warnings) >= 20:
+        return
+    warnings.append(normalized)
+
+
+def _extend_import_guard_warnings(
+    warnings: list[str],
+    *,
+    section_key: str,
+    item_label: str,
+    mutation_result: dict[str, Any],
+) -> None:
+    if int(mutation_result.get("warning_count") or 0) <= 0:
+        return
+    alert_titles = [
+        str(item.get("title") or "").strip()
+        for item in mutation_result.get("alerts") or []
+        if str(item.get("severity") or "").strip().lower() in {"medium", "low"}
+        and str(item.get("title") or "").strip()
+    ]
+    if alert_titles:
+        summary = "；".join(alert_titles[:2])
+    else:
+        summary = str(mutation_result.get("message") or "").strip() or "有连续性提醒"
+    section_label = SECTION_LABEL_MAP.get(section_key, section_key)
+    label = item_label.strip() or section_label
+    _append_import_warning(
+        warnings,
+        f"{section_label}《{label}》已导入，但守护提醒：{summary}。",
+    )
+
+
+def _build_import_payload_signature(section_key: str, item: dict[str, Any]) -> str:
+    if section_key == "characters":
+        return f"name:{str(item.get('name') or '').strip()}"
+    if section_key == "foreshadows":
+        return f"content:{str(item.get('content') or '').strip()}"
+    if section_key == "items":
+        return f"name:{str(item.get('name') or '').strip()}"
+    if section_key == "world_rules":
+        return f"rule_name:{str(item.get('rule_name') or '').strip()}"
+    if section_key == "timeline_events":
+        return (
+            f"chapter:{item.get('chapter_number')}|core_event:{str(item.get('core_event') or '').strip()}"
+        )
+    if section_key == "outlines":
+        return f"level:{str(item.get('level') or '').strip()}|title:{str(item.get('title') or '').strip()}"
+    if section_key == "chapter_summaries":
+        return f"chapter_number:{item.get('chapter_number')}"
+    return ""
+
+
+def _build_import_entity_signature(section_key: str, entity: Any) -> str:
+    if section_key == "characters":
+        return f"name:{str(getattr(entity, 'name', '')).strip()}"
+    if section_key == "foreshadows":
+        return f"content:{str(getattr(entity, 'content', '')).strip()}"
+    if section_key == "items":
+        return f"name:{str(getattr(entity, 'name', '')).strip()}"
+    if section_key == "world_rules":
+        return f"rule_name:{str(getattr(entity, 'rule_name', '')).strip()}"
+    if section_key == "timeline_events":
+        return f"chapter:{getattr(entity, 'chapter_number', None)}|core_event:{str(getattr(entity, 'core_event', '')).strip()}"
+    if section_key == "outlines":
+        return f"level:{str(getattr(entity, 'level', '')).strip()}|title:{str(getattr(entity, 'title', '')).strip()}"
+    if section_key == "chapter_summaries":
+        return f"chapter_number:{getattr(entity, 'chapter_number', None)}"
+    return ""
+
+
+def _build_import_item_label(section_key: str, item: dict[str, Any]) -> str:
+    if section_key == "foreshadows":
+        return str(item.get("content") or "").strip()[:24] or "新伏笔"
+    if section_key == "timeline_events":
+        chapter_number = item.get("chapter_number")
+        core_event = str(item.get("core_event") or "").strip()[:24]
+        if chapter_number:
+            return f"第{chapter_number}章 {core_event}".strip()
+        return core_event or "时间线事件"
+    if section_key == "chapter_summaries":
+        chapter_number = item.get("chapter_number")
+        return f"第{chapter_number}章总结" if chapter_number else "章节总结"
+    for field in ("name", "rule_name", "title"):
+        value = str(item.get(field) or "").strip()
+        if value:
+            return value
+    return SECTION_LABEL_MAP.get(section_key, section_key)
+
+
+async def _find_by_field(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    entity_type: str,
+    field_name: str,
+    field_value: Any,
+) -> Any | None:
+    model = SECTION_MODEL_MAP[entity_type]
+    statement = select(model).where(
+        model.project_id == project_id,
+        getattr(model, field_name) == field_value,
+    )
+    result = await session.execute(statement)
+    return result.scalar_one_or_none()
+
+
+async def _find_timeline_event(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    chapter_number: int | None,
+    core_event: str,
+) -> StoryTimelineMapEvent | None:
+    statement = select(StoryTimelineMapEvent).where(
+        StoryTimelineMapEvent.project_id == project_id,
+        StoryTimelineMapEvent.chapter_number == chapter_number,
+        StoryTimelineMapEvent.core_event == core_event,
+    )
+    result = await session.execute(statement)
+    return result.scalar_one_or_none()
+
+
+async def _find_outline(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    title: str,
+    level: str,
+) -> StoryOutline | None:
+    statement = select(StoryOutline).where(
+        StoryOutline.project_id == project_id,
+        StoryOutline.title == title,
+        StoryOutline.level == level,
+    )
+    result = await session.execute(statement)
+    return result.scalar_one_or_none()
+
+
+async def _find_any_level_1_outline(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+) -> StoryOutline | None:
+    statement = select(StoryOutline).where(
+        StoryOutline.project_id == project_id,
+        StoryOutline.level == "level_1",
+    )
+    result = await session.execute(statement)
+    return result.scalars().first()
+
+
+async def _find_outline_by_title(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    title: str,
+) -> StoryOutline | None:
+    statement = select(StoryOutline).where(
+        StoryOutline.project_id == project_id,
+        StoryOutline.title == title,
+    )
+    result = await session.execute(statement)
+    return result.scalars().first()
+
+
+async def _find_chapter_summary(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    chapter_number: int,
+) -> StoryChapterSummary | None:
+    statement = select(StoryChapterSummary).where(
+        StoryChapterSummary.project_id == project_id,
+        StoryChapterSummary.chapter_number == chapter_number,
+    )
+    result = await session.execute(statement)
+    return result.scalar_one_or_none()

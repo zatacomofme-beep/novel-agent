@@ -43,12 +43,13 @@ class Chapter(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text, default="", nullable=False)
     outline: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB)
     word_count: Mapped[Optional[int]] = mapped_column(Integer)
+    current_version_number: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
     quality_metrics: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB)
 
     project: Mapped["Project"] = relationship(back_populates="chapters")
-    volume: Mapped["ProjectVolume | None"] = relationship(back_populates="chapters")
-    branch: Mapped["ProjectBranch | None"] = relationship(back_populates="chapters")
+    volume: Mapped[Optional["ProjectVolume"]] = relationship(back_populates="chapters")
+    branch: Mapped[Optional["ProjectBranch"]] = relationship(back_populates="chapters")
     versions: Mapped[list["ChapterVersion"]] = relationship(
         back_populates="chapter",
         cascade="all, delete-orphan",

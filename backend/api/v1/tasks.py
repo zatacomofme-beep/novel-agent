@@ -1,6 +1,7 @@
+from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +14,7 @@ from services.task_service import (
     get_task_run_by_task_id,
     list_task_events_for_task,
     list_task_runs_for_chapter,
+    list_task_runs_for_project,
 )
 from tasks.schemas import TaskEventRead, TaskState
 from tasks.state_store import task_state_store
@@ -88,6 +90,32 @@ async def tasks_for_chapter(
     task_runs = await list_task_runs_for_chapter(
         session,
         chapter_id,
+    )
+    states = [TaskState.from_task_run(task_run) for task_run in task_runs]
+    for state in states:
+        task_state_store.set(state)
+    return states
+
+
+@router.get("/projects/{project_id}/tasks", response_model=list[TaskState])
+async def tasks_for_project(
+    project_id: UUID,
+    task_type_prefix: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[TaskState]:
+    await get_owned_project(
+        session,
+        project_id,
+        current_user.id,
+        permission=PROJECT_PERMISSION_READ,
+    )
+    task_runs = await list_task_runs_for_project(
+        session,
+        project_id,
+        limit=limit,
+        task_type_prefix=task_type_prefix,
     )
     states = [TaskState.from_task_run(task_run) for task_run in task_runs]
     for state in states:

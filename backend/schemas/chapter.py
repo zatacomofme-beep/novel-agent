@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import Field
 
 from schemas.base import ORMModel
+from schemas.quality import ChapterQualityMetricsSnapshot
 
 
 class ChapterCreate(ORMModel):
@@ -28,7 +29,7 @@ class ChapterUpdate(ORMModel):
     content: Optional[str] = None
     outline: Optional[dict[str, Any]] = None
     status: Optional[str] = Field(default=None, max_length=50)
-    quality_metrics: Optional[dict[str, Any]] = None
+    quality_metrics: Optional[ChapterQualityMetricsSnapshot] = None
     change_reason: Optional[str] = None
     create_version: bool = True
 
@@ -43,8 +44,9 @@ class ChapterRead(ORMModel):
     content: str
     outline: Optional[dict[str, Any]] = None
     word_count: Optional[int] = None
+    current_version_number: int = 1
     status: str
-    quality_metrics: Optional[dict[str, Any]] = None
+    quality_metrics: Optional[ChapterQualityMetricsSnapshot] = None
     pending_checkpoint_count: int = 0
     rejected_checkpoint_count: int = 0
     latest_checkpoint_status: Optional[str] = None
@@ -52,6 +54,17 @@ class ChapterRead(ORMModel):
     latest_review_verdict: Optional[str] = None
     latest_review_summary: Optional[str] = None
     review_gate_blocked: bool = False
+    evaluation_gate_blocked: bool = False
+    latest_evaluation_status: str = "missing"
+    latest_evaluation_stale_reason: Optional[str] = None
+    integrity_gate_blocked: bool = False
+    latest_story_bible_integrity_issue_count: int = 0
+    latest_story_bible_integrity_blocking_issue_count: int = 0
+    latest_story_bible_integrity_summary: Optional[str] = None
+    canon_gate_blocked: bool = False
+    latest_canon_issue_count: int = 0
+    latest_canon_blocking_issue_count: int = 0
+    latest_canon_summary: Optional[str] = None
     final_ready: bool = True
     final_gate_status: str = "ready"
     final_gate_reason: Optional[str] = None

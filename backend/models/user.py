@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,7 +18,7 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
-    preference_profile: Mapped["UserPreference | None"] = relationship(
+    preference_profile: Mapped[Optional["UserPreference"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         uselist=False,

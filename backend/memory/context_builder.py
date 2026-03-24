@@ -47,6 +47,20 @@ async def build_context_bundle(
         vector_store.search(
             project_id=str(story_bible.project_id),
             query=query,
+            items=story_bible.items,
+            item_type="item",
+            limit=4,
+        ),
+        vector_store.search(
+            project_id=str(story_bible.project_id),
+            query=query,
+            items=story_bible.factions,
+            item_type="faction",
+            limit=4,
+        ),
+        vector_store.search(
+            project_id=str(story_bible.project_id),
+            query=query,
             items=story_bible.locations,
             item_type="location",
             limit=4,

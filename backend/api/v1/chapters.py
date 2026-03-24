@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_user, get_db_session
@@ -54,7 +54,7 @@ from services.project_service import (
     PROJECT_PERMISSION_EDIT,
     PROJECT_PERMISSION_READ,
 )
-from tasks.chapter_generation import enqueue_chapter_generation_task, process_generation_task
+from tasks.chapter_generation import dispatch_generation_task, enqueue_chapter_generation_task
 from tasks.schemas import TaskState
 
 
@@ -298,7 +298,6 @@ async def chapter_rollback(
 @router.post("/chapters/{chapter_id}/generate", response_model=TaskState)
 async def chapter_generate(
     chapter_id: UUID,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TaskState:
@@ -315,8 +314,7 @@ async def chapter_generate(
         str(chapter.project_id),
         payload,
     )
-    background_tasks.add_task(
-        process_generation_task,
+    task_state = await dispatch_generation_task(
         task_id=task_state.task_id,
         chapter_id=str(chapter.id),
         project_id=str(chapter.project_id),
