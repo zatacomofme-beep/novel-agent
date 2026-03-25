@@ -30,6 +30,7 @@ from services.story_engine_unified_knowledge_service import (
     delete_story_knowledge,
     save_story_knowledge,
 )
+from services.story_engine_workflow_service import run_story_bulk_import_guard
 
 
 IMPORTABLE_SECTIONS = (
@@ -156,12 +157,18 @@ def list_import_templates() -> list[dict[str, Any]]:
                         "relationships": [{"target_name": "主角", "relation": "宿敌", "intensity": "high"}],
                         "status": "active",
                         "arc_stage": "initial",
-                        "arc_boundaries": [],
+                        "arc_boundaries": [
+                            {
+                                "stage": "initial",
+                                "forbidden_behaviors": ["机缘未成熟前亲手击杀主角", "无视更高层约束公开碾压主角"],
+                                "allowed_behaviors": ["借外部势力持续施压", "把主角当成钓出更深层秘密的诱饵"],
+                            }
+                        ],
                     },
                 ],
                 "foreshadows": [
                     {
-                        "content": "主角体内或身世里藏着一条会在中后期爆开的核心真相。",
+                        "content": "主角身世里藏着一条会在中后期爆开的核心真相。",
                         "chapter_planted": 1,
                         "chapter_planned_reveal": 80,
                         "status": "pending",
@@ -183,6 +190,12 @@ def list_import_templates() -> list[dict[str, Any]]:
                         "rule_name": "越级爆发必有代价",
                         "rule_content": "任何超出当前层级的爆发都要支付真实代价，不能白送。",
                         "negative_list": ["无代价开挂", "大战后秒恢复"],
+                        "scope": "battle",
+                    },
+                    {
+                        "rule_name": "规则压制存在触发门槛",
+                        "rule_content": "规则压制型能力只有在境界、媒介和场域三者同时满足时才能生效，持续压制会反噬施术者，且可被更高阶规则、外部契约或未成熟的核心机缘干扰。",
+                        "negative_list": ["没有前提就能无限压制", "压制失败却毫无反噬", "主角没有锚点就硬破规则"],
                         "scope": "battle",
                     }
                 ],
@@ -245,6 +258,14 @@ async def bulk_import_story_payload(
     existing_entities_by_section: dict[str, list[Any]] = {}
 
     warnings: list[str] = []
+    preflight_result = await run_story_bulk_import_guard(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        payload=payload.model_dump(mode="json"),
+    )
+    _raise_when_bulk_import_guard_blocks(preflight_result)
+    _extend_import_preflight_warnings(warnings, preflight_result)
     if len(normalized_replace_sections) != len(replace_existing_sections):
         _append_import_warning(warnings, "部分 replace_existing_sections 无效，已自动忽略。")
 
@@ -265,6 +286,38 @@ async def bulk_import_story_payload(
 
     imported_counts = {section: 0 for section in IMPORTABLE_SECTIONS}
     imported_signatures = {section: set() for section in IMPORTABLE_SECTIONS}
+
+    # 先导入世界规则，再导入人物，避免人物能力依赖的底层规则在守护校验时不可见。
+    for item in payload.world_rules:
+        item_payload = item.model_dump()
+        imported_signatures["world_rules"].add(
+            _build_import_payload_signature("world_rules", item_payload)
+        )
+        existing = await _find_by_field(
+            session,
+            project_id=project_id,
+            entity_type="world_rules",
+            field_name="rule_name",
+            field_value=item.rule_name,
+        )
+        mutation_result = await save_story_knowledge(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key="world_rules",
+            item=item_payload,
+            entity_id=str(existing.rule_id) if existing is not None else None,
+            source_workflow="bulk_import",
+            guard_operation="导入",
+            skip_guard=True,
+        )
+        _extend_import_guard_warnings(
+            warnings,
+            section_key="world_rules",
+            item_label=item.rule_name,
+            mutation_result=mutation_result,
+        )
+        imported_counts["world_rules"] += 1
 
     for item in payload.characters:
         item_payload = item.model_dump()
@@ -287,6 +340,7 @@ async def bulk_import_story_payload(
             entity_id=str(existing.character_id) if existing is not None else None,
             source_workflow="bulk_import",
             guard_operation="导入",
+            skip_guard=True,
         )
         _extend_import_guard_warnings(
             warnings,
@@ -317,6 +371,7 @@ async def bulk_import_story_payload(
             entity_id=str(existing.foreshadow_id) if existing is not None else None,
             source_workflow="bulk_import",
             guard_operation="导入",
+            skip_guard=True,
         )
         _extend_import_guard_warnings(
             warnings,
@@ -347,6 +402,7 @@ async def bulk_import_story_payload(
             entity_id=str(existing.item_id) if existing is not None else None,
             source_workflow="bulk_import",
             guard_operation="导入",
+            skip_guard=True,
         )
         _extend_import_guard_warnings(
             warnings,
@@ -355,36 +411,6 @@ async def bulk_import_story_payload(
             mutation_result=mutation_result,
         )
         imported_counts["items"] += 1
-
-    for item in payload.world_rules:
-        item_payload = item.model_dump()
-        imported_signatures["world_rules"].add(
-            _build_import_payload_signature("world_rules", item_payload)
-        )
-        existing = await _find_by_field(
-            session,
-            project_id=project_id,
-            entity_type="world_rules",
-            field_name="rule_name",
-            field_value=item.rule_name,
-        )
-        mutation_result = await save_story_knowledge(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key="world_rules",
-            item=item_payload,
-            entity_id=str(existing.rule_id) if existing is not None else None,
-            source_workflow="bulk_import",
-            guard_operation="导入",
-        )
-        _extend_import_guard_warnings(
-            warnings,
-            section_key="world_rules",
-            item_label=item.rule_name,
-            mutation_result=mutation_result,
-        )
-        imported_counts["world_rules"] += 1
 
     for item in payload.timeline_events:
         item_payload = item.model_dump()
@@ -406,6 +432,7 @@ async def bulk_import_story_payload(
             entity_id=str(existing.event_id) if existing is not None else None,
             source_workflow="bulk_import",
             guard_operation="导入",
+            skip_guard=True,
         )
         _extend_import_guard_warnings(
             warnings,
@@ -451,6 +478,7 @@ async def bulk_import_story_payload(
                     item=outline_payload,
                     source_workflow="bulk_import",
                     guard_operation="导入",
+                    skip_guard=True,
                 )
                 _extend_import_guard_warnings(
                     warnings,
@@ -487,6 +515,7 @@ async def bulk_import_story_payload(
                         entity_id=str(target_outline.outline_id),
                         source_workflow="bulk_import",
                         guard_operation="导入",
+                        skip_guard=True,
                     )
                     _extend_import_guard_warnings(
                         warnings,
@@ -522,6 +551,7 @@ async def bulk_import_story_payload(
             entity_id=str(existing.summary_id) if existing is not None else None,
             source_workflow="bulk_import",
             guard_operation="导入",
+            skip_guard=True,
         )
         _extend_import_guard_warnings(
             warnings,
@@ -568,6 +598,42 @@ async def bulk_import_story_payload(
         "applied_model_preset_label": applied_model_preset_label,
         "warnings": warnings,
     }
+
+
+def _raise_when_bulk_import_guard_blocks(guard_result: dict[str, Any]) -> None:
+    if not guard_result.get("blocked"):
+        return
+    raise AppError(
+        code="story_engine.import_guard_blocked",
+        message=str(guard_result.get("message") or "这批设定暂时不能导入。"),
+        status_code=409,
+        metadata={
+            "alerts": guard_result.get("alerts") or [],
+            "blocking_issue_count": int(guard_result.get("blocking_issue_count") or 0),
+            "warning_count": int(guard_result.get("warning_count") or 0),
+        },
+    )
+
+
+def _extend_import_preflight_warnings(
+    warnings: list[str],
+    guard_result: dict[str, Any],
+) -> None:
+    if int(guard_result.get("warning_count") or 0) <= 0:
+        return
+    issue_titles = [
+        str(item.get("title") or "").strip()
+        for item in guard_result.get("alerts") or []
+        if str(item.get("severity") or "").strip().lower() in {"medium", "low"}
+        and str(item.get("title") or "").strip()
+    ]
+    if issue_titles:
+        summary = "；".join(issue_titles[:3])
+    else:
+        summary = str(guard_result.get("message") or "").strip() or "导入前总体验证有提醒"
+    _append_import_warning(warnings, f"导入前校验提醒：{summary}。")
+
+
 def _append_import_warning(warnings: list[str], message: str) -> None:
     normalized = str(message or "").strip()
     if not normalized or normalized in warnings:

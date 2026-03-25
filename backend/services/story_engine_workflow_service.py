@@ -11,8 +11,17 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.story_agents import build_agent_report, export_agent_specs
+from core.config import get_settings
 from core.errors import AppError
 from models.story_engine import StoryChapterSummary, StoryOutline
+from schemas.story_engine import (
+    StoryCharacterRead,
+    StoryForeshadowRead,
+    StoryItemRead,
+    StoryOutlineRead,
+    StoryTimelineMapEventRead,
+    StoryWorldRuleRead,
+)
 from services.story_engine_kb_service import (
     build_workspace,
     create_entity,
@@ -50,11 +59,23 @@ except ImportError:  # pragma: no cover - 开发环境缺依赖时走本地串�
     LANGGRAPH_AVAILABLE = False
 
 
+_STORY_ENGINE_READ_SCHEMAS = {
+    "characters": StoryCharacterRead,
+    "foreshadows": StoryForeshadowRead,
+    "items": StoryItemRead,
+    "world_rules": StoryWorldRuleRead,
+    "timeline_events": StoryTimelineMapEventRead,
+    "outlines": StoryOutlineRead,
+}
+
+
 class OutlineStressState(TypedDict, total=False):
     session: AsyncSession
     project_id: UUID
     user_id: UUID
     idea: str
+    source_material: Optional[str]
+    source_material_name: Optional[str]
     genre: Optional[str]
     tone: Optional[str]
     target_chapter_count: int
@@ -68,6 +89,7 @@ class OutlineStressState(TypedDict, total=False):
     debate_round: int
     unresolved_issues: list[dict[str, Any]]
     optimization_plan: list[str]
+    debate_history: list[dict[str, Any]]
     arbitrated_report: dict[str, Any]
 
 
@@ -107,9 +129,8 @@ class FinalVerifyState(TypedDict, total=False):
     style_report: dict[str, Any]
     anchor_payload: dict[str, Any]
     final_package: dict[str, Any]
-
-
-MAX_FINAL_VERIFY_CONSENSUS_ROUNDS = 4
+    finalize_output: bool
+    output_finalized: bool
 
 
 async def run_outline_stress_test(
@@ -117,7 +138,9 @@ async def run_outline_stress_test(
     *,
     project_id: UUID,
     user_id: UUID,
-    idea: str,
+    idea: Optional[str],
+    source_material: Optional[str],
+    source_material_name: Optional[str],
     genre: Optional[str],
     tone: Optional[str],
     target_chapter_count: int,
@@ -128,7 +151,9 @@ async def run_outline_stress_test(
         "session": session,
         "project_id": project_id,
         "user_id": user_id,
-        "idea": idea,
+        "idea": (idea or "").strip(),
+        "source_material": (source_material or "").strip() or None,
+        "source_material_name": (source_material_name or "").strip() or None,
         "genre": genre,
         "tone": tone,
         "target_chapter_count": target_chapter_count,
@@ -137,6 +162,7 @@ async def run_outline_stress_test(
         "debate_round": 0,
         "optimization_plan": [],
         "unresolved_issues": [],
+        "debate_history": [],
     }
     if LANGGRAPH_AVAILABLE:
         graph = _build_outline_stress_graph()
@@ -150,12 +176,33 @@ async def run_outline_stress_test(
         outline_draft=result["outline_draft"],
         initial_kb=result["initial_kb"],
     )
-    outlines = persisted["outlines"]
+    serialized_outlines = _serialize_story_api_entities(
+        "outlines",
+        persisted["outlines"],
+    )
     return {
-        "locked_level_1_outlines": [item for item in outlines if item.level == "level_1"],
-        "editable_level_2_outlines": [item for item in outlines if item.level == "level_2"],
-        "editable_level_3_outlines": [item for item in outlines if item.level == "level_3"],
-        "initial_knowledge_base": persisted["initial_kb"],
+        "locked_level_1_outlines": [
+            item for item in serialized_outlines if item.get("level") == "level_1"
+        ],
+        "editable_level_2_outlines": [
+            item for item in serialized_outlines if item.get("level") == "level_2"
+        ],
+        "editable_level_3_outlines": [
+            item for item in serialized_outlines if item.get("level") == "level_3"
+        ],
+        "initial_knowledge_base": {
+            entity_type: _serialize_story_api_entities(
+                entity_type,
+                persisted["initial_kb"].get(entity_type) or [],
+            )
+            for entity_type in (
+                "characters",
+                "foreshadows",
+                "items",
+                "world_rules",
+                "timeline_events",
+            )
+        },
         "risk_report": result["arbitrated_report"]["issues"],
         "optimization_plan": result["optimization_plan"],
         "debate_rounds_completed": result["debate_round"],
@@ -165,6 +212,7 @@ async def run_outline_stress_test(
             result["logic_report"],
             result["arbitrated_report"],
         ],
+        "deliberation_rounds": _build_outline_deliberation_rounds(result),
     }
 
 
@@ -304,6 +352,81 @@ async def run_story_knowledge_guard(
     }
 
 
+async def run_story_bulk_import_guard(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    user_id: UUID,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    project = await get_story_engine_project(session, project_id, user_id)
+    workspace = await build_workspace(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+    )
+    fallback_issues = _build_story_bulk_import_guard_fallback_issues(
+        workspace=workspace,
+        payload=payload,
+    )
+    fallback_report = build_agent_report(
+        "guardian",
+        summary=(
+            "已完成批量导入前校验。"
+            if fallback_issues
+            else "这批初始化设定暂未发现需要阻断的硬冲突。"
+        ),
+        issues=fallback_issues,
+        proposed_actions=[
+            str(item.get("suggestion") or "").strip()
+            for item in fallback_issues
+            if str(item.get("suggestion") or "").strip()
+        ]
+        or ["可以开始批量导入这套初始化设定。"],
+    )
+    remote_report = await generate_story_agent_report(
+        agent_key="guardian",
+        task_name="story_engine.bulk_import_guard",
+        task_goal=(
+            "检查这批初始化设定在正式导入前是否会撞上人物边界、世界规则、主线锁定、"
+            "引用关系或长期连续性红线。"
+            "请只标记真实存在的矛盾、缺漏引用和规则冲突。"
+            "不要仅因为信息浓缩或字段较少，就把“信息颗粒度不足”本身判成高风险阻断项。"
+        ),
+        context=_build_story_bulk_import_guard_context_text(
+            workspace=workspace,
+            payload=payload,
+        ),
+        fallback_report=fallback_report,
+        model_routing=resolve_story_engine_model_routing(project),
+    )
+    merged_report = _merge_reports(remote_report, fallback_report)
+    alerts = list(merged_report.get("issues") or [])
+    blocking_alerts = [
+        item
+        for item in alerts
+        if str(item.get("severity") or "").strip().lower() in {"critical", "high"}
+    ]
+    warning_count = len(alerts) - len(blocking_alerts)
+    if blocking_alerts:
+        message = (
+            f"这批设定暂时不能导入，先修掉“{blocking_alerts[0]['title']}”再继续。"
+        )
+    elif warning_count > 0:
+        message = f"这批设定可以导入，但还有 {warning_count} 条连续性提醒。"
+    else:
+        message = "这批设定已经通过导入前校验，可以直接入库。"
+    return {
+        "passed": not blocking_alerts,
+        "blocked": bool(blocking_alerts),
+        "message": message,
+        "alerts": alerts,
+        "blocking_issue_count": len(blocking_alerts),
+        "warning_count": warning_count,
+        "report": merged_report,
+    }
+
+
 _STORY_KNOWLEDGE_SECTION_LABELS = {
     "characters": "人物设定",
     "foreshadows": "伏笔设定",
@@ -381,6 +504,251 @@ def _story_knowledge_json_snippet(payload: Any, limit: int = 1200) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _compact_prompt_text(text: str, limit: int = 5000) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def _build_agent_report_prompt_snapshot(
+    report: dict[str, Any],
+    *,
+    max_issues: int = 5,
+    max_actions: int = 5,
+) -> dict[str, Any]:
+    raw_output = dict(report.get("raw_output") or {})
+    return {
+        "agent_name": report.get("agent_name"),
+        "role": report.get("role"),
+        "summary": report.get("summary"),
+        "issues": [
+            {
+                "severity": item.get("severity"),
+                "title": item.get("title"),
+                "detail": _compact_prompt_text(str(item.get("detail") or ""), 240),
+                "source": item.get("source"),
+                "suggestion": item.get("suggestion"),
+            }
+            for item in list(report.get("issues") or [])[:max_issues]
+        ],
+        "proposed_actions": list(report.get("proposed_actions") or [])[:max_actions],
+        "provider": raw_output.get("provider"),
+        "model": raw_output.get("model"),
+        "used_fallback": raw_output.get("used_fallback"),
+    }
+
+
+def _truncate_deliberation_text(text: Any, limit: int = 96) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1] + "…"
+
+
+def _format_deliberation_actor_label(report: dict[str, Any]) -> str:
+    role = str(report.get("role") or report.get("agent_name") or "分析者").strip()
+    return role.replace("_Agent", "").replace("Agent", "").strip()
+
+
+def _build_deliberation_entry_from_report(
+    report: dict[str, Any],
+    *,
+    stance: str,
+    actor_label: Optional[str] = None,
+    summary: Optional[str] = None,
+    evidence: Optional[list[str]] = None,
+    actions: Optional[list[str]] = None,
+    issues: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    report_issues = list(issues if issues is not None else report.get("issues") or [])
+    report_actions = list(actions if actions is not None else report.get("proposed_actions") or [])
+    computed_evidence = list(evidence or [])
+    raw_output = dict(report.get("raw_output") or {})
+
+    if raw_output.get("guardian_consensus_mode") == "dual":
+        if raw_output.get("disagreement"):
+            computed_evidence.append("这一步先做了双路交叉复核，再由第三方收口。")
+        else:
+            computed_evidence.append("这一步做了双路交叉复核，结论一致。")
+
+    if not computed_evidence and report_issues:
+        for item in report_issues[:2]:
+            computed_evidence.append(
+                f"{str(item.get('title') or '').strip()}：{_truncate_deliberation_text(item.get('detail'), 72)}"
+            )
+    if not computed_evidence and report_actions:
+        computed_evidence.extend(
+            [f"动作：{_truncate_deliberation_text(item, 72)}" for item in report_actions[:2]]
+        )
+    if not computed_evidence:
+        computed_evidence.append("本轮没有保留新的硬问题。")
+
+    return {
+        "actor_key": str(report.get("agent_name") or report.get("role") or stance).strip().lower(),
+        "actor_label": actor_label or _format_deliberation_actor_label(report),
+        "role": str(report.get("role") or "").strip(),
+        "stance": stance,
+        "summary": summary or str(report.get("summary") or "").strip(),
+        "evidence": computed_evidence[:3],
+        "actions": report_actions[:3],
+        "issues": report_issues[:3],
+    }
+
+
+def _build_outline_deliberation_rounds(result: OutlineStressState) -> list[dict[str, Any]]:
+    rounds: list[dict[str, Any]] = [
+        {
+            "round_number": 1,
+            "title": "初版生成",
+            "summary": "先把故事核心压成三级大纲，再做第一轮红线和节奏检查。",
+            "resolution": "已经落出第一版主线与章纲骨架。",
+            "entries": [
+                _build_deliberation_entry_from_report(
+                    result["guardian_report"],
+                    stance="review",
+                ),
+                _build_deliberation_entry_from_report(
+                    result["commercial_report"],
+                    stance="review",
+                ),
+            ],
+        },
+        {
+            "round_number": 2,
+            "title": "逻辑挑刺",
+            "summary": "把这套大纲往长篇尺度推演，专挑后期会炸的问题。",
+            "resolution": (
+                f"先挂出 {len(result['logic_report'].get('issues') or [])} 个需要继续收口的点。"
+                if result["logic_report"].get("issues")
+                else "这一轮没有发现必须继续追打的硬问题。"
+            ),
+            "entries": [
+                _build_deliberation_entry_from_report(
+                    result["logic_report"],
+                    stance="challenge",
+                )
+            ],
+        },
+    ]
+
+    for item in result.get("debate_history") or []:
+        focus_issue = dict(item.get("focus_issue") or {})
+        patch_action = str(item.get("patch_action") or "").strip()
+        rounds.append(
+            {
+                "round_number": len(rounds) + 1,
+                "title": f"补丁轮 {item.get('round_number')}",
+                "summary": (
+                    f"围绕“{focus_issue.get('title') or '当前风险'}”补一个结构性修法。"
+                ),
+                "resolution": (
+                    f"处理完这一处后，还剩 {int(item.get('remaining_issue_count') or 0)} 个点继续盯。"
+                ),
+                "entries": [
+                    {
+                        "actor_key": "patch",
+                        "actor_label": "收敛补丁",
+                        "role": "结构修补",
+                        "stance": "revise",
+                        "summary": patch_action or "这一轮先补一个结构性缺口。",
+                        "evidence": [
+                            _truncate_deliberation_text(focus_issue.get("detail"), 84)
+                        ]
+                        if focus_issue.get("detail")
+                        else ["这一步只针对当前最危险的问题动刀。"] ,
+                        "actions": [patch_action] if patch_action else [],
+                        "issues": [focus_issue] if focus_issue else [],
+                    }
+                ],
+            }
+        )
+
+    arbitrated_issues = list(result["arbitrated_report"].get("issues") or [])
+    rounds.append(
+        {
+            "round_number": len(rounds) + 1,
+            "title": "终局裁决",
+            "summary": "把前面所有意见收成唯一执行版。",
+            "resolution": (
+                "主线已经锁死，可以进入正文。"
+                if not arbitrated_issues
+                else f"仍保留 {len(arbitrated_issues)} 个高风险点，写正文前先处理。"
+            ),
+            "entries": [
+                _build_deliberation_entry_from_report(
+                    result["arbitrated_report"],
+                    stance="arbitrate",
+                )
+            ],
+        }
+    )
+    return rounds
+
+
+def _build_final_anchor_deliberation_entry(anchor_payload: dict[str, Any]) -> dict[str, Any]:
+    chapter_summary = dict(anchor_payload.get("chapter_summary") or {})
+    kb_updates = list(anchor_payload.get("kb_updates") or [])
+    return {
+        "actor_key": "anchor",
+        "actor_label": "剧情锚定",
+        "role": "剧情锚定Agent",
+        "stance": "anchor",
+        "summary": str(chapter_summary.get("content") or "本轮已经整理出章节总结和设定更新。").strip(),
+        "evidence": [
+            f"本轮整理出 {len(kb_updates)} 条待确认设定。"
+        ],
+        "actions": [
+            _truncate_deliberation_text(str(item.get("title") or item.get("name") or item.get("content") or "回写设定"), 72)
+            for item in kb_updates[:2]
+        ],
+        "issues": [],
+    }
+
+
+def _build_final_deliberation_round(
+    *,
+    round_number: int,
+    result: FinalVerifyState,
+    resolution: str,
+) -> dict[str, Any]:
+    entries = [
+        _build_deliberation_entry_from_report(result["guardian_report"], stance="review"),
+        _build_deliberation_entry_from_report(result["logic_report"], stance="challenge"),
+        _build_deliberation_entry_from_report(result["commercial_report"], stance="review"),
+        _build_deliberation_entry_from_report(result["style_report"], stance="review"),
+        _build_final_anchor_deliberation_entry(dict(result.get("anchor_payload") or {})),
+        _build_deliberation_entry_from_report(
+            result["final_package"]["arbitrator_report"],
+            stance="arbitrate",
+        ),
+    ]
+    return {
+        "round_number": round_number,
+        "title": f"收口轮 {round_number}",
+        "summary": "四路独立检查后统一裁决，再决定要不要继续改一轮。",
+        "resolution": resolution,
+        "entries": entries,
+    }
+
+
+def _serialize_story_api_entities(
+    entity_type: str,
+    entities: list[Any],
+) -> list[dict[str, Any]]:
+    schema = _STORY_ENGINE_READ_SCHEMAS.get(entity_type)
+    if schema is None:
+        raise AppError(
+            code="story_engine.api_entity_serialize_unsupported",
+            message=f"当前实体类型暂不支持 API 序列化：{entity_type}",
+            status_code=500,
+        )
+    return [
+        schema.model_validate(item).model_dump(mode="json")
+        for item in entities
+    ]
 
 
 def _normalize_story_knowledge_text(value: Any) -> str:
@@ -888,6 +1256,281 @@ def _build_story_knowledge_guard_context_text(
     )
 
 
+def _build_story_bulk_import_guard_fallback_issues(
+    *,
+    workspace: dict[str, Any],
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    imported_characters = payload.get("characters") if isinstance(payload.get("characters"), list) else []
+    imported_world_rules = payload.get("world_rules") if isinstance(payload.get("world_rules"), list) else []
+    imported_foreshadows = payload.get("foreshadows") if isinstance(payload.get("foreshadows"), list) else []
+    imported_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    imported_outlines = payload.get("outlines") if isinstance(payload.get("outlines"), list) else []
+
+    known_character_names = {
+        _resolve_story_knowledge_item_label("characters", item)
+        for item in (workspace.get("characters") or [])
+    }
+    known_character_names.update(
+        str(item.get("name") or "").strip()
+        for item in imported_characters
+        if str(item.get("name") or "").strip()
+    )
+    known_item_names = {
+        _resolve_story_knowledge_item_label("items", item)
+        for item in (workspace.get("items") or [])
+    }
+    known_item_names.update(
+        str(item.get("name") or "").strip()
+        for item in imported_items
+        if str(item.get("name") or "").strip()
+    )
+
+    if not imported_characters and not (workspace.get("characters") or []):
+        issues.append(
+            {
+                "severity": "critical",
+                "title": "缺少人物锚点",
+                "detail": "当前项目里没有可用人物，这批导入也没有补人物，后续正文会失去稳定锚点。",
+                "source": "guardian",
+                "suggestion": "至少补一个主角或核心对手，再开始初始化。",
+            }
+        )
+
+    if not imported_world_rules and not (workspace.get("world_rules") or []):
+        issues.append(
+            {
+                "severity": "high",
+                "title": "缺少世界规则约束",
+                "detail": "当前项目里没有世界规则，这批导入也没有补规则，后续很容易写出无代价开挂。",
+                "source": "guardian",
+                "suggestion": "至少补一条能长期约束战力或代价的世界规则。",
+            }
+        )
+
+    for item in imported_characters:
+        source_name = str(item.get("name") or "").strip() or "未命名人物"
+        for relation in item.get("relationships") or []:
+            target_name = str(relation.get("target_name") or "").strip()
+            if target_name and target_name not in known_character_names:
+                issues.append(
+                    {
+                        "severity": "high",
+                        "title": f"人物关系目标缺失：{source_name}",
+                        "detail": f"人物“{source_name}”引用了不存在的关系对象“{target_name}”。",
+                        "source": "guardian",
+                        "suggestion": "先补齐目标人物，或把这条关系移到后续再补。",
+                    }
+                )
+
+    for item in imported_foreshadows:
+        planted = item.get("chapter_planted")
+        reveal = item.get("chapter_planned_reveal")
+        content = str(item.get("content") or "").strip()[:24] or "未命名伏笔"
+        if planted is not None and reveal is not None and int(reveal) < int(planted):
+            issues.append(
+                {
+                    "severity": "high",
+                    "title": f"伏笔回收顺序错误：{content}",
+                    "detail": "计划回收章节早于埋设章节，这条伏笔会直接破坏时间线。",
+                    "source": "guardian",
+                    "suggestion": "把回收章节调到埋设章节之后，或重设埋点位置。",
+                }
+            )
+        missing_characters = sorted(
+            {
+                str(name).strip()
+                for name in item.get("related_characters") or []
+                if str(name).strip() and str(name).strip() not in known_character_names
+            }
+        )
+        if missing_characters:
+            issues.append(
+                {
+                    "severity": "medium",
+                    "title": f"伏笔关联人物待补齐：{content}",
+                    "detail": f"这条伏笔引用了未落地人物：{', '.join(missing_characters)}。",
+                    "source": "guardian",
+                    "suggestion": "补齐对应人物，或先删掉这些关联字段。",
+                }
+            )
+        missing_items = sorted(
+            {
+                str(name).strip()
+                for name in item.get("related_items") or []
+                if str(name).strip() and str(name).strip() not in known_item_names
+            }
+        )
+        if missing_items:
+            issues.append(
+                {
+                    "severity": "medium",
+                    "title": f"伏笔关联物品待补齐：{content}",
+                    "detail": f"这条伏笔引用了未落地物品：{', '.join(missing_items)}。",
+                    "source": "guardian",
+                    "suggestion": "补齐对应物品，或先删掉这组关联。",
+                }
+            )
+
+    outline_titles = {
+        str(item.get("title") or "").strip()
+        for item in imported_outlines
+        if str(item.get("title") or "").strip()
+    }
+    outline_titles.update(
+        _resolve_story_knowledge_item_label("outlines", item)
+        for item in (workspace.get("outlines") or [])
+    )
+    for item in imported_outlines:
+        parent_title = str(item.get("parent_title") or "").strip()
+        title = str(item.get("title") or "").strip() or "未命名大纲"
+        if parent_title and parent_title not in outline_titles:
+            issues.append(
+                {
+                    "severity": "medium",
+                    "title": f"大纲父节点缺失：{title}",
+                    "detail": f"大纲“{title}”声明了父节点“{parent_title}”，但当前项目中找不到它。",
+                    "source": "guardian",
+                    "suggestion": "先补父节点，或改成挂到现有卷纲/主线下。",
+                }
+            )
+    return issues
+
+
+def _build_story_bulk_import_guard_context_text(
+    *,
+    workspace: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    project = workspace.get("project") or {}
+    story_bible = workspace.get("story_bible") or {}
+    context_payload = {
+        "project": {
+            "title": project.get("title"),
+            "genre": project.get("genre"),
+            "theme": project.get("theme"),
+            "tone": project.get("tone"),
+        },
+        "existing_workspace": {
+            "character_count": len(workspace.get("characters") or []),
+            "world_rule_count": len(workspace.get("world_rules") or []),
+            "outline_count": len(workspace.get("outlines") or []),
+            "foreshadow_count": len(workspace.get("foreshadows") or []),
+            "item_count": len(workspace.get("items") or []),
+            "story_bible_sections": {
+                "locations": len(story_bible.get("locations") or []),
+                "factions": len(story_bible.get("factions") or []),
+                "plot_threads": len(story_bible.get("plot_threads") or []),
+            },
+        },
+        "incoming_payload": _build_story_bulk_import_payload_snapshot(payload),
+        "incoming_payload_excerpt": _story_knowledge_json_snippet(payload, 3200),
+    }
+    return (
+        "任务：检查一批初始化设定在正式导入前是否安全。\n"
+        f"上下文：{_story_knowledge_json_snippet(context_payload, 5600)}"
+    )
+
+
+def _build_story_bulk_import_payload_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    def _items(key: str) -> list[dict[str, Any]]:
+        value = payload.get(key)
+        return value if isinstance(value, list) else []
+
+    characters = _items("characters")
+    world_rules = _items("world_rules")
+    foreshadows = _items("foreshadows")
+    items = _items("items")
+    outlines = _items("outlines")
+    timeline_events = _items("timeline_events")
+    chapter_summaries = _items("chapter_summaries")
+    return {
+        "counts": {
+            "characters": len(characters),
+            "world_rules": len(world_rules),
+            "foreshadows": len(foreshadows),
+            "items": len(items),
+            "outlines": len(outlines),
+            "timeline_events": len(timeline_events),
+            "chapter_summaries": len(chapter_summaries),
+        },
+        "character_labels": [
+            str(item.get("name") or "").strip()
+            for item in characters[:6]
+            if str(item.get("name") or "").strip()
+        ],
+        "world_rule_labels": [
+            str(item.get("rule_name") or "").strip()
+            for item in world_rules[:6]
+            if str(item.get("rule_name") or "").strip()
+        ],
+        "foreshadow_labels": [
+            str(item.get("content") or "").strip()[:36]
+            for item in foreshadows[:4]
+            if str(item.get("content") or "").strip()
+        ],
+        "item_labels": [
+            str(item.get("name") or "").strip()
+            for item in items[:4]
+            if str(item.get("name") or "").strip()
+        ],
+        "character_cards": [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "personality": str(item.get("personality") or "").strip(),
+                "status": str(item.get("status") or "").strip(),
+                "arc_stage": str(item.get("arc_stage") or "").strip(),
+                "relationships": item.get("relationships") or [],
+                "arc_boundaries": item.get("arc_boundaries") or [],
+            }
+            for item in characters[:4]
+            if str(item.get("name") or "").strip()
+        ],
+        "world_rule_cards": [
+            {
+                "rule_name": str(item.get("rule_name") or "").strip(),
+                "rule_content": str(item.get("rule_content") or "").strip(),
+                "negative_list": item.get("negative_list") or [],
+                "scope": str(item.get("scope") or "").strip(),
+            }
+            for item in world_rules[:4]
+            if str(item.get("rule_name") or "").strip()
+        ],
+        "foreshadow_cards": [
+            {
+                "content": str(item.get("content") or "").strip(),
+                "chapter_planted": item.get("chapter_planted"),
+                "chapter_planned_reveal": item.get("chapter_planned_reveal"),
+                "related_characters": item.get("related_characters") or [],
+                "related_items": item.get("related_items") or [],
+            }
+            for item in foreshadows[:4]
+            if str(item.get("content") or "").strip()
+        ],
+        "item_cards": [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "owner": str(item.get("owner") or "").strip(),
+                "location": str(item.get("location") or "").strip(),
+                "special_rules": item.get("special_rules") or [],
+            }
+            for item in items[:4]
+            if str(item.get("name") or "").strip()
+        ],
+        "outline_labels": [
+            {
+                "level": str(item.get("level") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+                "content": str(item.get("content") or "").strip()[:120],
+                "parent_title": str(item.get("parent_title") or "").strip(),
+            }
+            for item in outlines[:8]
+            if str(item.get("title") or "").strip()
+        ],
+    }
+
+
 async def run_chapter_stream_generate(
     session: AsyncSession,
     *,
@@ -937,6 +1580,75 @@ async def run_chapter_stream_generate(
     running_text = _join_stream_paragraphs(running_paragraphs)
     normalized_repair_instruction = str(repair_instruction or "").strip() or None
     rewritten_paragraph_index: Optional[int] = None
+    provider_model_pairs: list[str] = []
+    provider_model_seen: set[str] = set()
+    providers_used: set[str] = set()
+    models_used: set[str] = set()
+    fallback_paragraphs: list[int] = []
+    failover_paragraphs: list[int] = []
+    failover_details: list[dict[str, Any]] = []
+
+    def _record_stream_generation_result(
+        paragraph_index: int,
+        result: Any,
+    ) -> dict[str, Any]:
+        metadata = dict(getattr(result, "metadata", {}) or {})
+        provider = str(getattr(result, "provider", "") or "").strip()
+        model = str(getattr(result, "model", "") or "").strip()
+        pair = f"{provider}:{model}" if provider or model else ""
+
+        if pair and pair not in provider_model_seen:
+            provider_model_seen.add(pair)
+            provider_model_pairs.append(pair)
+        if provider:
+            providers_used.add(provider)
+        if model:
+            models_used.add(model)
+
+        if bool(getattr(result, "used_fallback", False)) and paragraph_index not in fallback_paragraphs:
+            fallback_paragraphs.append(paragraph_index)
+
+        if metadata.get("stream_failover_triggered") and paragraph_index not in failover_paragraphs:
+            failover_paragraphs.append(paragraph_index)
+
+        attempts = metadata.get("stream_failover_attempts")
+        if isinstance(attempts, list) and attempts:
+            failover_details.append(
+                {
+                    "paragraph_index": paragraph_index,
+                    "attempts": [
+                        {
+                            "role": str(item.get("role") or "").strip(),
+                            "model": str(item.get("model") or "").strip(),
+                            "selected_provider": str(
+                                item.get("selected_provider") or ""
+                            ).strip()
+                            or None,
+                            "error_type": str(item.get("error_type") or "").strip() or None,
+                            "status_code": item.get("status_code"),
+                            "message": str(item.get("message") or "").strip()[:160] or None,
+                        }
+                        for item in attempts
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        return metadata
+
+    def _build_stream_done_metadata() -> dict[str, Any]:
+        return {
+            "status": "completed",
+            "generated_length": len(running_text),
+            "resume_mode": resume_mode,
+            "rewritten_paragraph_index": rewritten_paragraph_index,
+            "any_fallback": bool(fallback_paragraphs),
+            "fallback_paragraphs": fallback_paragraphs,
+            "providers_used": sorted(providers_used),
+            "models_used": sorted(models_used),
+            "provider_model_pairs": provider_model_pairs,
+            "failover_paragraphs": failover_paragraphs,
+            "failover_details": failover_details,
+        }
 
     if rewrite_latest_paragraph:
         if normalized_repair_instruction is None:
@@ -986,6 +1698,7 @@ async def run_chapter_stream_generate(
             model_routing=model_routing,
             repair_instruction=normalized_repair_instruction,
         )
+        _record_stream_generation_result(rewritten_paragraph_index, rewritten_result)
         running_paragraphs[rewritten_paragraph_index - 1] = rewritten_result.content.strip()
         running_text = _join_stream_paragraphs(running_paragraphs)
 
@@ -1054,11 +1767,7 @@ async def run_chapter_stream_generate(
             "text": running_text,
             "paragraph_index": paragraph_total,
             "paragraph_total": paragraph_total,
-            "metadata": {
-                "status": "completed",
-                "generated_length": len(running_text),
-                "resume_mode": resume_mode,
-            },
+            "metadata": _build_stream_done_metadata(),
         }
         return
 
@@ -1107,6 +1816,7 @@ async def run_chapter_stream_generate(
             model_routing=model_routing,
             repair_instruction=normalized_repair_instruction if paragraph_index == starting_paragraph else None,
         )
+        paragraph_metadata = _record_stream_generation_result(paragraph_index, paragraph_result)
         paragraph = paragraph_result.content.strip()
         running_paragraphs.append(paragraph)
         running_text = _join_stream_paragraphs(running_paragraphs)
@@ -1122,6 +1832,9 @@ async def run_chapter_stream_generate(
                 "provider": paragraph_result.provider,
                 "model": paragraph_result.model,
                 "used_fallback": paragraph_result.used_fallback,
+                "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
+                "failover_attempts": paragraph_metadata.get("stream_failover_attempts") or [],
+                "selected_role": paragraph_metadata.get("stream_selected_role"),
                 "resume_mode": resume_mode,
             },
         }
@@ -1162,12 +1875,7 @@ async def run_chapter_stream_generate(
         "text": running_text,
         "paragraph_index": paragraph_total,
         "paragraph_total": paragraph_total,
-        "metadata": {
-            "status": "completed",
-            "generated_length": len(running_text),
-            "resume_mode": resume_mode,
-            "rewritten_paragraph_index": rewritten_paragraph_index,
-        },
+        "metadata": _build_stream_done_metadata(),
     }
 
 
@@ -1218,6 +1926,7 @@ async def run_final_optimize(
             result["style_report"],
             result["final_package"]["arbitrator_report"],
         ],
+        "deliberation_rounds": result["final_package"].get("deliberation_rounds") or [],
         "original_draft": draft_text,
         "consensus_rounds": convergence_meta["consensus_rounds"],
         "consensus_reached": convergence_meta["consensus_reached"],
@@ -1263,11 +1972,14 @@ def _collect_final_verify_issues(result: FinalVerifyState) -> list[dict[str, Any
 def _build_issue_signature_set(issues: list[dict[str, Any]]) -> tuple[str, ...]:
     signatures = []
     for item in issues:
-        title = str(item.get("title") or "").strip()
-        detail = str(item.get("detail") or "").strip()
-        if not title and not detail:
+        severity = str(item.get("severity") or "").strip().lower()
+        source = str(item.get("source") or "").strip().lower()
+        title = re.sub(r"\s+", " ", str(item.get("title") or "").strip().lower())
+        detail = re.sub(r"\s+", " ", str(item.get("detail") or "").strip().lower())
+        summary_key = title or detail[:80]
+        if not summary_key:
             continue
-        signatures.append(f"{title}::{detail}")
+        signatures.append(f"{source}::{severity}::{summary_key}")
     return tuple(sorted(set(signatures)))
 
 
@@ -1286,6 +1998,16 @@ def _build_final_quality_summary(
     return f"这一章已经收口 {consensus_rounds} 轮，但还剩 {remaining_issue_count} 个问题没有完全压平，建议先再修一轮。"
 
 
+def _get_outline_debate_max_rounds() -> int:
+    settings = get_settings()
+    return max(1, settings.story_engine_outline_max_debate_rounds)
+
+
+def _get_final_verify_max_rounds() -> int:
+    settings = get_settings()
+    return max(1, settings.story_engine_final_verify_max_rounds)
+
+
 async def _run_final_verify_until_converged(
     *,
     session: AsyncSession,
@@ -1301,8 +2023,10 @@ async def _run_final_verify_until_converged(
     previous_issue_signature: Optional[tuple[str, ...]] = None
     latest_result: Optional[FinalVerifyState] = None
     completed_rounds = 0
+    deliberation_rounds: list[dict[str, Any]] = []
+    max_rounds = _get_final_verify_max_rounds()
 
-    for round_index in range(1, MAX_FINAL_VERIFY_CONSENSUS_ROUNDS + 1):
+    for round_index in range(1, max_rounds + 1):
         state: FinalVerifyState = {
             "session": session,
             "project_id": project_id,
@@ -1312,15 +2036,33 @@ async def _run_final_verify_until_converged(
             "draft_text": current_draft,
             "style_sample": style_sample,
             "model_routing": model_routing,
+            "finalize_output": False,
         }
         latest_result = await _run_final_verify_once(state)
         completed_rounds = round_index
 
         issues = _collect_final_verify_issues(latest_result)
         current_signature = _build_issue_signature_set(issues)
+        round_resolution = ""
         if not current_signature:
+            round_resolution = "这一轮已经没有保留硬问题，停止继续收口。"
+            deliberation_rounds.append(
+                _build_final_deliberation_round(
+                    round_number=round_index,
+                    result=latest_result,
+                    resolution=round_resolution,
+                )
+            )
             break
         if previous_issue_signature == current_signature:
+            round_resolution = "这一轮和上一轮保留的问题一致，继续修改也不会明显收敛，先停在当前裁决。"
+            deliberation_rounds.append(
+                _build_final_deliberation_round(
+                    round_number=round_index,
+                    result=latest_result,
+                    resolution=round_resolution,
+                )
+            )
             break
 
         previous_issue_signature = current_signature
@@ -1328,11 +2070,37 @@ async def _run_final_verify_until_converged(
             latest_result.get("final_package", {}).get("final_draft") or current_draft
         ).strip()
         if not next_draft or next_draft == current_draft.strip():
+            round_resolution = "这一轮已经给出统一修法，但改稿不会继续明显变化，先保留当前版本。"
+            deliberation_rounds.append(
+                _build_final_deliberation_round(
+                    round_number=round_index,
+                    result=latest_result,
+                    resolution=round_resolution,
+                )
+            )
             break
+        round_resolution = "按这一轮仲裁方案改一版，再回来看还有没有残留问题。"
+        deliberation_rounds.append(
+            _build_final_deliberation_round(
+                round_number=round_index,
+                result=latest_result,
+                resolution=round_resolution,
+            )
+        )
         current_draft = next_draft
 
     if latest_result is None:
         raise RuntimeError("final verify result is missing")
+
+    if not latest_result.get("output_finalized"):
+        latest_result = await _finalize_final_verify_output(latest_result)
+        if deliberation_rounds:
+            latest_resolution = str(deliberation_rounds[-1].get("resolution") or "").strip()
+            deliberation_rounds[-1] = _build_final_deliberation_round(
+                round_number=completed_rounds,
+                result=latest_result,
+                resolution=latest_resolution,
+            )
 
     remaining_issues = _collect_final_verify_issues(latest_result)
     consensus_reached = len(remaining_issues) == 0
@@ -1341,6 +2109,7 @@ async def _run_final_verify_until_converged(
         "consensus_reached": consensus_reached,
         "remaining_issue_count": len(remaining_issues),
         "ready_for_publish": consensus_reached,
+        "deliberation_rounds": deliberation_rounds,
         "quality_summary": _build_final_quality_summary(
             consensus_rounds=completed_rounds,
             consensus_reached=consensus_reached,
@@ -1359,6 +2128,20 @@ async def _run_final_verify_until_converged(
         },
     }
     return latest_result, convergence_meta
+
+
+async def _finalize_final_verify_output(result: FinalVerifyState) -> FinalVerifyState:
+    current = dict(result)
+    final_draft = str(
+        current.get("final_package", {}).get("final_draft") or current.get("draft_text") or ""
+    ).strip()
+    if final_draft:
+        current["draft_text"] = final_draft
+    current["finalize_output"] = True
+    current.update(await _final_anchor_node(current))
+    current.update(await _final_arbitrator_node(current))
+    current["output_finalized"] = True
+    return current
 
 
 def _build_outline_stress_graph():
@@ -1427,16 +2210,19 @@ def _build_final_verify_graph():
 
 async def _outline_guardian_commercial_node(state: OutlineStressState) -> dict[str, Any]:
     idea = state["idea"].strip()
+    source_material = str(state.get("source_material") or "").strip()
+    source_material_name = str(state.get("source_material_name") or "").strip() or None
+    working_premise = idea or source_material.splitlines()[0].strip()
     volumes = 3
     chapters_per_volume = max(20, state["target_chapter_count"] // volumes)
-    premise_title = idea[:18] if len(idea) > 18 else idea
+    premise_title = working_premise[:18] if len(working_premise) > 18 else working_premise
     outline_draft = {
         "level_1": [
             {
                 "level": "level_1",
                 "title": f"{premise_title}·全本主线圣经",
                 "content": (
-                    f"核心命题：{idea}\n"
+                    f"核心命题：{working_premise}\n"
                     f"目标体量：约 {state['target_total_words']} 字，预计 {state['target_chapter_count']} 章。\n"
                     "主线要求：每卷都必须推进主冲突、抬升代价、留下长期伏笔，并保证主角弧光逐层升级。"
                 ),
@@ -1585,7 +2371,7 @@ async def _outline_guardian_commercial_node(state: OutlineStressState) -> dict[s
         "timeline_events": [],
     }
     guardian_issues: list[dict[str, Any]] = []
-    if len(idea) < 40:
+    if not source_material and len(idea) < 40:
         guardian_issues.append(
             {
                 "severity": "medium",
@@ -1619,6 +2405,8 @@ async def _outline_guardian_commercial_node(state: OutlineStressState) -> dict[s
 
     blueprint = await generate_story_outline_blueprint(
         idea=idea,
+        source_material=source_material or None,
+        source_material_name=source_material_name,
         genre=state.get("genre"),
         tone=state.get("tone"),
         target_chapter_count=state["target_chapter_count"],
@@ -1630,7 +2418,7 @@ async def _outline_guardian_commercial_node(state: OutlineStressState) -> dict[s
     outline_draft = blueprint["outline_draft"]
     initial_kb = blueprint["initial_kb"]
     outline_context = build_outline_context_text(
-        idea=idea,
+        idea=idea or working_premise,
         genre=state.get("genre"),
         tone=state.get("tone"),
         outline_draft=outline_draft,
@@ -1737,7 +2525,10 @@ async def _outline_debate_node(state: OutlineStressState) -> dict[str, Any]:
     debate_round = int(state.get("debate_round", 0)) + 1
     unresolved = list(state.get("unresolved_issues", []))
     optimization_plan = list(state.get("optimization_plan", []))
+    debate_history = list(state.get("debate_history", []))
     initial_kb = dict(state["initial_kb"])
+    current_issue: Optional[dict[str, Any]] = None
+    patch_action = "当前这一轮没有新增结构补丁。"
 
     if unresolved:
         current_issue = unresolved.pop(0)
@@ -1752,7 +2543,8 @@ async def _outline_debate_node(state: OutlineStressState) -> dict[str, Any]:
                     "related_items": [],
                 }
             )
-            optimization_plan.append("新增人物真相类长期伏笔，避免中段只剩单线推进。")
+            patch_action = "新增人物真相类长期伏笔，避免中段只剩单线推进。"
+            optimization_plan.append(patch_action)
         elif "规则" in current_issue["title"]:
             initial_kb.setdefault("world_rules", []).append(
                 {
@@ -1762,14 +2554,26 @@ async def _outline_debate_node(state: OutlineStressState) -> dict[str, Any]:
                     "scope": "battle",
                 }
             )
-            optimization_plan.append("补写战力代价规则，锁住后期升级边界。")
+            patch_action = "补写战力代价规则，锁住后期升级边界。"
+            optimization_plan.append(patch_action)
         else:
-            optimization_plan.append(f"已针对风险“{current_issue['title']}”给出结构性补丁。")
+            patch_action = f"已针对风险“{current_issue['title']}”给出结构性补丁。"
+            optimization_plan.append(patch_action)
+
+        debate_history.append(
+            {
+                "round_number": debate_round,
+                "focus_issue": current_issue,
+                "patch_action": patch_action,
+                "remaining_issue_count": len(unresolved),
+            }
+        )
 
     return {
         "debate_round": debate_round,
         "unresolved_issues": unresolved,
         "optimization_plan": optimization_plan,
+        "debate_history": debate_history,
         "initial_kb": initial_kb,
     }
 
@@ -1777,7 +2581,7 @@ async def _outline_debate_node(state: OutlineStressState) -> dict[str, Any]:
 def _should_continue_outline_debate(state: OutlineStressState) -> str:
     unresolved = state.get("unresolved_issues", [])
     debate_round = int(state.get("debate_round", 0))
-    if unresolved and debate_round < 5:
+    if unresolved and debate_round < _get_outline_debate_max_rounds():
         return "debate"
     return "arbitrator"
 
@@ -1799,18 +2603,36 @@ async def _outline_arbitrator_node(state: OutlineStressState) -> dict[str, Any]:
         task_name="story_engine.outline_arbitrator",
         task_goal="综合 Guardian、Commercial、Logic 的意见，给出唯一可执行的大纲优化结论。",
         context=(
-            build_outline_context_text(
-                idea=state["idea"],
-                genre=state.get("genre"),
-                tone=state.get("tone"),
-                outline_draft=state["outline_draft"],
-                initial_kb=state["initial_kb"],
+            "大纲上下文：\n"
+            + _compact_prompt_text(
+                build_outline_context_text(
+                    idea=state["idea"],
+                    genre=state.get("genre"),
+                    tone=state.get("tone"),
+                    outline_draft=state["outline_draft"],
+                    initial_kb=state["initial_kb"],
+                ),
+                4800,
             )
-            + f"\nGuardian报告：{state['guardian_report']}\n"
-            + f"Commercial报告：{state['commercial_report']}\n"
-            + f"Logic报告：{state['logic_report']}\n"
-            + f"当前待处理问题：{remaining_issues}\n"
-            + f"已形成优化方案：{optimization_plan}\n"
+            + "\nGuardian报告摘要："
+            + _story_knowledge_json_snippet(
+                _build_agent_report_prompt_snapshot(state["guardian_report"]),
+                1800,
+            )
+            + "\nCommercial报告摘要："
+            + _story_knowledge_json_snippet(
+                _build_agent_report_prompt_snapshot(state["commercial_report"]),
+                1600,
+            )
+            + "\nLogic报告摘要："
+            + _story_knowledge_json_snippet(
+                _build_agent_report_prompt_snapshot(state["logic_report"]),
+                2000,
+            )
+            + "\n当前待处理问题："
+            + _story_knowledge_json_snippet(remaining_issues, 1200)
+            + "\n已形成优化方案："
+            + _story_knowledge_json_snippet(optimization_plan, 800)
         ),
         fallback_report=fallback_report,
         model_routing=state.get("model_routing"),
@@ -1992,17 +2814,28 @@ async def _realtime_arbitrator_node(state: RealtimeGuardState) -> dict[str, Any]
         alerts=alerts,
         repair_options=list(state.get("repair_options") or []),
         context=(
-            build_realtime_guard_context_text(
-                workspace=workspace,
-                chapter_number=state["chapter_number"],
-                chapter_title=state.get("chapter_title"),
-                current_outline=state.get("current_outline"),
-                draft_text=state["draft_text"],
-                latest_paragraph=state.get("latest_paragraph"),
-                recent_chapters=state.get("recent_chapters") or [],
+            _compact_prompt_text(
+                build_realtime_guard_context_text(
+                    workspace=workspace,
+                    chapter_number=state["chapter_number"],
+                    chapter_title=state.get("chapter_title"),
+                    current_outline=state.get("current_outline"),
+                    draft_text=state["draft_text"],
+                    latest_paragraph=state.get("latest_paragraph"),
+                    recent_chapters=state.get("recent_chapters") or [],
+                ),
+                4200,
             )
-            + f"\nGuardian报告：{state.get('guardian_report') or {}}\n"
-            + f"Commercial报告：{state.get('commercial_report') or {}}\n"
+            + "\nGuardian报告摘要："
+            + _story_knowledge_json_snippet(
+                _build_agent_report_prompt_snapshot(state.get("guardian_report") or {}),
+                1600,
+            )
+            + "\nCommercial报告摘要："
+            + _story_knowledge_json_snippet(
+                _build_agent_report_prompt_snapshot(state.get("commercial_report") or {}),
+                1400,
+            )
         ),
         fallback_should_pause=fallback_should_pause,
         fallback_note=fallback_note,
@@ -2243,20 +3076,23 @@ async def _final_anchor_node(state: FinalVerifyState) -> dict[str, Any]:
         },
         "kb_updates": updates["kb_updates"],
     }
-    anchor_payload = await generate_story_anchor_payload(
-        chapter_number=state["chapter_number"],
-        chapter_title=state.get("chapter_title"),
-        draft_text=draft,
-        context=build_workspace_context_text(
-            workspace=workspace,
-            draft_text=state["draft_text"],
+    if state.get("finalize_output"):
+        anchor_payload = await generate_story_anchor_payload(
             chapter_number=state["chapter_number"],
             chapter_title=state.get("chapter_title"),
-            style_sample=state.get("style_sample"),
-        ),
-        fallback_payload=fallback_payload,
-        model_routing=state.get("model_routing"),
-    )
+            draft_text=draft,
+            context=build_workspace_context_text(
+                workspace=workspace,
+                draft_text=state["draft_text"],
+                chapter_number=state["chapter_number"],
+                chapter_title=state.get("chapter_title"),
+                style_sample=state.get("style_sample"),
+            ),
+            fallback_payload=fallback_payload,
+            model_routing=state.get("model_routing"),
+        )
+    else:
+        anchor_payload = fallback_payload
     return {
         "anchor_payload": {
             "chapter_summary": anchor_payload["chapter_summary"],
@@ -2277,52 +3113,87 @@ async def _final_arbitrator_node(state: FinalVerifyState) -> dict[str, Any]:
         draft_text=state["draft_text"],
         issues=all_issues,
     )
-    revision_result = await revise_story_final_draft(
-        chapter_number=state["chapter_number"],
-        chapter_title=state.get("chapter_title"),
-        draft_text=state["draft_text"],
-        revision_notes=revision_notes or ["未发现必须修复的问题，请轻微润色并稳住文风。"],
-        style_sample=state.get("style_sample"),
-        fallback=fallback_final_draft,
-        model_routing=state.get("model_routing"),
+    existing_final_package = dict(state.get("final_package") or {})
+    existing_final_draft = str(existing_final_package.get("final_draft") or "").strip()
+    revision_meta = dict(
+        existing_final_package.get("arbitrator_report", {}).get("raw_output") or {}
     )
-    final_draft = revision_result.content.strip() or fallback_final_draft
+    if state.get("finalize_output") and existing_final_draft:
+        final_draft = existing_final_draft
+    else:
+        revision_result = await revise_story_final_draft(
+            chapter_number=state["chapter_number"],
+            chapter_title=state.get("chapter_title"),
+            draft_text=state["draft_text"],
+            revision_notes=revision_notes or ["未发现必须修复的问题，请轻微润色并稳住文风。"],
+            style_sample=state.get("style_sample"),
+            fallback=fallback_final_draft,
+            model_routing=state.get("model_routing"),
+        )
+        final_draft = revision_result.content.strip() or fallback_final_draft
+        revision_meta = {
+            "provider": revision_result.provider,
+            "model": revision_result.model,
+            "used_fallback": revision_result.used_fallback,
+        }
     fallback_arbitrator_report = build_agent_report(
         "arbitrator",
         summary="已完成终稿仲裁，输出统一修改包。",
         issues=all_issues,
         proposed_actions=revision_notes or ["当前章节可直接进入发布流程。"],
-        raw_output={"consensus": True},
+        raw_output={
+            "consensus": True,
+            **revision_meta,
+        },
     )
-    remote_arbitrator_report = await generate_story_agent_report(
-        agent_key="arbitrator",
-        task_name="story_engine.final_arbitrator",
-        task_goal="整合四份评审报告，收敛为一份唯一执行方案。",
-        context=(
-            f"章节：{state.get('chapter_title') or ('第' + str(state['chapter_number']) + '章')}\n"
-            f"Guardian报告：{state['guardian_report']}\n"
-            f"Logic报告：{state['logic_report']}\n"
-            f"Commercial报告：{state['commercial_report']}\n"
-            f"Style报告：{state['style_report']}\n"
-            f"Anchor更新建议：{state['anchor_payload']}\n"
-        ),
-        fallback_report=fallback_arbitrator_report,
-        model_routing=state.get("model_routing"),
-    )
-    arbitrator_report = _merge_reports(remote_arbitrator_report, fallback_arbitrator_report)
+    if state.get("finalize_output"):
+        remote_arbitrator_report = await generate_story_agent_report(
+            agent_key="arbitrator",
+            task_name="story_engine.final_arbitrator",
+            task_goal="整合四份评审报告，收敛为一份唯一执行方案。",
+            context=(
+                f"章节：{state.get('chapter_title') or ('第' + str(state['chapter_number']) + '章')}\n"
+                + "Guardian报告摘要："
+                + _story_knowledge_json_snippet(
+                    _build_agent_report_prompt_snapshot(state["guardian_report"]),
+                    1800,
+                )
+                + "\nLogic报告摘要："
+                + _story_knowledge_json_snippet(
+                    _build_agent_report_prompt_snapshot(state["logic_report"]),
+                    1800,
+                )
+                + "\nCommercial报告摘要："
+                + _story_knowledge_json_snippet(
+                    _build_agent_report_prompt_snapshot(state["commercial_report"]),
+                    1600,
+                )
+                + "\nStyle报告摘要："
+                + _story_knowledge_json_snippet(
+                    _build_agent_report_prompt_snapshot(state["style_report"]),
+                    1400,
+                )
+                + "\nAnchor更新建议："
+                + _story_knowledge_json_snippet(state["anchor_payload"], 1600)
+            ),
+            fallback_report=fallback_arbitrator_report,
+            model_routing=state.get("model_routing"),
+        )
+        arbitrator_report = _merge_reports(remote_arbitrator_report, fallback_arbitrator_report)
+    else:
+        arbitrator_report = fallback_arbitrator_report
     arbitrator_report["raw_output"] = {
         **dict(arbitrator_report.get("raw_output") or {}),
         "consensus": len(arbitrator_report.get("issues") or []) == 0,
-        "provider": revision_result.provider,
-        "model": revision_result.model,
-        "used_fallback": revision_result.used_fallback,
+        **revision_meta,
     }
     return {
         "final_package": {
             "final_draft": final_draft,
             "revision_notes": revision_notes or ["未发现必须修复的问题。"],
             "arbitrator_report": arbitrator_report,
-        }
+        },
+        "output_finalized": bool(state.get("finalize_output")),
     }
 
 
@@ -2971,6 +3842,60 @@ def _build_style_hint(style_sample: Optional[str]) -> dict[str, Any]:
     }
 
 
+def _extract_stream_character_name(candidate: Any) -> str:
+    if isinstance(candidate, dict):
+        return str(candidate.get("name") or "").strip()
+    return str(getattr(candidate, "name", "") or "").strip()
+
+
+def _pick_stream_character_name(
+    characters: list[Any],
+    *,
+    preferred_markers: tuple[str, ...],
+    excluded_names: Optional[set[str]] = None,
+) -> Optional[str]:
+    excluded_names = excluded_names or set()
+    normalized: list[str] = [
+        name
+        for name in (_extract_stream_character_name(item) for item in characters)
+        if name and name not in excluded_names
+    ]
+    for marker in preferred_markers:
+        for name in normalized:
+            if marker in name:
+                return name
+    return normalized[0] if normalized else None
+
+
+def _build_stream_beat_sentence(beat: str, *, stage: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(beat or "").strip())
+    normalized = normalized.rstrip("。！？；，,. ")
+    if not normalized:
+        normalized = "把局面继续往前推一步"
+
+    if stage == "opening":
+        if normalized.startswith("先"):
+            return f"眼下第一步得{normalized}。"
+        if normalized.startswith("用"):
+            return f"眼下只能先{normalized}。"
+        return f"眼下最要紧的，就是{normalized}。"
+
+    if stage == "ending":
+        if normalized.startswith("把"):
+            return f"可这一线喘息还没落稳，接下来还得{normalized}。"
+        if normalized.startswith("让"):
+            return f"可这一线喘息还没落稳，更大的麻烦已经逼着他们去{normalized[1:]}。"
+        return f"可这一线喘息还没落稳，{normalized}的余波就已经把下一层麻烦顶了上来。"
+
+    if normalized.startswith("让"):
+        return f"眼下最难的，就是{normalized}。"
+    if normalized.startswith("把"):
+        return f"真正决定走向的，是能不能{normalized}。"
+    if normalized.startswith("用"):
+        return f"眼下只能先{normalized}。"
+    return f"这一步最要紧的，就是{normalized}。"
+
+
 def _build_stream_context(
     *,
     workspace: dict[str, Any],
@@ -2982,12 +3907,26 @@ def _build_stream_context(
     items = workspace.get("items", [])
     world_rules = workspace.get("world_rules", [])
     foreshadows = workspace.get("foreshadows", [])
+    lead_name = _pick_stream_character_name(
+        characters,
+        preferred_markers=("主角", "男主", "女主", "主人公"),
+    ) or "主角"
+    foil_name = _pick_stream_character_name(
+        characters,
+        preferred_markers=("宿敌", "反派", "对手", "敌", "boss"),
+        excluded_names={lead_name},
+    ) or "对手"
+    support_name = _pick_stream_character_name(
+        characters,
+        preferred_markers=("盟友", "伙伴", "同伴", "朋友", "师父"),
+        excluded_names={lead_name, foil_name},
+    ) or "盟友"
 
     return {
         "chapter_label": chapter_title or f"第{chapter_number}章",
-        "lead_name": characters[0].name if characters else "主角",
-        "foil_name": characters[1].name if len(characters) > 1 else "对手",
-        "support_name": characters[2].name if len(characters) > 2 else "盟友",
+        "lead_name": lead_name,
+        "foil_name": foil_name,
+        "support_name": support_name,
         "anchor_item": items[0].name if items else "关键线索",
         "world_rule": world_rules[0].rule_name if world_rules else "代价规则",
         "foreshadow_hint": foreshadows[0].content if foreshadows else "一个尚未解释清楚的异常细节",
@@ -3014,56 +3953,77 @@ def _compose_stream_paragraph(
     foreshadow_hint = stream_context["foreshadow_hint"]
     recent_context = stream_context["recent_context"]
     chapter_label = stream_context["chapter_label"]
+    target_length = max(160, min(260, target_word_count // max(1, paragraph_total)))
+    max_length = max(240, min(360, target_length + 90))
 
-    target_length = max(110, target_word_count // max(1, paragraph_total))
-    opening = (
-        f"{chapter_label}一开场，{lead_name}就被新的局面顶到了必须表态的位置。"
-        if paragraph_index == 1 and not existing_text.strip()
-        else f"{lead_name}没有得到任何喘息机会，局势顺着上一段的余波继续往前压。"
-    )
-    beat_sentence = f"这段的核心推进是：{beat}"
-    repair_sentence = (
-        f"这一段还必须修平这个硬冲突：{repair_instruction}。"
-        if repair_instruction
-        else ""
-    )
-    pressure_sentence = f"他很清楚，一旦越过《{world_rule}》这条线，眼前的便宜很可能会在后面翻成更大的代价。"
+    sentences: list[str] = []
+    seen_sentences: set[str] = set()
 
-    if paragraph_index == 1:
-        paragraph = (
-            f"{opening}{beat_sentence}"
-            f"场面表面上还算克制，实际上{foil_name}已经把试探伸到了他最不能退的地方。"
-            f"{anchor_item}在这个节点再次出现，让原本只像意外的事，突然沾上了更深的因果。"
-        )
+    def append_sentence(text: str) -> None:
+        normalized = str(text or "").strip()
+        if not normalized or normalized in seen_sentences:
+            return
+        seen_sentences.add(normalized)
+        sentences.append(normalized)
+
+    if paragraph_index == 1 and not existing_text.strip():
+        append_sentence(f"{chapter_label}刚起势，{lead_name}就被新的局面推到了必须开口、也必须站队的位置。")
+        append_sentence(_build_stream_beat_sentence(beat, stage="opening"))
+        append_sentence(f"{foil_name}把试探压得很轻，却又轻得刚好能逼出{lead_name}最不能退的那一步。")
+        append_sentence(f"{anchor_item}偏偏在这个节骨眼上被重新牵出来，让这场冲突一下子带上了旧账翻卷的味道。")
     elif paragraph_index >= paragraph_total:
-        paragraph = (
-            f"{lead_name}终于把局面暂时掰回自己能控制的方向，甚至让{support_name}都看见了一点翻盘的可能。"
-            f"可就在他准备收住这一口气的时候，{foreshadow_hint}"
-            f"{beat_sentence}这意味着眼前这点胜势，很可能只是更大风暴的前奏。"
-        )
+        append_sentence(f"{lead_name}硬是把最危险的一步撑了过去，连{support_name}都看出了局势被扳回了一线。")
+        append_sentence(_build_stream_beat_sentence(beat, stage="ending"))
+        append_sentence(f"{foreshadow_hint}在这一刻冒了头，像有人故意把更大的风暴先掀开了一角。")
     else:
-        paragraph = (
-            f"{lead_name}先按住情绪，把能看见的路一条条筛过去。{beat_sentence}"
-            f"{pressure_sentence}"
-            f"{foil_name}并没有急着把牌摊开，反而故意留出一点缝，让他自己踩进更深的局里。"
-        )
+        append_sentence(f"{lead_name}没有立刻出手，而是先把眼前能踩和不能踩的地方在心里过了一遍。")
+        append_sentence(_build_stream_beat_sentence(beat, stage="middle"))
+        append_sentence(f"{foil_name}故意把局面让出一线松动，看着像给机会，实际上是在逼{lead_name}自己挑代价。")
 
-    if repair_sentence:
-        paragraph += repair_sentence
+    append_sentence(f"{lead_name}比谁都清楚，只要碰穿《{world_rule}》这条线，眼前占到的便宜迟早都得连本带利吐回来。")
+
+    if repair_instruction:
+        append_sentence(f"更棘手的是，{repair_instruction}这道口子必须在这一段里补平，不然前后的设定都会发虚。")
     if recent_context:
-        paragraph += f"上一段留下的余震还没散，{recent_context[:48]}的影响仍在往这场冲突里渗。"
+        append_sentence(f"前面埋下的余波还没散，{recent_context[:48]}像倒刺一样扎在这次推进里，让人怎么都不可能轻松落脚。")
 
     if style_hint.get("dialogue_density") == "high":
-        paragraph += f"“现在收手还来得及。”{foil_name}淡淡开口，可{lead_name}连看都没看他一眼。"
+        append_sentence(f"“你现在收手，还来得及。”{foil_name}语气平得近乎冷，可那份平静本身就像是在逼人低头。")
 
-    if style_hint.get("sentence_rhythm") == "fast":
-        paragraph += f"他没有再犹豫，抬手、试探、确认、逼近，一步都没让。"
-    elif style_hint.get("sentence_rhythm") == "dense":
-        paragraph += (
-            f"他甚至在心里把所有可能的后果都过了一遍，确认这一步虽然险，却仍旧比原地不动更值得赌。"
+    rhythm = style_hint.get("sentence_rhythm")
+    if rhythm == "fast":
+        rhythm_pool = [
+            f"{lead_name}没再给自己犹豫的空当，抬手、试探、确认、逼近，动作一环压着一环。",
+            f"局势根本不给人回头看的一秒空闲，所有选择都得在心跳落下之前做完。",
+        ]
+    elif rhythm == "dense":
+        rhythm_pool = [
+            f"{lead_name}甚至把每一步可能带出的后果都提前想了一遍，确认这条路虽然险，却仍旧比僵在原地更值得赌。",
+            f"他不是在碰运气，而是在拿自己能承受的代价，去换这一线必须抢下来的主动。",
+        ]
+    else:
+        rhythm_pool = [
+            f"{lead_name}把呼吸压稳，先让局势顺着自己的判断走，再决定哪里该硬、哪里该藏。",
+            f"这一回他没打算靠侥幸过关，而是准备把每个动作都落在能解释得通的因果上。",
+        ]
+
+    general_pool = [
+        f"{support_name}没有插手，只在一旁盯着{lead_name}的反应，因为谁都知道这一步一旦走错，后面整章都会变味。",
+        f"{anchor_item}在视线里安静得过分，反倒显得像一枚还没被真正引爆的钉子，随时可能把局面重新钉死。",
+        f"{lead_name}表面上仍旧稳着，指节却已经一点点收紧，显然这一步要付的代价并不比旁人看见的少。",
+        f"真正麻烦的从来不是眼前这一刀，而是这一刀落下去以后，会不会把后面所有退路一起斩断。",
+    ]
+
+    for extra_sentence in rhythm_pool + general_pool:
+        if len("".join(sentences)) >= target_length:
+            break
+        append_sentence(extra_sentence)
+
+    paragraph = "".join(sentences)
+    if len(paragraph) < target_length:
+        append_sentence(
+            f"所以{lead_name}最后还是把那口气咽了回去，宁可把动作放慢半拍，也要确保这一步既能推进，又不会把后面的逻辑写塌。"
         )
+        paragraph = "".join(sentences)
 
-    while len(paragraph) < target_length:
-        paragraph += f"他知道这一步不能写成侥幸，所以每个动作都必须带着理由和代价。"
-
-    return paragraph[: max(target_length + 40, target_length)]
+    return paragraph[:max_length]

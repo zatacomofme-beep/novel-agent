@@ -1,10 +1,15 @@
 "use client";
 
+import { StoryDeliberationPanel } from "@/components/story-engine/story-deliberation-panel";
 import type { FinalOptimizeResponse, StoryKnowledgeSuggestion } from "@/types/api";
 
 type FinalDiffViewerProps = {
   result: FinalOptimizeResponse | null;
+  hasDraftText: boolean;
+  hasSavedChapter: boolean;
+  chapterTitle: string;
   resolvingSuggestionId: string | null;
+  onOpenDraftStep: () => void;
   onApplyKnowledgeSuggestion: (suggestion: StoryKnowledgeSuggestion) => void;
   onIgnoreKnowledgeSuggestion: (suggestion: StoryKnowledgeSuggestion) => void;
 };
@@ -67,14 +72,60 @@ function splitParagraphs(text: string): string[] {
 
 export function FinalDiffViewer({
   result,
+  hasDraftText,
+  hasSavedChapter,
+  chapterTitle,
   resolvingSuggestionId,
+  onOpenDraftStep,
   onApplyKnowledgeSuggestion,
   onIgnoreKnowledgeSuggestion,
 }: FinalDiffViewerProps) {
   if (!result) {
+    const chapterLabel = chapterTitle.trim() ? `《${chapterTitle.trim()}》` : "这一章";
+    const heading = !hasDraftText
+      ? "先在第二步写出正文，这里才会出现对比稿"
+      : !hasSavedChapter
+        ? "这章已经写出来了，再存一次正文就能进入整章优化"
+        : `下一步是把${chapterLabel}送去整章优化`;
+    const description = !hasDraftText
+      ? "第三步只负责看结果，不负责起稿。先按三级大纲写出正文，再回来收口。"
+      : !hasSavedChapter
+        ? "你已经在编辑区里写出了内容，但系统还没把它记成正式章节。先保存正文，再回到这里会更顺。"
+        : "回正文区点一次“优化爽点”，这里就会直接出现原稿和优化稿的对比、100-300 字总结，以及待确认设定更新。";
+
     return (
-      <section className="rounded-[36px] border border-dashed border-black/10 bg-white/70 p-8 text-sm leading-7 text-black/45">
-        点击“优化爽点”后，这里会直接展示原稿和优化稿的对比、本章 100-300 字总结，以及自动沉淀下来的设定更新。
+      <section className="rounded-[36px] border border-dashed border-black/10 bg-white/74 p-8">
+        <p className="text-xs uppercase tracking-[0.24em] text-copper">第三步</p>
+        <h2 className="mt-2 text-2xl font-semibold">{heading}</h2>
+        <p className="mt-3 max-w-3xl text-sm leading-7 text-black/58">{description}</p>
+
+        <div className="mt-6 grid gap-4 md:grid-cols-3">
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
+            <p className="text-xs uppercase tracking-[0.16em] text-copper">会看到什么</p>
+            <p className="mt-3 text-sm leading-7 text-black/62">原稿和优化稿逐段对比，高亮真正改过的地方。</p>
+          </article>
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
+            <p className="text-xs uppercase tracking-[0.16em] text-copper">会顺手产出</p>
+            <p className="mt-3 text-sm leading-7 text-black/62">本章 100-300 字总结，方便你快速回看整章推进。</p>
+          </article>
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
+            <p className="text-xs uppercase tracking-[0.16em] text-copper">会自动整理</p>
+            <p className="mt-3 text-sm leading-7 text-black/62">这一章新增的人物、伏笔和状态变化，都会整理成待确认设定。</p>
+          </article>
+        </div>
+
+        <div className="mt-6 flex flex-wrap items-center gap-3">
+          <button
+            className="rounded-full bg-copper px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+            onClick={onOpenDraftStep}
+            type="button"
+          >
+            {hasDraftText ? "回正文区继续" : "回正文区开始写"}
+          </button>
+          <span className="text-sm leading-7 text-black/50">
+            完成这一步后，这里就会自动变成终稿对比视图。
+          </span>
+        </div>
       </section>
     );
   }
@@ -168,6 +219,13 @@ export function FinalDiffViewer({
           </section>
         </div>
       </div>
+
+      <StoryDeliberationPanel
+        title="这一章为什么会这样改"
+        description="默认不打扰你，展开后可以按轮次看这一章是怎么被挑刺、怎么收口、最后为什么这么改。"
+        rounds={result.deliberation_rounds}
+        emptyText="这次终稿结果还没有可展开的推演纪要。"
+      />
 
       <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
         <section className="rounded-[30px] border border-black/10 bg-white/85 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">

@@ -151,6 +151,20 @@ cd frontend
 npm run type-check
 ```
 
+### 一键跑关键交付检查
+
+默认会优先读取 `backend/.env`，如果没有，就退回 `backend/.env.example`。
+
+```bash
+bash scripts/run_delivery_checks.sh
+```
+
+如果还想顺手检查模型网关是否能看到当前 Story Engine 所需模型：
+
+```bash
+RUN_MODEL_VERIFY=1 bash scripts/run_delivery_checks.sh
+```
+
 ### 后端模型路由校验
 
 ```bash
@@ -218,5 +232,6 @@ novels/
 下一阶段更值得继续推进的，是：
 
 - `items / factions` 的底层领域建模纯化
+- 仪表盘和工作台之间的信息去重，让前台更像写作台而不是运营台
 - 实体生成链是否并入 task / event / workflow 主链
 - 管理端模型路由能力是否需要独立后台页面

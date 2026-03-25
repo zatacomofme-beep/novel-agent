@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+from core.errors import AppError
 from schemas.story_engine import StoryBulkImportPayload
 from services.story_engine_import_service import bulk_import_story_payload
 
@@ -46,6 +47,9 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
             "services.story_engine_import_service.get_story_engine_project",
             AsyncMock(return_value=SimpleNamespace()),
         ), patch(
+            "services.story_engine_import_service.run_story_bulk_import_guard",
+            AsyncMock(return_value=_ok_mutation_result()),
+        ), patch(
             "services.story_engine_import_service._find_by_field",
             AsyncMock(return_value=None),
         ), patch(
@@ -65,6 +69,7 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(save_kwargs["section_key"], "characters")
         self.assertEqual(save_kwargs["source_workflow"], "bulk_import")
         self.assertEqual(save_kwargs["guard_operation"], "导入")
+        self.assertTrue(save_kwargs["skip_guard"])
 
     async def test_bulk_import_replace_deletes_stale_entities_via_guarded_delete(self) -> None:
         project_id = uuid4()
@@ -94,6 +99,9 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "services.story_engine_import_service.get_story_engine_project",
             AsyncMock(return_value=SimpleNamespace()),
+        ), patch(
+            "services.story_engine_import_service.run_story_bulk_import_guard",
+            AsyncMock(return_value=_ok_mutation_result()),
         ), patch(
             "services.story_engine_import_service.list_entities",
             AsyncMock(return_value=[keep_character, stale_character]),
@@ -151,6 +159,9 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
             "services.story_engine_import_service.get_story_engine_project",
             AsyncMock(return_value=SimpleNamespace()),
         ), patch(
+            "services.story_engine_import_service.run_story_bulk_import_guard",
+            AsyncMock(return_value=_ok_mutation_result()),
+        ), patch(
             "services.story_engine_import_service._find_outline",
             AsyncMock(return_value=None),
         ), patch(
@@ -171,3 +182,54 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
         mocked_save.assert_not_awaited()
         self.assertEqual(result["imported_counts"]["outlines"], 1)
         self.assertTrue(any("已锁定" in item for item in result["warnings"]))
+
+    async def test_bulk_import_stops_when_preflight_guard_blocks(self) -> None:
+        project_id = uuid4()
+        user_id = uuid4()
+        payload = StoryBulkImportPayload.model_validate(
+            {
+                "characters": [
+                    {
+                        "name": "林澈",
+                        "appearance": None,
+                        "personality": "警惕而克制",
+                        "micro_habits": [],
+                        "abilities": {},
+                        "relationships": [],
+                        "status": "active",
+                        "arc_stage": "initial",
+                        "arc_boundaries": [],
+                    }
+                ]
+            }
+        )
+
+        blocked_result = {
+            "passed": False,
+            "blocked": True,
+            "message": "这批设定暂时不能导入。",
+            "alerts": [{"severity": "high", "title": "缺少世界规则"}],
+            "blocking_issue_count": 1,
+            "warning_count": 0,
+        }
+
+        with patch(
+            "services.story_engine_import_service.get_story_engine_project",
+            AsyncMock(return_value=SimpleNamespace()),
+        ), patch(
+            "services.story_engine_import_service.run_story_bulk_import_guard",
+            AsyncMock(return_value=blocked_result),
+        ), patch(
+            "services.story_engine_import_service.save_story_knowledge",
+            AsyncMock(return_value=_ok_mutation_result()),
+        ) as mocked_save:
+            with self.assertRaises(AppError):
+                await bulk_import_story_payload(
+                    SimpleNamespace(),
+                    project_id=project_id,
+                    user_id=user_id,
+                    payload=payload,
+                    replace_existing_sections=[],
+                )
+
+        mocked_save.assert_not_awaited()

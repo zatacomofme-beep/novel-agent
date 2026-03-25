@@ -63,6 +63,7 @@ def _build_round_result(
                 raw_output={"consensus": False},
             ),
         },
+        "output_finalized": True,
     }
 
 
@@ -209,3 +210,80 @@ class StoryEngineFinalOptimizeConvergenceTests(unittest.IsolatedAsyncioTestCase)
         self.assertFalse(result["ready_for_publish"])
         self.assertEqual(result["remaining_issue_count"], 1)
         self.assertIn("还剩 1 个问题", result["quality_summary"])
+
+    async def test_final_optimize_treats_rephrased_same_issue_as_stable(self) -> None:
+        project_id = uuid4()
+        user_id = uuid4()
+        round_one_issue = {
+            "severity": "medium",
+            "title": "章末钩子偏弱",
+            "detail": "最后一行还没形成追读抓手。",
+            "source": "commercial",
+            "suggestion": "补一个信息反转。",
+        }
+        round_two_issue = {
+            "severity": "medium",
+            "title": "章末钩子偏弱",
+            "detail": "结尾的追读牵引还不够强。",
+            "source": "commercial",
+            "suggestion": "补一个信息反转。",
+        }
+
+        with patch(
+            "services.story_engine_workflow_service.get_story_engine_project",
+            AsyncMock(return_value=SimpleNamespace()),
+        ), patch(
+            "services.story_engine_workflow_service.resolve_story_engine_model_routing",
+            return_value={"guardian": {"model": "gpt-5.4", "reasoning_effort": "high"}},
+        ), patch(
+            "services.story_engine_workflow_service._run_final_verify_once",
+            AsyncMock(
+                side_effect=[
+                    _build_round_result(
+                        final_draft="第一轮优化稿",
+                        guardian_issues=[],
+                        logic_issues=[],
+                        commercial_issues=[round_one_issue],
+                        style_issues=[],
+                    ),
+                    _build_round_result(
+                        final_draft="第二轮优化稿",
+                        guardian_issues=[],
+                        logic_issues=[],
+                        commercial_issues=[round_two_issue],
+                        style_issues=[],
+                    ),
+                ]
+            ),
+        ) as mocked_verify, patch(
+            "services.story_engine_workflow_service._upsert_chapter_summary",
+            AsyncMock(
+                return_value={
+                    "summary_id": uuid4(),
+                    "project_id": project_id,
+                    "chapter_number": 8,
+                    "content": "本章完成了一次关键收口，人物关系和风险边界都更清晰了。",
+                    "core_progress": ["主角完成一次关键判断。"],
+                    "character_changes": [],
+                    "foreshadow_updates": [],
+                    "kb_update_suggestions": [],
+                    "version": 1,
+                    "created_at": "2026-03-24T00:00:00Z",
+                    "updated_at": "2026-03-24T00:00:00Z",
+                }
+            ),
+        ):
+            result = await run_final_optimize(
+                SimpleNamespace(),
+                project_id=project_id,
+                user_id=user_id,
+                chapter_number=8,
+                chapter_title="夜潮反咬",
+                draft_text="原稿",
+                style_sample="样文",
+            )
+
+        self.assertEqual(mocked_verify.await_count, 2)
+        self.assertEqual(result["consensus_rounds"], 2)
+        self.assertFalse(result["consensus_reached"])
+        self.assertEqual(result["remaining_issue_count"], 1)

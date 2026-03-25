@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { FinalPublishPanel } from "@/components/story-engine/final-publish-panel";
 import { DraftStudio } from "@/components/story-engine/draft-studio";
 import { FinalDiffViewer } from "@/components/story-engine/final-diff-viewer";
 import { ChapterReviewPanel } from "@/components/story-engine/chapter-review-panel";
+import { StyleControlPanel } from "@/components/story-engine/style-control-panel";
 import {
   KnowledgeBaseBoard,
   type KnowledgeSuggestionKind,
@@ -24,11 +25,16 @@ import type {
   ChapterVersion,
   FinalOptimizeResponse,
   OutlineStressTestResponse,
+  ProjectBootstrapState,
   ProjectStructure,
   ProjectEntityGenerationDispatch,
   RealtimeGuardResponse,
   RollbackResponse,
   StoryBible,
+  StoryBiblePendingChange,
+  StoryBiblePendingChangeList,
+  StoryBibleVersion,
+  StoryBibleVersionList,
   StoryBulkImportResponse,
   StoryEngineWorkspace,
   StoryGeneratedCandidateAcceptResponse,
@@ -38,7 +44,9 @@ import type {
   StoryImportTemplate,
   StorySearchResult,
   StoryOutline,
+  StyleTemplate,
   TaskState,
+  UserPreferenceProfile,
 } from "@/types/api";
 
 type ProjectRouteParams = {
@@ -58,6 +66,8 @@ type StreamContinueOptions = {
   repairInstruction?: string | null;
   rewriteLatestParagraph?: boolean;
 };
+
+type StoryRoomStageKey = "outline" | "draft" | "final" | "knowledge";
 
 const IMPORT_SECTION_LABELS: Record<string, string> = {
   characters: "人物",
@@ -164,6 +174,12 @@ function isStoryBibleKnowledgeTab(tab: KnowledgeTabKey): tab is StoryBibleKnowle
 
 function createClientUuid(): string {
   return crypto.randomUUID();
+}
+
+function selectLatestTask(taskData: TaskState[]): TaskState | null {
+  return [...taskData].sort((left, right) => {
+    return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+  })[0] ?? null;
 }
 
 function buildFactionKey(name: string, currentKey?: string): string {
@@ -513,10 +529,24 @@ export default function StoryRoomPage() {
   const params = useParams<ProjectRouteParams>();
   const projectId = params.projectId;
   const hydratedChapterKeyRef = useRef<string | null>(null);
+  const bootstrapHydratedRef = useRef(false);
   const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [workspace, setWorkspace] = useState<StoryEngineWorkspace | null>(null);
+  const [bootstrapState, setBootstrapState] = useState<ProjectBootstrapState | null>(null);
   const [storyBible, setStoryBible] = useState<StoryBible | null>(null);
+  const [storyBibleVersions, setStoryBibleVersions] = useState<StoryBibleVersion[]>([]);
+  const [storyBiblePendingChanges, setStoryBiblePendingChanges] = useState<
+    StoryBiblePendingChange[]
+  >([]);
+  const [loadingStoryBibleGovernance, setLoadingStoryBibleGovernance] = useState(false);
+  const [storyBibleGovernanceActionKey, setStoryBibleGovernanceActionKey] = useState<string | null>(
+    null,
+  );
+  const [preferenceProfile, setPreferenceProfile] = useState<UserPreferenceProfile | null>(null);
+  const [styleTemplates, setStyleTemplates] = useState<StyleTemplate[]>([]);
+  const [loadingStyleControl, setLoadingStyleControl] = useState(false);
+  const [styleActionKey, setStyleActionKey] = useState<string | null>(null);
   const [projectStructure, setProjectStructure] = useState<ProjectStructure | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [loading, setLoading] = useState(true);
@@ -528,8 +558,13 @@ export default function StoryRoomPage() {
   const [tone, setTone] = useState("");
   const [targetChapterCount, setTargetChapterCount] = useState(120);
   const [targetTotalWords, setTargetTotalWords] = useState(1_000_000);
+  const [targetChapterWords, setTargetChapterWords] = useState(3_000);
+  const [sourceMaterial, setSourceMaterial] = useState("");
+  const [sourceMaterialName, setSourceMaterialName] = useState<string | null>(null);
   const [stressLoading, setStressLoading] = useState(false);
+  const [savingStoryGoals, setSavingStoryGoals] = useState(false);
   const [stressResult, setStressResult] = useState<OutlineStressTestResponse | null>(null);
+  const [updatingOutlineId, setUpdatingOutlineId] = useState<string | null>(null);
 
   const [chapterNumber, setChapterNumber] = useState(1);
   const [chapterTitle, setChapterTitle] = useState("");
@@ -569,6 +604,8 @@ export default function StoryRoomPage() {
   const [dispatchingEntityKind, setDispatchingEntityKind] =
     useState<KnowledgeSuggestionKind | null>(null);
   const [acceptingCandidateIndex, setAcceptingCandidateIndex] = useState<number | null>(null);
+  const [activeStage, setActiveStage] = useState<StoryRoomStageKey | null>(null);
+  const [pendingStageScroll, setPendingStageScroll] = useState<StoryRoomStageKey | null>(null);
 
   const outlineList = useMemo(
     () =>
@@ -586,6 +623,14 @@ export default function StoryRoomPage() {
     const matches = chapters.filter((chapter) => chapter.chapter_number === chapterNumber);
     return matches.find((chapter) => isChapterInDefaultScope(chapter, projectStructure)) ?? matches[0] ?? null;
   }, [chapterNumber, chapters, projectStructure]);
+
+  const level3OutlineList = useMemo(
+    () =>
+      outlineList
+        .filter((item) => item.level === "level_3")
+        .sort((left, right) => left.node_order - right.node_order),
+    [outlineList],
+  );
 
   const currentOutline = useMemo(
     () => outlineList.find((item) => item.level === "level_3" && item.node_order === chapterNumber) ?? null,
@@ -651,6 +696,7 @@ export default function StoryRoomPage() {
       chapter_summary: persistedChapterSummary,
       kb_update_list: persistedChapterSummary.kb_update_suggestions,
       agent_reports: [],
+      deliberation_rounds: [],
       original_draft: draftText,
       consensus_rounds: 1,
       consensus_reached: false,
@@ -667,6 +713,12 @@ export default function StoryRoomPage() {
     return finalResult.final_draft.trim().length > 0 && finalResult.final_draft !== draftText;
   }, [draftText, finalResult]);
 
+  const effectiveTargetChapterCount = useMemo(() => {
+    const normalizedTotal = normalizePositiveNumber(String(targetTotalWords), 1_000_000);
+    const normalizedPerChapter = normalizePositiveNumber(String(targetChapterWords), 3_000);
+    return Math.max(targetChapterCount, 10, Math.ceil(normalizedTotal / normalizedPerChapter));
+  }, [targetChapterCount, targetChapterWords, targetTotalWords]);
+
   const knowledgeItemCount = useMemo(
     () =>
       (workspace?.characters.length ?? 0) +
@@ -680,9 +732,98 @@ export default function StoryRoomPage() {
     [storyBible, workspace],
   );
 
-  const scopeLabel = `${defaultBranchTitle} · ${defaultVolumeTitle}`;
+  const hasOutlineBlueprint = level3OutlineList.length > 0;
+  const hasDraftStarted = Boolean(activeChapter) || draftText.trim().length > 0;
+  const hasOptimizationResult = visibleFinalResult !== null;
+  const recommendedStage: StoryRoomStageKey = !hasOutlineBlueprint
+    ? "outline"
+    : !hasDraftStarted
+      ? "draft"
+      : hasOptimizationResult
+        ? "final"
+        : "draft";
 
-  async function refreshChapterChainState() {
+  const activeStageValue = activeStage ?? recommendedStage;
+  const stageCards: Array<{
+    key: StoryRoomStageKey;
+    kicker: string;
+    title: string;
+    description: string;
+    status: string;
+  }> = [
+    {
+      key: "outline",
+      kicker: "第一步",
+      title: "定故事",
+      description: "把故事核心设定压成三级大纲和锁死主线。",
+      status: hasOutlineBlueprint ? `${level3OutlineList.length} 条章纲` : "待先生成",
+    },
+    {
+      key: "draft",
+      kicker: "第二步",
+      title: "写正文",
+      description: "先对准当前章节细纲，再一键开始出正文。",
+      status: draftText.trim().length > 0 ? `第 ${chapterNumber} 章进行中` : "待开始",
+    },
+    {
+      key: "final",
+      kicker: "第三步",
+      title: "看优化",
+      description: "把初稿收口成终稿，对比修改点和发布状态。",
+      status: hasOptimizationResult ? "已有终稿包" : "待生成",
+    },
+    {
+      key: "knowledge",
+      kicker: "第四步",
+      title: "管设定",
+      description: "人物、伏笔、物品和时间线都在这里沉淀和修订。",
+      status:
+        storyBiblePendingChanges.length > 0
+          ? `待确认 ${storyBiblePendingChanges.length} 条`
+          : `${knowledgeItemCount} 条设定`,
+    },
+  ];
+  const recommendedStageCard =
+    stageCards.find((item) => item.key === recommendedStage) ?? stageCards[0];
+  const recommendedStageActionLabelMap: Record<StoryRoomStageKey, string> = {
+    outline: "先生成大纲",
+    draft: "开始写正文",
+    final: "去看优化稿",
+    knowledge: "处理设定",
+  };
+  const recommendedStageSummaryMap: Record<StoryRoomStageKey, string> = {
+    outline: "先把故事核心、题材气质和体量压成可写的三级大纲。",
+    draft: currentOutline
+      ? `第 ${chapterNumber} 章已经挂到三级大纲上，可以直接开始出正文。`
+      : "先从三级大纲里选一章，再开始出正文。",
+    final: "正文起出来后，就来这里看优化稿和修改依据。",
+    knowledge:
+      storyBiblePendingChanges.length > 0
+        ? `这轮有 ${storyBiblePendingChanges.length} 条设定待确认。`
+        : "写完后回这里收设定，平时不用一直盯着。",
+  };
+
+  const scopeLabel = `${defaultBranchTitle} · ${defaultVolumeTitle}`;
+  const storyBibleBranchId = storyBible?.scope.branch_id ?? projectStructure?.default_branch_id ?? null;
+
+  const openStage = useCallback((stage: StoryRoomStageKey, options?: { scroll?: boolean }) => {
+    setActiveStage(stage);
+    if (options?.scroll === false) {
+      return;
+    }
+    setPendingStageScroll(stage);
+  }, []);
+
+  function handleSelectOutlineId(outlineId: string) {
+    const outline = level3OutlineList.find((item) => item.outline_id === outlineId);
+    if (!outline) {
+      return;
+    }
+    setActiveStage("draft");
+    setChapterNumber(outline.node_order);
+  }
+
+  const refreshChapterChainState = useCallback(async () => {
     const [structureData, chapterData] = await Promise.all([
       apiFetchWithAuth<ProjectStructure>(`/api/v1/projects/${projectId}/structure`),
       apiFetchWithAuth<Chapter[]>(`/api/v1/projects/${projectId}/chapters`),
@@ -690,9 +831,42 @@ export default function StoryRoomPage() {
     setProjectStructure(structureData);
     setChapters(sortChapters(chapterData));
     return { structureData, chapterData };
-  }
+  }, [projectId]);
 
-  async function loadChapterReviewState(chapterId: string, showSpinner = true) {
+  const loadStoryBibleGovernanceState = useCallback(async (
+    branchId: string | null,
+    showSpinner = true,
+  ) => {
+    if (showSpinner) {
+      setLoadingStoryBibleGovernance(true);
+    }
+
+    try {
+      const query = branchId ? `?branch_id=${encodeURIComponent(branchId)}` : "";
+      const [versionData, pendingData] = await Promise.all([
+        apiFetchWithAuth<StoryBibleVersionList>(
+          `/api/v1/projects/${projectId}/bible/versions${query}`,
+        ),
+        apiFetchWithAuth<StoryBiblePendingChangeList>(
+          `/api/v1/projects/${projectId}/bible/pending-changes${query}`,
+        ),
+      ]);
+      setStoryBibleVersions(versionData.items);
+      setStoryBiblePendingChanges(pendingData.items);
+      return { versionData, pendingData };
+    } catch (requestError) {
+      setStoryBibleVersions([]);
+      setStoryBiblePendingChanges([]);
+      setError(buildUserFriendlyError(requestError));
+      return null;
+    } finally {
+      if (showSpinner) {
+        setLoadingStoryBibleGovernance(false);
+      }
+    }
+  }, [projectId]);
+
+  const loadChapterReviewState = useCallback(async (chapterId: string, showSpinner = true) => {
     if (showSpinner) {
       setLoadingChapterReview(true);
     }
@@ -718,14 +892,14 @@ export default function StoryRoomPage() {
         setLoadingChapterReview(false);
       }
     }
-  }
+  }, []);
 
-  async function refreshActiveChapterReviewState(
+  const refreshActiveChapterReviewState = useCallback(async (
     chapterId: string,
     options: {
       refreshChapterChain?: boolean;
     } = {},
-  ) {
+  ) => {
     const { refreshChapterChain = false } = options;
     const reviewPromise = loadChapterReviewState(chapterId, false);
     if (refreshChapterChain) {
@@ -733,15 +907,9 @@ export default function StoryRoomPage() {
       return;
     }
     await reviewPromise;
-  }
+  }, [loadChapterReviewState, refreshChapterChainState]);
 
-  function selectLatestTask(taskData: TaskState[]): TaskState | null {
-    return [...taskData].sort((left, right) => {
-      return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
-    })[0] ?? null;
-  }
-
-  async function loadProjectEntityTaskState() {
+  const loadProjectEntityTaskState = useCallback(async () => {
     try {
       const taskData = await apiFetchWithAuth<TaskState[]>(
         `/api/v1/projects/${projectId}/tasks?task_type_prefix=entity_generation&limit=8`,
@@ -751,9 +919,33 @@ export default function StoryRoomPage() {
       setEntityTaskState(null);
       setError(buildUserFriendlyError(requestError));
     }
-  }
+  }, [projectId]);
 
-  async function loadWorkspace(showSpinner = true) {
+  const loadStyleControlState = useCallback(async (showSpinner = true) => {
+    if (showSpinner) {
+      setLoadingStyleControl(true);
+    }
+
+    try {
+      const [profileData, templateData] = await Promise.all([
+        apiFetchWithAuth<UserPreferenceProfile>("/api/v1/profile/preferences"),
+        apiFetchWithAuth<StyleTemplate[]>("/api/v1/profile/style-templates"),
+      ]);
+      setPreferenceProfile(profileData);
+      setStyleTemplates(templateData);
+      return { profileData, templateData };
+    } catch (requestError) {
+      setPreferenceProfile(null);
+      setStyleTemplates([]);
+      return null;
+    } finally {
+      if (showSpinner) {
+        setLoadingStyleControl(false);
+      }
+    }
+  }, []);
+
+  const loadWorkspace = useCallback(async (showSpinner = true) => {
     if (showSpinner) {
       setLoading(true);
     }
@@ -771,8 +963,8 @@ export default function StoryRoomPage() {
       setWorkspace(workspaceData);
       setStoryBible(workspaceData.story_bible ?? null);
       setImportTemplates(templateData);
-      setGenre(workspaceData.project.genre ?? "");
-      setTone(workspaceData.project.tone ?? "");
+      setGenre((current) => current || workspaceData.project.genre || "");
+      setTone((current) => current || workspaceData.project.tone || "");
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     } finally {
@@ -780,15 +972,53 @@ export default function StoryRoomPage() {
         setLoading(false);
       }
     }
-  }
+  }, [projectId, refreshChapterChainState]);
+
+  const loadProjectBootstrap = useCallback(async (showError = false) => {
+    try {
+      const data = await apiFetchWithAuth<ProjectBootstrapState>(
+        `/api/v1/projects/${projectId}/bootstrap`,
+      );
+      setBootstrapState(data);
+      if (!bootstrapHydratedRef.current) {
+        setIdea((current) => current || data.profile.core_story || "");
+        setGenre((current) => current || data.profile.genre || "");
+        setTone((current) => current || data.profile.tone || "");
+        setTargetChapterCount(data.profile.planned_chapter_count ?? 120);
+        setTargetTotalWords(data.profile.target_total_words ?? 1_000_000);
+        setTargetChapterWords(data.profile.target_chapter_words ?? 3_000);
+        bootstrapHydratedRef.current = true;
+      }
+      return data;
+    } catch (requestError) {
+      if (showError) {
+        setError(buildUserFriendlyError(requestError));
+      }
+      return null;
+    }
+  }, [projectId]);
 
   useEffect(() => {
+    bootstrapHydratedRef.current = false;
+    setActiveStage(null);
     void loadWorkspace();
-  }, [projectId]);
+  }, [loadWorkspace, projectId]);
+
+  useEffect(() => {
+    setActiveStage((current) => current ?? recommendedStage);
+  }, [recommendedStage]);
 
   useEffect(() => {
     void loadProjectEntityTaskState();
-  }, [projectId]);
+  }, [loadProjectEntityTaskState, projectId]);
+
+  useEffect(() => {
+    void loadStyleControlState();
+  }, [loadStyleControlState, projectId]);
+
+  useEffect(() => {
+    void loadProjectBootstrap();
+  }, [loadProjectBootstrap, projectId]);
 
   useEffect(() => {
     if (!projectStructure) {
@@ -835,6 +1065,13 @@ export default function StoryRoomPage() {
   }, [activeChapter?.id]);
 
   useEffect(() => {
+    if (activeChapter || !currentOutline || draftText.trim().length > 0) {
+      return;
+    }
+    setChapterTitle((current) => (current.trim().length > 0 ? current : currentOutline.title));
+  }, [activeChapter, currentOutline, draftText]);
+
+  useEffect(() => {
     if (!activeChapter?.id) {
       setReviewWorkspace(null);
       setChapterVersions([]);
@@ -842,7 +1079,43 @@ export default function StoryRoomPage() {
       return;
     }
     void loadChapterReviewState(activeChapter.id);
-  }, [activeChapter?.id, activeChapter?.current_version_number]);
+  }, [activeChapter?.current_version_number, activeChapter?.id, loadChapterReviewState]);
+
+  useEffect(() => {
+    if (!pendingStageScroll || activeStageValue !== pendingStageScroll) {
+      return;
+    }
+
+    let frameId = 0;
+    let attempts = 0;
+
+    const tryScroll = () => {
+      const target = document.getElementById(`story-stage-${pendingStageScroll}`);
+      if (target) {
+        target.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+        setPendingStageScroll(null);
+        return;
+      }
+
+      if (attempts >= 8) {
+        setPendingStageScroll(null);
+        return;
+      }
+
+      attempts += 1;
+      frameId = window.requestAnimationFrame(tryScroll);
+    };
+
+    frameId = window.requestAnimationFrame(tryScroll);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeStageValue, pendingStageScroll]);
+
+  useEffect(() => {
+    void loadStoryBibleGovernanceState(storyBibleBranchId);
+  }, [loadStoryBibleGovernanceState, projectId, storyBibleBranchId]);
 
   useEffect(() => {
     if (!entityTaskState) {
@@ -857,19 +1130,112 @@ export default function StoryRoomPage() {
     }, 5000);
 
     return () => window.clearInterval(intervalId);
-  }, [entityTaskState]);
+  }, [entityTaskState, loadProjectEntityTaskState]);
 
-  useEffect(() => {
-    if (streamingChapter || draftText.trim().length < 80) {
-      return;
+  async function handleSaveStoryGoals(showSuccessHint = true) {
+    setSavingStoryGoals(true);
+    setError(null);
+    if (showSuccessHint) {
+      setSuccess(null);
     }
-    const timeoutId = window.setTimeout(() => {
-      void triggerGuardCheck(false);
-    }, 900);
-    return () => window.clearTimeout(timeoutId);
-  }, [draftText, chapterNumber, chapterTitle, outlineList, streamingChapter]);
+
+    try {
+      const profile = bootstrapState?.profile;
+      const data = await apiFetchWithAuth<ProjectBootstrapState>(
+        `/api/v1/projects/${projectId}/bootstrap`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            genre: genre || null,
+            theme: profile?.theme ?? null,
+            tone: tone || null,
+            protagonist_name: profile?.protagonist_name ?? null,
+            protagonist_summary: profile?.protagonist_summary ?? null,
+            supporting_cast: profile?.supporting_cast ?? [],
+            world_background: profile?.world_background ?? null,
+            core_story: idea || null,
+            novel_style: profile?.novel_style ?? null,
+            prose_style: profile?.prose_style ?? null,
+            target_total_words: targetTotalWords,
+            target_chapter_words: targetChapterWords,
+            planned_chapter_count: effectiveTargetChapterCount,
+            special_requirements: profile?.special_requirements ?? null,
+          }),
+        },
+      );
+      setBootstrapState(data);
+      bootstrapHydratedRef.current = true;
+      if (showSuccessHint) {
+        setSuccess("这本书的题材、气质和体量设定已经保存到项目里了。");
+      }
+      return data;
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+      return null;
+    } finally {
+      setSavingStoryGoals(false);
+    }
+  }
+
+  function handleSourceMaterialChange(value: string, name?: string | null) {
+    setSourceMaterial(value);
+    if (name !== undefined) {
+      setSourceMaterialName(name);
+    }
+  }
+
+  function handleClearSourceMaterial() {
+    setSourceMaterial("");
+    setSourceMaterialName(null);
+  }
+
+  async function handleUpdateOutline(
+    outlineId: string,
+    payload: {
+      title: string;
+      content: string;
+    },
+  ) {
+    setUpdatingOutlineId(outlineId);
+    setError(null);
+    setSuccess(null);
+    try {
+      const updated = await apiFetchWithAuth<StoryOutline>(
+        `/api/v1/projects/${projectId}/story-engine/outlines/${outlineId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            title: payload.title,
+            content: payload.content,
+          }),
+        },
+      );
+      setStressResult((current) => {
+        if (!current) {
+          return current;
+        }
+        const replaceOutline = (items: StoryOutline[]) =>
+          items.map((item) => (item.outline_id === outlineId ? updated : item));
+        return {
+          ...current,
+          locked_level_1_outlines: replaceOutline(current.locked_level_1_outlines),
+          editable_level_2_outlines: replaceOutline(current.editable_level_2_outlines),
+          editable_level_3_outlines: replaceOutline(current.editable_level_3_outlines),
+        };
+      });
+      await loadWorkspace(false);
+      setSuccess("大纲节点已经更新。");
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+    } finally {
+      setUpdatingOutlineId(null);
+    }
+  }
 
   async function handleRunStressTest() {
+    if (!(await handleSaveStoryGoals(false))) {
+      return;
+    }
     setStressLoading(true);
     setError(null);
     setSuccess(null);
@@ -879,17 +1245,21 @@ export default function StoryRoomPage() {
         {
           method: "POST",
           body: JSON.stringify({
-            idea,
+            idea: idea.trim() || null,
             genre: genre || null,
             tone: tone || null,
-            target_chapter_count: targetChapterCount,
+            target_chapter_count: effectiveTargetChapterCount,
             target_total_words: targetTotalWords,
+            source_material: sourceMaterial.trim() || null,
+            source_material_name: sourceMaterialName,
           }),
         },
       );
       setStressResult(data);
+      setActiveStage("outline");
+      setPendingStageScroll("outline");
       setSuccess("大纲已经压成可写结构，一级大纲已锁死。");
-      await loadWorkspace();
+      await Promise.all([loadWorkspace(), loadProjectBootstrap()]);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     } finally {
@@ -897,7 +1267,7 @@ export default function StoryRoomPage() {
     }
   }
 
-  async function triggerGuardCheck(showSuccess: boolean) {
+  const triggerGuardCheck = useCallback(async (showSuccess: boolean) => {
     setCheckingGuard(true);
     try {
       const data = await apiFetchWithAuth<RealtimeGuardResponse>(
@@ -926,7 +1296,25 @@ export default function StoryRoomPage() {
     } finally {
       setCheckingGuard(false);
     }
-  }
+  }, [
+    chapterNumber,
+    chapterTitle,
+    currentOutline?.content,
+    currentOutline?.outline_id,
+    draftText,
+    projectId,
+    recentChapterTexts,
+  ]);
+
+  useEffect(() => {
+    if (streamingChapter || draftText.trim().length < 80) {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      void triggerGuardCheck(false);
+    }, 900);
+    return () => window.clearTimeout(timeoutId);
+  }, [draftText, chapterNumber, chapterTitle, outlineList, streamingChapter, triggerGuardCheck]);
 
   async function handleRunStreamGenerate(options: StreamContinueOptions = {}) {
     const resumeFromParagraph = options.resumeFromParagraph ?? null;
@@ -1092,6 +1480,8 @@ export default function StoryRoomPage() {
         },
       );
       setFinalResult(data);
+      setActiveStage("final");
+      setPendingStageScroll("final");
       setSuccess(
         data.ready_for_publish
           ? data.quality_summary ?? successMessage
@@ -1139,11 +1529,93 @@ export default function StoryRoomPage() {
         };
       });
       await loadWorkspace(false);
+      await loadStoryBibleGovernanceState(storyBibleBranchId, false);
       setSuccess(response.message);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     } finally {
       setResolvingSuggestionId(null);
+    }
+  }
+
+  async function handleApplyStyleTemplate(templateKey: string) {
+    if (styleActionKey) {
+      return;
+    }
+
+    setStyleActionKey(`style:apply:${templateKey}`);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await apiFetchWithAuth<UserPreferenceProfile>(
+        `/api/v1/profile/style-templates/${templateKey}/apply`,
+        {
+          method: "POST",
+          body: JSON.stringify({ mode: "replace" }),
+        },
+      );
+      await loadStyleControlState(false);
+      setSuccess("这套手感已经套进整本书，后面的起稿和优化都会优先按它收束。");
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+    } finally {
+      setStyleActionKey(null);
+    }
+  }
+
+  async function handleClearStyleTemplate() {
+    if (styleActionKey) {
+      return;
+    }
+
+    setStyleActionKey("style:clear");
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await apiFetchWithAuth<UserPreferenceProfile>("/api/v1/profile/style-templates/active", {
+        method: "DELETE",
+      });
+      await loadStyleControlState(false);
+      setSuccess("当前底稿已经清掉，后续会按你手动保存的长期手感继续走。");
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+    } finally {
+      setStyleActionKey(null);
+    }
+  }
+
+  async function handleSaveStylePreference(payload: {
+    prose_style: string;
+    narrative_mode: string;
+    pacing_preference: string;
+    dialogue_preference: string;
+    tension_preference: string;
+    sensory_density: string;
+    favored_elements: string[];
+    banned_patterns: string[];
+    custom_style_notes: string | null;
+  }) {
+    if (styleActionKey) {
+      return;
+    }
+
+    setStyleActionKey("style:save");
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await apiFetchWithAuth<UserPreferenceProfile>("/api/v1/profile/preferences", {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      await loadStyleControlState(false);
+      setSuccess("这套文风手感已经记住，后续章节会尽量稳住这个声音。");
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+    } finally {
+      setStyleActionKey(null);
     }
   }
 
@@ -1418,9 +1890,12 @@ export default function StoryRoomPage() {
       setDraftText(response.chapter.content);
       setDraftDirty(false);
       setFinalResult(null);
-      await refreshActiveChapterReviewState(chapter.id, {
-        refreshChapterChain: true,
-      });
+      await Promise.all([
+        refreshActiveChapterReviewState(chapter.id, {
+          refreshChapterChain: true,
+        }),
+        loadStyleControlState(false),
+      ]);
       setSuccess(
         `已经退回到 V${versionNumber} 的内容，并重新记成当前的 V${response.chapter.current_version_number}。`,
       );
@@ -1467,9 +1942,12 @@ export default function StoryRoomPage() {
       setDraftText(response.chapter.content);
       setDraftDirty(false);
       setFinalResult(null);
-      await refreshActiveChapterReviewState(chapter.id, {
-        refreshChapterChain: true,
-      });
+      await Promise.all([
+        refreshActiveChapterReviewState(chapter.id, {
+          refreshChapterChain: true,
+        }),
+        loadStyleControlState(false),
+      ]);
       setSuccess(
         `这段已经按你的要求重写完，并记成当前的 V${response.chapter.current_version_number}。`,
       );
@@ -1542,7 +2020,7 @@ export default function StoryRoomPage() {
         setSuccess(`第 ${chapterNumber} 章已经存成正式章节，后续修改都会留下版本记录。`);
       }
 
-      await refreshChapterChainState();
+      await Promise.all([refreshChapterChainState(), loadStyleControlState(false)]);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     } finally {
@@ -1644,6 +2122,117 @@ export default function StoryRoomPage() {
     }
   }
 
+  async function handleApproveStoryBiblePendingChange(changeId: string) {
+    if (storyBibleGovernanceActionKey) {
+      return;
+    }
+    setStoryBibleGovernanceActionKey(`pending:approve:${changeId}`);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await apiFetchWithAuth(
+        `/api/v1/projects/${projectId}/bible/pending-changes/${changeId}/approve`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            approved: true,
+            comment: null,
+          }),
+        },
+      );
+      await Promise.all([
+        loadWorkspace(false),
+        loadStoryBibleGovernanceState(storyBibleBranchId, false),
+      ]);
+      setSuccess("这条自动记设定已经确认收入圣经。");
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+    } finally {
+      setStoryBibleGovernanceActionKey(null);
+    }
+  }
+
+  async function handleRejectStoryBiblePendingChange(changeId: string) {
+    if (storyBibleGovernanceActionKey) {
+      return;
+    }
+
+    const reason = window.prompt("给这条设定建议留一句退回原因：", "");
+    if (reason === null) {
+      return;
+    }
+    if (!reason.trim()) {
+      setError("退回设定建议时，需要写一句原因。");
+      return;
+    }
+
+    setStoryBibleGovernanceActionKey(`pending:reject:${changeId}`);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await apiFetchWithAuth(
+        `/api/v1/projects/${projectId}/bible/pending-changes/${changeId}/reject`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            approved: false,
+            comment: reason.trim(),
+          }),
+        },
+      );
+      await loadStoryBibleGovernanceState(storyBibleBranchId, false);
+      setSuccess("这条自动记设定已经退回，不会直接收入圣经。");
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+    } finally {
+      setStoryBibleGovernanceActionKey(null);
+    }
+  }
+
+  async function handleRollbackStoryBibleVersion(versionId: string, versionNumber: number) {
+    if (storyBibleGovernanceActionKey) {
+      return;
+    }
+
+    const shouldRollback = window.confirm(
+      `确认退回到设定 V${versionNumber} 吗？当前圣经会按那一版恢复，并重新记成一条新版本。`,
+    );
+    if (!shouldRollback) {
+      return;
+    }
+
+    const reason = window.prompt("这次设定回退想留一句原因吗？可留空。", "") ?? "";
+    setStoryBibleGovernanceActionKey(`version:rollback:${versionId}`);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await apiFetchWithAuth(
+        `/api/v1/projects/${projectId}/bible/rollback${
+          storyBibleBranchId ? `?branch_id=${encodeURIComponent(storyBibleBranchId)}` : ""
+        }`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            target_version_id: versionId,
+            reason: reason.trim() || null,
+          }),
+        },
+      );
+      await Promise.all([
+        loadWorkspace(false),
+        loadStoryBibleGovernanceState(storyBibleBranchId, false),
+      ]);
+      setSuccess(`设定圣经已经退回到 V${versionNumber} 对应的版本。`);
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+    } finally {
+      setStoryBibleGovernanceActionKey(null);
+    }
+  }
+
   async function handleKnowledgeSave() {
     setSavingKnowledge(true);
     setError(null);
@@ -1675,6 +2264,7 @@ export default function StoryRoomPage() {
       setFormState({});
       setSuccess(result.message);
       await loadWorkspace();
+      await loadStoryBibleGovernanceState(storyBibleBranchId, false);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     } finally {
@@ -1705,6 +2295,7 @@ export default function StoryRoomPage() {
       );
       setSuccess(result.message);
       await loadWorkspace();
+      await loadStoryBibleGovernanceState(storyBibleBranchId, false);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     }
@@ -1768,6 +2359,7 @@ export default function StoryRoomPage() {
       setStressResult(null);
       setSuccess(buildImportSummary(data));
       await loadWorkspace();
+      await loadStoryBibleGovernanceState(storyBibleBranchId, false);
     } catch (requestError) {
       if (requestError instanceof SyntaxError) {
         setError("设定包格式看起来不完整，请检查逗号、括号和引号。");
@@ -1917,6 +2509,7 @@ export default function StoryRoomPage() {
       setHighlightedKnowledgeId(
         data.accepted_entity_key ?? (data.accepted_entity_id ? String(data.accepted_entity_id) : null),
       );
+      await loadStoryBibleGovernanceState(storyBibleBranchId, false);
       setSuccess(data.message);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
@@ -1956,32 +2549,110 @@ export default function StoryRoomPage() {
     <main className="min-h-screen px-4 py-8 md:px-6">
       <div className="mx-auto max-w-7xl space-y-6">
         <section className="rounded-[42px] border border-black/10 bg-white/78 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)] md:p-8">
-          <div className="flex flex-wrap items-start justify-between gap-6">
+          <div className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
             <div>
               <p className="text-xs uppercase tracking-[0.28em] text-copper">写作现场</p>
               <h1 className="mt-2 text-3xl font-semibold">{workspace?.project.title}</h1>
-              <p className="mt-3 max-w-3xl text-sm leading-7 text-black/62">
-                这里就是这本书的唯一主路径。先把脑洞压成大纲，再写正文、收设定、看优化稿和本章总结，所有关键动作都在这一页闭环。
+              <p className="mt-3 text-sm text-black/58">
+                只走一条主路径：定故事，写正文，看优化，收设定。
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                  题材：{workspace?.project.genre ?? "未填写"}
+                  题材：{workspace?.project.genre ?? genre ?? "未填写"}
                 </span>
                 <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                  气质：{workspace?.project.tone ?? "未填写"}
+                  气质：{workspace?.project.tone ?? tone ?? "未填写"}
                 </span>
                 <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
                   设定条目：{knowledgeItemCount}
                 </span>
+                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
+                  当前章节：第 {chapterNumber} 章
+                </span>
+              </div>
+
+              <div className="mt-6 rounded-[28px] border border-copper/20 bg-[#fff7ef] p-5">
+                <p className="text-xs uppercase tracking-[0.18em] text-copper">当前建议先做</p>
+                <h2 className="mt-2 text-xl font-semibold">{recommendedStageCard.title}</h2>
+                <p className="mt-3 text-sm leading-7 text-black/62">
+                  {recommendedStageSummaryMap[recommendedStageCard.key]}
+                </p>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button
+                    className="rounded-full bg-copper px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                    onClick={() => openStage(recommendedStageCard.key)}
+                    type="button"
+                  >
+                    {recommendedStageActionLabelMap[recommendedStageCard.key]}
+                  </button>
+                  <Link
+                    className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                    href="/dashboard"
+                  >
+                    返回项目总览
+                  </Link>
+                </div>
               </div>
             </div>
-            <div className="flex flex-wrap gap-3">
-              <Link
-                className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
-                href="/dashboard"
-              >
-                返回项目总览
-              </Link>
+
+            <div className="space-y-4">
+              <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
+                <p className="text-sm font-semibold">四步写作路径</p>
+                <div className="mt-4 space-y-3">
+                  {stageCards.map((card, index) => {
+                    const isActive = activeStageValue === card.key;
+                    const isRecommended = recommendedStage === card.key;
+                    return (
+                      <button
+                        key={card.key}
+                        className={`flex w-full items-center justify-between rounded-[22px] border px-4 py-3 text-left transition ${
+                          isActive
+                            ? "border-copper/30 bg-white shadow-[0_14px_30px_rgba(176,112,53,0.1)]"
+                            : "border-black/10 bg-white/70 hover:bg-white"
+                        }`}
+                        onClick={() => openStage(card.key)}
+                        type="button"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-full border border-black/10 bg-[#fbfaf5] text-xs font-semibold text-black/62">
+                            {index + 1}
+                          </span>
+                          <div>
+                            <p className="text-sm font-semibold">{card.title}</p>
+                            <p className="text-xs text-black/52">{card.status}</p>
+                          </div>
+                        </div>
+                        {isRecommended ? (
+                          <span className="rounded-full border border-copper/20 bg-[#fff7ef] px-3 py-1 text-xs text-copper">
+                            当前
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
+                  <p className="text-sm text-black/55">主线范围</p>
+                  <p className="mt-3 text-lg font-semibold">{scopeLabel}</p>
+                </article>
+                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
+                  <p className="text-sm text-black/55">已存章节</p>
+                  <p className="mt-3 text-lg font-semibold">{savedChapterCount} 章</p>
+                </article>
+                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
+                  <p className="text-sm text-black/55">体量目标</p>
+                  <p className="mt-3 text-lg font-semibold">
+                    {effectiveTargetChapterCount} 章 / {targetTotalWords.toLocaleString()} 字
+                  </p>
+                </article>
+                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
+                  <p className="text-sm text-black/55">设定待确认</p>
+                  <p className="mt-3 text-lg font-semibold">{storyBiblePendingChanges.length} 条</p>
+                </article>
+              </div>
             </div>
           </div>
 
@@ -1997,142 +2668,245 @@ export default function StoryRoomPage() {
           ) : null}
         </section>
 
-        <OutlineWorkbench
-          outlines={workspace?.outlines ?? []}
-          result={stressResult}
-          idea={idea}
-          genre={genre}
-          tone={tone}
-          targetChapterCount={targetChapterCount}
-          targetTotalWords={targetTotalWords}
-          loading={stressLoading}
-          onIdeaChange={setIdea}
-          onGenreChange={setGenre}
-          onToneChange={setTone}
-          onTargetChapterCountChange={setTargetChapterCount}
-          onTargetTotalWordsChange={setTargetTotalWords}
-          onRunStressTest={handleRunStressTest}
-        />
+        {activeStageValue === "outline" ? (
+          <section id="story-stage-outline" className="scroll-mt-6 space-y-4">
+            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <p className="text-xs uppercase tracking-[0.18em] text-copper">第一步</p>
+              <h2 className="mt-2 text-2xl font-semibold">先准备大纲输入</h2>
+              <p className="mt-3 text-sm text-black/58">输入想法，或者上传已有大纲。</p>
+            </div>
 
-        <DraftStudio
-          chapterNumber={chapterNumber}
-          chapterTitle={chapterTitle}
-          draftText={draftText}
-          styleSample={styleSample}
-          outlines={outlineList}
-          activeChapter={activeChapter}
-          scopeLabel={scopeLabel}
-          savedChapterCount={savedChapterCount}
-          guardResult={guardResult}
-          pausedStreamState={pausedStreamState}
-          activeRepairInstruction={activeRepairInstruction}
-          finalResult={finalResult}
-          checkingGuard={checkingGuard}
-          streaming={streamingChapter}
-          streamStatus={streamStatus}
-          optimizing={optimizing}
-          savingDraft={savingDraft}
-          draftDirty={draftDirty}
-          editorTextareaRef={editorTextareaRef}
-          onChapterNumberChange={(value) => setChapterNumber(value)}
-          onChapterTitleChange={(value) => {
-            setChapterTitle(value);
-            setDraftDirty(true);
-          }}
-          onDraftTextChange={(value) => {
-            setDraftText(value);
-            setDraftDirty(true);
-          }}
-          onStyleSampleChange={setStyleSample}
-          onSaveDraft={() => void handleSaveDraft()}
-          onRunStreamGenerate={() => void handleRunStreamGenerate()}
-          onContinueWithRepair={(option) => void handleContinueWithRepair(option)}
-          onContinueAfterManualFix={() => void handleContinueAfterManualFix()}
-          onRunGuardCheck={() => void triggerGuardCheck(true)}
-          onRunOptimize={() => void handleRunOptimize()}
-          onAutoRemember={() => void handleRunOptimize("本章总结和设定更新建议已经自动记下来了。")}
-        />
+            <OutlineWorkbench
+              outlines={workspace?.outlines ?? []}
+              result={stressResult}
+              idea={idea}
+              genre={genre}
+              tone={tone}
+              sourceMaterial={sourceMaterial}
+              sourceMaterialName={sourceMaterialName}
+              targetChapterWords={targetChapterWords}
+              targetTotalWords={targetTotalWords}
+              estimatedChapterCount={effectiveTargetChapterCount}
+              loading={stressLoading}
+              savingGoalProfile={savingStoryGoals}
+              updatingOutlineId={updatingOutlineId}
+              onIdeaChange={setIdea}
+              onGenreChange={setGenre}
+              onToneChange={setTone}
+              onSourceMaterialChange={handleSourceMaterialChange}
+              onClearSourceMaterial={handleClearSourceMaterial}
+              onTargetChapterWordsChange={setTargetChapterWords}
+              onTargetTotalWordsChange={setTargetTotalWords}
+              onSaveGoalProfile={() => void handleSaveStoryGoals()}
+              onRunStressTest={handleRunStressTest}
+              onUpdateOutline={(outlineId, payload) => void handleUpdateOutline(outlineId, payload)}
+              onOpenDraftStep={() => openStage("draft")}
+            />
+          </section>
+        ) : null}
 
-        <ChapterReviewPanel
-          activeChapter={activeChapter}
-          draftText={draftText}
-          draftDirty={draftDirty}
-          reviewWorkspace={reviewWorkspace}
-          chapterVersions={chapterVersions}
-          loading={loadingChapterReview}
-          submittingActionKey={reviewSubmittingActionKey}
-          editorTextareaRef={editorTextareaRef}
-          onCreateComment={handleCreateReviewComment}
-          onUpdateComment={handleUpdateReviewComment}
-          onDeleteComment={handleDeleteReviewComment}
-          onCreateCheckpoint={handleCreateCheckpoint}
-          onUpdateCheckpoint={handleUpdateCheckpoint}
-          onCreateDecision={handleCreateReviewDecision}
-          onRollback={handleRollbackVersion}
-          onRewriteSelection={handleRewriteSelection}
-        />
+        {activeStageValue === "draft" ? (
+          <section id="story-stage-draft" className="scroll-mt-6 space-y-4">
+            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <p className="text-xs uppercase tracking-[0.18em] text-copper">第二步</p>
+              <h2 className="mt-2 text-2xl font-semibold">先选章节，再开始出正文</h2>
+              <p className="mt-3 text-sm text-black/58">正文只跟三级大纲走。</p>
+            </div>
 
-        <FinalDiffViewer
-          result={visibleFinalResult}
-          resolvingSuggestionId={resolvingSuggestionId}
-          onApplyKnowledgeSuggestion={(suggestion) =>
-            void handleResolveKnowledgeSuggestion(suggestion, "apply")
-          }
-          onIgnoreKnowledgeSuggestion={(suggestion) =>
-            void handleResolveKnowledgeSuggestion(suggestion, "ignore")
-          }
-        />
+            <DraftStudio
+              chapterNumber={chapterNumber}
+              chapterTitle={chapterTitle}
+              draftText={draftText}
+              outlines={outlineList}
+              outlineSelectionId={currentOutline?.outline_id ?? null}
+              activeChapter={activeChapter}
+              scopeLabel={scopeLabel}
+              savedChapterCount={savedChapterCount}
+              guardResult={guardResult}
+              pausedStreamState={pausedStreamState}
+              activeRepairInstruction={activeRepairInstruction}
+              finalResult={finalResult}
+              checkingGuard={checkingGuard}
+              streaming={streamingChapter}
+              streamStatus={streamStatus}
+              optimizing={optimizing}
+              savingDraft={savingDraft}
+              draftDirty={draftDirty}
+              editorTextareaRef={editorTextareaRef}
+              onChapterNumberChange={(value) => setChapterNumber(value)}
+              onChapterTitleChange={(value) => {
+                setChapterTitle(value);
+                setDraftDirty(true);
+              }}
+              onDraftTextChange={(value) => {
+                setDraftText(value);
+                setDraftDirty(true);
+              }}
+              onSelectOutlineId={handleSelectOutlineId}
+              onSaveDraft={() => void handleSaveDraft()}
+              onRunStreamGenerate={() => void handleRunStreamGenerate()}
+              onContinueWithRepair={(option) => void handleContinueWithRepair(option)}
+              onContinueAfterManualFix={() => void handleContinueAfterManualFix()}
+              onRunGuardCheck={() => void triggerGuardCheck(true)}
+              onRunOptimize={() => void handleRunOptimize()}
+              onAutoRemember={() => void handleRunOptimize("本章总结和设定更新建议已经自动记下来了。")}
+              onOpenOutlineStep={() => openStage("outline")}
+            />
 
-        <FinalPublishPanel
-          activeChapter={activeChapter}
-          draftDirty={draftDirty}
-          finalResult={finalResult}
-          exportingFormat={exportingFormat}
-          finalizingChapter={finalizingChapter}
-          canApplyOptimizedDraft={canApplyOptimizedDraft}
-          onApplyOptimizedDraft={() => handleApplyOptimizedDraft()}
-          onSaveAsFinal={() => void handleSaveAsFinal()}
-          onExport={(format) => void handleExportChapter(format)}
-        />
+            <StyleControlPanel
+              chapterSample={styleSample}
+              preferenceProfile={preferenceProfile}
+              styleTemplates={styleTemplates}
+              loading={loadingStyleControl}
+              actionKey={styleActionKey}
+              onChapterSampleChange={setStyleSample}
+              onApplyTemplate={(templateKey) => void handleApplyStyleTemplate(templateKey)}
+              onClearTemplate={() => void handleClearStyleTemplate()}
+              onSavePreference={(payload) => void handleSaveStylePreference(payload)}
+            />
+          </section>
+        ) : null}
 
-        <KnowledgeBaseBoard
-          workspace={workspace}
-          storyBible={storyBible}
-          activeTab={activeTab}
-          highlightedItemId={highlightedKnowledgeId}
-          editingId={editingId}
-          formState={formState}
-          saving={savingKnowledge}
-          importing={importingKnowledge}
-          searchQuery={searchQuery}
-          searchResults={searchResults}
-          importTemplates={importTemplates}
-          selectedTemplateKey={selectedTemplateKey}
-          importPayloadText={importPayloadText}
-          replaceSections={replaceSections}
-          generationLoadingKind={dispatchingEntityKind}
-          generationTask={entityTaskState}
-          acceptingCandidateIndex={acceptingCandidateIndex}
-          onTabChange={handleKnowledgeTabChange}
-          onFieldChange={(field, value) =>
-            setFormState((current) => ({
-              ...current,
-              [field]: value,
-            }))
-          }
-          onSearchQueryChange={setSearchQuery}
-          onImportTemplateChange={handleImportTemplateChange}
-          onImportPayloadChange={setImportPayloadText}
-          onToggleReplaceSection={handleToggleReplaceSection}
-          onGenerateSuggestion={(kind) => void handleGenerateSuggestion(kind)}
-          onAcceptSuggestion={(candidateIndex) => void handleAcceptSuggestion(candidateIndex)}
-          onSearch={() => void handleSearch()}
-          onSubmit={() => void handleKnowledgeSave()}
-          onSubmitImport={() => void handleSubmitImport()}
-          onStartEdit={handleStartEdit}
-          onDelete={(tab, id) => void handleDeleteKnowledge(tab, id)}
-          onCancelEdit={handleCancelEdit}
-        />
+        {activeStageValue === "final" ? (
+          <section id="story-stage-final" className="scroll-mt-6 space-y-4">
+            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <p className="text-xs uppercase tracking-[0.18em] text-copper">第三步</p>
+              <h2 className="mt-2 text-2xl font-semibold">看终稿对比，再决定是否放行</h2>
+              <p className="mt-3 text-sm text-black/58">这里只看结果，不再回头起稿。</p>
+              {!visibleFinalResult ? (
+                <div className="mt-4 flex flex-wrap items-center gap-3 rounded-[24px] border border-black/10 bg-[#fbfaf5] px-4 py-3 text-sm text-black/62">
+                  这章还没有跑出优化结果。
+                  <button
+                    className="rounded-full bg-copper px-4 py-2 text-sm font-semibold text-white"
+                    onClick={() => openStage("draft")}
+                    type="button"
+                  >
+                    回正文区继续
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
+            <FinalDiffViewer
+              result={visibleFinalResult}
+              hasDraftText={draftText.trim().length > 0}
+              hasSavedChapter={activeChapter !== null}
+              chapterTitle={chapterTitle}
+              resolvingSuggestionId={resolvingSuggestionId}
+              onOpenDraftStep={() => openStage("draft")}
+              onApplyKnowledgeSuggestion={(suggestion) =>
+                void handleResolveKnowledgeSuggestion(suggestion, "apply")
+              }
+              onIgnoreKnowledgeSuggestion={(suggestion) =>
+                void handleResolveKnowledgeSuggestion(suggestion, "ignore")
+              }
+            />
+
+            <FinalPublishPanel
+              activeChapter={activeChapter}
+              draftDirty={draftDirty}
+              finalResult={finalResult}
+              exportingFormat={exportingFormat}
+              finalizingChapter={finalizingChapter}
+              canApplyOptimizedDraft={canApplyOptimizedDraft}
+              onOpenDraftStep={() => openStage("draft")}
+              onApplyOptimizedDraft={() => handleApplyOptimizedDraft()}
+              onSaveAsFinal={() => void handleSaveAsFinal()}
+              onExport={(format) => void handleExportChapter(format)}
+            />
+          </section>
+        ) : null}
+
+        {activeStageValue === "knowledge" ? (
+          <section id="story-stage-knowledge" className="scroll-mt-6 space-y-4">
+            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <p className="text-xs uppercase tracking-[0.18em] text-copper">第四步</p>
+              <h2 className="mt-2 text-2xl font-semibold">最后确认设定圣经</h2>
+              <p className="mt-3 text-sm text-black/58">默认先写，最后回来收设定。</p>
+            </div>
+
+            <KnowledgeBaseBoard
+              workspace={workspace}
+              storyBible={storyBible}
+              activeTab={activeTab}
+              highlightedItemId={highlightedKnowledgeId}
+              editingId={editingId}
+              formState={formState}
+              saving={savingKnowledge}
+              importing={importingKnowledge}
+              searchQuery={searchQuery}
+              searchResults={searchResults}
+              importTemplates={importTemplates}
+              selectedTemplateKey={selectedTemplateKey}
+              importPayloadText={importPayloadText}
+              replaceSections={replaceSections}
+              generationLoadingKind={dispatchingEntityKind}
+              generationTask={entityTaskState}
+              acceptingCandidateIndex={acceptingCandidateIndex}
+              storyBibleVersions={storyBibleVersions}
+              storyBiblePendingChanges={storyBiblePendingChanges}
+              loadingGovernance={loadingStoryBibleGovernance}
+              governanceActionKey={storyBibleGovernanceActionKey}
+              onTabChange={handleKnowledgeTabChange}
+              onFieldChange={(field, value) =>
+                setFormState((current) => ({
+                  ...current,
+                  [field]: value,
+                }))
+              }
+              onSearchQueryChange={setSearchQuery}
+              onImportTemplateChange={handleImportTemplateChange}
+              onImportPayloadChange={setImportPayloadText}
+              onToggleReplaceSection={handleToggleReplaceSection}
+              onGenerateSuggestion={(kind) => void handleGenerateSuggestion(kind)}
+              onAcceptSuggestion={(candidateIndex) => void handleAcceptSuggestion(candidateIndex)}
+              onSearch={() => void handleSearch()}
+              onSubmit={() => void handleKnowledgeSave()}
+              onSubmitImport={() => void handleSubmitImport()}
+              onStartEdit={handleStartEdit}
+              onDelete={(tab, id) => void handleDeleteKnowledge(tab, id)}
+              onCancelEdit={handleCancelEdit}
+              onApprovePendingChange={(changeId) =>
+                void handleApproveStoryBiblePendingChange(changeId)
+              }
+              onRejectPendingChange={(changeId) =>
+                void handleRejectStoryBiblePendingChange(changeId)
+              }
+              onRollbackVersion={(versionId, versionNumber) =>
+                void handleRollbackStoryBibleVersion(versionId, versionNumber)
+              }
+            />
+          </section>
+        ) : null}
+
+        <details className="rounded-[32px] border border-black/10 bg-white/80 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+          <summary className="cursor-pointer list-none text-lg font-semibold">
+            更多高级工具：版本、批注、回退与章节复核
+          </summary>
+          <p className="mt-3 text-sm leading-7 text-black/60">
+            这部分默认收起来，避免打断主路径。只有当你要做版本对比、精确批注或回退章节时，再展开使用。
+          </p>
+          <div className="mt-5">
+            <ChapterReviewPanel
+              activeChapter={activeChapter}
+              draftText={draftText}
+              draftDirty={draftDirty}
+              reviewWorkspace={reviewWorkspace}
+              chapterVersions={chapterVersions}
+              loading={loadingChapterReview}
+              submittingActionKey={reviewSubmittingActionKey}
+              editorTextareaRef={editorTextareaRef}
+              onCreateComment={handleCreateReviewComment}
+              onUpdateComment={handleUpdateReviewComment}
+              onDeleteComment={handleDeleteReviewComment}
+              onCreateCheckpoint={handleCreateCheckpoint}
+              onUpdateCheckpoint={handleUpdateCheckpoint}
+              onCreateDecision={handleCreateReviewDecision}
+              onRollback={handleRollbackVersion}
+              onRewriteSelection={handleRewriteSelection}
+            />
+          </div>
+        </details>
       </div>
     </main>
   );

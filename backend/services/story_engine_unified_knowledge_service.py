@@ -149,6 +149,7 @@ async def save_story_knowledge(
     previous_entity_key: str | None = None,
     source_workflow: str = "manual",
     guard_operation: str = "保存",
+    skip_guard: bool = False,
 ) -> dict[str, Any]:
     structured_spec = _get_structured_section_spec(section_key)
     if structured_spec is not None:
@@ -160,16 +161,21 @@ async def save_story_knowledge(
         else:
             validated_payload = structured_spec.create_schema.model_validate(item).model_dump()
 
-        guard_result = await run_story_knowledge_guard(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key=section_key,
-            operation=guard_operation,
-            candidate_item=validated_payload,
-            entity_id=entity_id,
-        )
-        _raise_when_story_knowledge_guard_blocks(guard_result, action_label=guard_operation)
+        # 批量初始化模板会先跑一次总体验证，再走这里逐条落库。
+        # 这样既保留真实守护能力，又避免一套模板被逐条重型校验拖到数分钟。
+        if skip_guard:
+            guard_result = _build_skip_guard_result(action_label=guard_operation)
+        else:
+            guard_result = await run_story_knowledge_guard(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                section_key=section_key,
+                operation=guard_operation,
+                candidate_item=validated_payload,
+                entity_id=entity_id,
+            )
+            _raise_when_story_knowledge_guard_blocks(guard_result, action_label=guard_operation)
 
         if entity_id:
             await update_entity(
@@ -192,7 +198,11 @@ async def save_story_knowledge(
             )
         return _build_story_knowledge_mutation_response(
             guard_result,
-            action_completed_message="这条设定已保存，并通过守护校验。"
+            action_completed_message=(
+                "这条设定已保存，并通过守护校验。"
+                if not skip_guard
+                else "这条设定已保存，并沿用批量导入预检结果。"
+            )
             if not guard_result["warning_count"]
             else (
                 f"这条设定已保存，但还带出 {guard_result['warning_count']} 条连续性提醒，"
@@ -209,16 +219,19 @@ async def save_story_knowledge(
         )
 
     validated_item = story_bible_schema.model_validate(item).model_dump(mode="json")
-    guard_result = await run_story_knowledge_guard(
-        session,
-        project_id=project_id,
-        user_id=user_id,
-        section_key=section_key,
-        operation=guard_operation,
-        candidate_item=validated_item,
-        entity_id=entity_id,
-    )
-    _raise_when_story_knowledge_guard_blocks(guard_result, action_label=guard_operation)
+    if skip_guard:
+        guard_result = _build_skip_guard_result(action_label=guard_operation)
+    else:
+        guard_result = await run_story_knowledge_guard(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            section_key=section_key,
+            operation=guard_operation,
+            candidate_item=validated_item,
+            entity_id=entity_id,
+        )
+        _raise_when_story_knowledge_guard_blocks(guard_result, action_label=guard_operation)
     next_entity_key = _resolve_story_bible_entity_key(validated_item)
     project = await get_owned_project(
         session,
@@ -250,7 +263,11 @@ async def save_story_knowledge(
         )
     return _build_story_knowledge_mutation_response(
         guard_result,
-        action_completed_message="这条主设定已保存，当前主线会立刻按新设定生效。"
+        action_completed_message=(
+            "这条主设定已保存，当前主线会立刻按新设定生效。"
+            if not skip_guard
+            else "这条主设定已保存，并沿用批量导入预检结果。"
+        )
         if not guard_result["warning_count"]
         else (
             f"这条主设定已保存，但还带出 {guard_result['warning_count']} 条连续性提醒，"
@@ -350,6 +367,17 @@ def _raise_when_story_knowledge_guard_blocks(
             "warning_count": guard_result.get("warning_count") or 0,
         },
     )
+
+
+def _build_skip_guard_result(*, action_label: str) -> dict[str, Any]:
+    return {
+        "passed": True,
+        "blocked": False,
+        "message": f"这条设定已通过批量导入预检，可以直接{action_label}。",
+        "alerts": [],
+        "blocking_issue_count": 0,
+        "warning_count": 0,
+    }
 
 
 def _build_story_knowledge_mutation_response(

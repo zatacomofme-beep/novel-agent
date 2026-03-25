@@ -48,9 +48,121 @@ def is_story_engine_remote_ready() -> bool:
     return model_gateway.is_remote_available()
 
 
+def _build_story_stream_model_candidates(
+    model_routing: Optional[dict[str, dict[str, Any]]] = None,
+) -> list[dict[str, str]]:
+    """为流式正文生成构造一个有序的写作模型候选链。"""
+
+    candidates: list[dict[str, str]] = []
+    seen_models: set[str] = set()
+    for role in ("stream_writer", "commercial", "style_guardian", "arbitrator"):
+        model = get_story_engine_role_model(role, model_routing).strip()
+        if not model or model in seen_models:
+            continue
+        seen_models.add(model)
+        candidates.append(
+            {
+                "role": role,
+                "model": model,
+                "reasoning_effort": get_story_engine_role_reasoning(role, model_routing),
+            }
+        )
+    return candidates
+
+
+def _should_failover_story_stream_result(result: GenerationResult) -> bool:
+    """仅在明显属于模型/配额/服务抖动时，才继续切换后备写作模型。"""
+
+    if not result.used_fallback:
+        return False
+
+    metadata = dict(result.metadata or {})
+    remote_error = metadata.get("remote_error")
+    if not isinstance(remote_error, dict):
+        return False
+
+    error_type = str(remote_error.get("error_type") or "").strip().lower()
+    message = str(remote_error.get("message") or "").strip().lower()
+    status_code = remote_error.get("status_code")
+
+    if error_type in {
+        "timeout",
+        "rate_limit",
+        "provider_unavailable",
+        "empty_response",
+    }:
+        return True
+
+    if error_type != "auth":
+        return False
+
+    return status_code in (401, 403) or any(
+        marker in message
+        for marker in (
+            "quota",
+            "insufficient",
+            "not enough",
+            "forbidden",
+            "permission",
+            "unsupported",
+            "access denied",
+        )
+    )
+
+
+def _build_story_stream_failover_attempt(
+    *,
+    candidate: dict[str, str],
+    result: GenerationResult,
+) -> dict[str, Any]:
+    metadata = dict(result.metadata or {})
+    remote_error = metadata.get("remote_error")
+    if not isinstance(remote_error, dict):
+        return {
+            "role": candidate["role"],
+            "model": candidate["model"],
+            "selected_provider": metadata.get("selected_provider"),
+        }
+    return {
+        "role": candidate["role"],
+        "model": candidate["model"],
+        "selected_provider": metadata.get("selected_provider"),
+        "error_type": remote_error.get("error_type"),
+        "status_code": remote_error.get("status_code"),
+        "message": str(remote_error.get("message") or "").strip()[:240],
+    }
+
+
+def _extract_story_stream_character_name(candidate: Any) -> str:
+    if isinstance(candidate, dict):
+        return str(candidate.get("name") or "").strip()
+    return str(getattr(candidate, "name", "") or "").strip()
+
+
+def _pick_story_stream_character_name(
+    characters: list[Any],
+    *,
+    preferred_markers: tuple[str, ...],
+    excluded_names: Optional[set[str]] = None,
+) -> Optional[str]:
+    excluded_names = excluded_names or set()
+    normalized: list[str] = [
+        name
+        for name in (_extract_story_stream_character_name(item) for item in characters)
+        if name and name not in excluded_names
+    ]
+    for marker in preferred_markers:
+        for name in normalized:
+            if marker in name:
+                return name
+    return normalized[0] if normalized else None
+
+
 async def generate_story_outline_blueprint(
     *,
     idea: str,
+    source_material: Optional[str],
+    source_material_name: Optional[str],
     genre: Optional[str],
     tone: Optional[str],
     target_chapter_count: int,
@@ -70,7 +182,9 @@ async def generate_story_outline_blueprint(
     )
     prompt = (
         "请根据下面的脑洞生成 JSON，对象结构必须包含 outline_draft 和 initial_kb。\n\n"
-        f"脑洞：{idea}\n"
+        f"脑洞：{idea or '未提供'}\n"
+        f"已有大纲素材：{source_material_name or '未提供'}\n"
+        f"大纲原文：{source_material or '未提供'}\n"
         f"题材：{genre or '未指定'}\n"
         f"气质：{tone or '未指定'}\n"
         f"目标章节数：{target_chapter_count}\n"
@@ -84,7 +198,8 @@ async def generate_story_outline_blueprint(
         "  },\n"
         '  "initial_kb": {"characters":[],"foreshadows":[],"items":[],"world_rules":[],"timeline_events":[]}\n'
         "}\n"
-        "要求：主线必须清晰，规则必须能约束后期，人物至少 2-3 个，长期伏笔至少 2 条。"
+        "要求：如果提供了已有大纲素材，优先忠实解读原文，再把它整理成三级大纲；不要凭空改写主线方向。"
+        "主线必须清晰，规则必须能约束后期，人物至少 2-3 个，长期伏笔至少 2 条。"
     )
     result = await model_gateway.generate_text(
         GenerationRequest(
@@ -345,9 +460,18 @@ async def generate_story_stream_paragraph(
     model_routing: Optional[dict[str, dict[str, Any]]] = None,
     repair_instruction: Optional[str] = None,
 ) -> GenerationResult:
-    """为单段正文生成构造真实模型请求；远端不可用时自动回退到启发式正文。"""
+    """为单段正文生成构造真实模型请求；在写作模型失败时按候选链自动容灾。"""
 
-    lead_name = workspace["characters"][0].name if workspace.get("characters") else "主角"
+    characters = workspace.get("characters", [])
+    lead_name = _pick_story_stream_character_name(
+        characters,
+        preferred_markers=("主角", "男主", "女主", "主人公"),
+    ) or "主角"
+    foil_name = _pick_story_stream_character_name(
+        characters,
+        preferred_markers=("宿敌", "反派", "对手", "敌", "boss"),
+        excluded_names={lead_name},
+    ) or "对手"
     rule_snippets = [
         f"{item.rule_name}：{item.rule_content}"
         for item in workspace.get("world_rules", [])[:3]
@@ -378,6 +502,7 @@ async def generate_story_stream_paragraph(
         f"当前已有正文：\n{draft_text[-2500:] if draft_text else '（暂无）'}\n\n"
         f"最近两章摘要：\n{recent_summary or '（暂无）'}\n\n"
         f"重点人物：{lead_name}\n"
+        f"对立人物：{foil_name}\n"
         f"世界规则：{'; '.join(rule_snippets) or '暂无'}\n"
         f"关键伏笔：{'; '.join(foreshadow_snippets) or '暂无'}\n"
         f"可用物品：{'; '.join(item_snippets) or '暂无'}\n\n"
@@ -386,22 +511,81 @@ async def generate_story_stream_paragraph(
         "请直接写这一段正文，长度控制在 180-320 汉字左右，保证有画面、有推进、有因果。"
     )
 
-    return await model_gateway.generate_text(
-        GenerationRequest(
-            task_name="story_engine.stream_writer",
-            prompt=prompt,
-            system_prompt=system_prompt,
-            model=get_story_engine_role_model("stream_writer", model_routing),
-            reasoning_effort=get_story_engine_role_reasoning("stream_writer", model_routing),
-            temperature=0.85,
-            max_tokens=420,
-            metadata={
-                "chapter_number": chapter_number,
-                "paragraph_index": paragraph_index,
-                "agent_role": "stream_writer",
-            },
-        ),
-        fallback=lambda: fallback,
+    candidates = _build_story_stream_model_candidates(model_routing)
+    if not candidates:
+        candidates = [
+            {
+                "role": "stream_writer",
+                "model": get_story_engine_role_model("stream_writer", model_routing),
+                "reasoning_effort": get_story_engine_role_reasoning("stream_writer", model_routing),
+            }
+        ]
+
+    failover_attempts: list[dict[str, Any]] = []
+    failover_triggered = False
+
+    for index, candidate in enumerate(candidates, start=1):
+        result = await model_gateway.generate_text(
+            GenerationRequest(
+                task_name="story_engine.stream_writer",
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=candidate["model"],
+                reasoning_effort=candidate["reasoning_effort"],
+                temperature=0.85,
+                max_tokens=420,
+                metadata={
+                    "chapter_number": chapter_number,
+                    "paragraph_index": paragraph_index,
+                    "agent_role": "stream_writer",
+                    "stream_route_role": candidate["role"],
+                    "stream_route_index": index,
+                    "stream_route_total": len(candidates),
+                },
+            ),
+            fallback=lambda: fallback,
+        )
+
+        should_failover = _should_failover_story_stream_result(result)
+        if should_failover:
+            failover_attempts.append(
+                _build_story_stream_failover_attempt(
+                    candidate=candidate,
+                    result=result,
+                )
+            )
+
+        if should_failover and index < len(candidates):
+            failover_triggered = True
+            continue
+
+        result.metadata = {
+            **dict(result.metadata or {}),
+            "stream_selected_role": candidate["role"],
+            "stream_candidate_roles": [item["role"] for item in candidates],
+            "stream_candidate_models": [item["model"] for item in candidates],
+            "stream_failover_triggered": failover_triggered,
+            **(
+                {"stream_failover_attempts": failover_attempts}
+                if failover_attempts
+                else {}
+            ),
+        }
+        return result
+
+    # 理论上循环内一定会 return；这里保底退回启发式正文。
+    return GenerationResult(
+        content=fallback,
+        provider="local-fallback",
+        model="heuristic-v1",
+        used_fallback=True,
+        metadata={
+            "chapter_number": chapter_number,
+            "paragraph_index": paragraph_index,
+            "agent_role": "stream_writer",
+            "stream_failover_triggered": failover_triggered,
+            "stream_failover_attempts": failover_attempts,
+        },
     )
 
 

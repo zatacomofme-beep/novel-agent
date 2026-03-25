@@ -23,10 +23,13 @@ async def main() -> None:
     available = {item.id for item in models_response.data}
 
     required = [
+        settings.story_engine_outline_model,
         settings.story_engine_guardian_model,
         settings.story_engine_logic_model,
         settings.story_engine_commercial_model,
         settings.story_engine_style_model,
+        settings.story_engine_anchor_model,
+        settings.story_engine_arbitrator_model,
         settings.story_engine_stream_model,
     ]
     deduplicated = list(dict.fromkeys(required))

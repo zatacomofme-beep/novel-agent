@@ -350,6 +350,8 @@ async def story_engine_outline_stress_test(
         project_id=project_id,
         user_id=current_user.id,
         idea=payload.idea,
+        source_material=payload.source_material,
+        source_material_name=payload.source_material_name,
         genre=payload.genre,
         tone=payload.tone,
         target_chapter_count=payload.target_chapter_count or 120,

@@ -49,14 +49,14 @@
       "label": "均衡稳稿",
       "description": "当前推荐组合，优先保证设定稳定、逻辑闭环和终稿一致性。",
       "routing": {
-        "outline": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "outline": { "model": "claude-opus-4-6", "reasoning_effort": "high" },
         "guardian": { "model": "gpt-5.4", "reasoning_effort": "high" },
         "logic_debunker": { "model": "claude-opus-4-6", "reasoning_effort": "high" },
         "commercial": { "model": "deepseek-v3.2", "reasoning_effort": "medium" },
         "style_guardian": { "model": "gemini-3.1-pro-preview", "reasoning_effort": "medium" },
         "anchor": { "model": "gpt-5.4", "reasoning_effort": "medium" },
         "arbitrator": { "model": "gpt-5.4", "reasoning_effort": "high" },
-        "stream_writer": { "model": "gpt-5.4", "reasoning_effort": "medium" }
+        "stream_writer": { "model": "claude-opus-4-6", "reasoning_effort": "high" }
       }
     },
     {
@@ -64,14 +64,14 @@
       "label": "逻辑极限",
       "description": "适合锁死世界规则、排查长线隐患，优先把漏洞挑干净。",
       "routing": {
-        "outline": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "outline": { "model": "claude-opus-4-6", "reasoning_effort": "high" },
         "guardian": { "model": "gpt-5.4", "reasoning_effort": "high" },
         "logic_debunker": { "model": "claude-opus-4-6", "reasoning_effort": "high" },
         "commercial": { "model": "gpt-5.4", "reasoning_effort": "medium" },
         "style_guardian": { "model": "gemini-3.1-pro-preview", "reasoning_effort": "medium" },
         "anchor": { "model": "gpt-5.4", "reasoning_effort": "medium" },
         "arbitrator": { "model": "gpt-5.4", "reasoning_effort": "high" },
-        "stream_writer": { "model": "gpt-5.4", "reasoning_effort": "medium" }
+        "stream_writer": { "model": "claude-opus-4-6", "reasoning_effort": "high" }
       }
     },
     {
@@ -79,14 +79,14 @@
       "label": "冲榜节奏",
       "description": "适合连载期追更冲刺，优先提升爽点兑现、章末钩子和推进速度。",
       "routing": {
-        "outline": { "model": "gpt-5.4", "reasoning_effort": "high" },
+        "outline": { "model": "claude-opus-4-6", "reasoning_effort": "high" },
         "guardian": { "model": "gpt-5.4", "reasoning_effort": "high" },
         "logic_debunker": { "model": "claude-opus-4-6", "reasoning_effort": "medium" },
         "commercial": { "model": "deepseek-v3.2", "reasoning_effort": "high" },
         "style_guardian": { "model": "gemini-3.1-pro-preview", "reasoning_effort": "medium" },
         "anchor": { "model": "gpt-5.4", "reasoning_effort": "medium" },
         "arbitrator": { "model": "gpt-5.4", "reasoning_effort": "high" },
-        "stream_writer": { "model": "deepseek-v3.2", "reasoning_effort": "medium" }
+        "stream_writer": { "model": "claude-opus-4-6", "reasoning_effort": "high" }
       }
     }
   ]

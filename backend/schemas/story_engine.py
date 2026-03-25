@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from schemas.base import ORMModel
 from schemas.project import StoryBibleRead
@@ -429,12 +429,44 @@ class StoryEngineAgentReportRead(ORMModel):
     raw_output: dict = Field(default_factory=dict)
 
 
+class StoryEngineDeliberationEntryRead(ORMModel):
+    actor_key: str
+    actor_label: str
+    role: str
+    stance: Literal["review", "challenge", "revise", "arbitrate", "anchor"] = "review"
+    summary: str
+    evidence: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    issues: list[StoryEngineIssueRead] = Field(default_factory=list)
+
+
+class StoryEngineDeliberationRoundRead(ORMModel):
+    round_number: int = Field(ge=1)
+    title: str
+    summary: str
+    resolution: Optional[str] = None
+    entries: list[StoryEngineDeliberationEntryRead] = Field(default_factory=list)
+
+
 class OutlineStressTestRequest(ORMModel):
-    idea: str = Field(min_length=10)
+    idea: Optional[str] = Field(default=None, min_length=1)
     genre: Optional[str] = Field(default=None, max_length=100)
     tone: Optional[str] = Field(default=None, max_length=100)
     target_chapter_count: Optional[int] = Field(default=120, ge=10, le=2000)
     target_total_words: Optional[int] = Field(default=1_000_000, ge=50_000, le=20_000_000)
+    source_material: Optional[str] = None
+    source_material_name: Optional[str] = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_outline_source(self) -> "OutlineStressTestRequest":
+        idea = (self.idea or "").strip()
+        source_material = (self.source_material or "").strip()
+        if not idea and not source_material:
+            raise ValueError("idea or source_material must be provided")
+        self.idea = idea or None
+        self.source_material = source_material or None
+        self.source_material_name = (self.source_material_name or "").strip() or None
+        return self
 
 
 class OutlineStressTestResponse(ORMModel):
@@ -446,6 +478,7 @@ class OutlineStressTestResponse(ORMModel):
     optimization_plan: list[str] = Field(default_factory=list)
     debate_rounds_completed: int = 0
     agent_reports: list[StoryEngineAgentReportRead] = Field(default_factory=list)
+    deliberation_rounds: list[StoryEngineDeliberationRoundRead] = Field(default_factory=list)
 
 
 class RealtimeGuardRequest(ORMModel):
@@ -479,6 +512,7 @@ class FinalOptimizeResponse(ORMModel):
     chapter_summary: StoryChapterSummaryRead
     kb_update_list: list[dict] = Field(default_factory=list)
     agent_reports: list[StoryEngineAgentReportRead] = Field(default_factory=list)
+    deliberation_rounds: list[StoryEngineDeliberationRoundRead] = Field(default_factory=list)
     original_draft: str
     consensus_rounds: int = 1
     consensus_reached: bool = False

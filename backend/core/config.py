@@ -63,7 +63,7 @@ class Settings(BaseSettings):
         default="https://yunwu.ai/v1",
         alias="MODEL_GATEWAY_BASE_URL",
     )
-    default_model: str = Field(default="claude-3-5-sonnet", alias="DEFAULT_MODEL")
+    default_model: str = Field(default="gpt-5.4", alias="DEFAULT_MODEL")
     model_request_timeout_seconds: int = Field(
         default=45,
         alias="MODEL_REQUEST_TIMEOUT_SECONDS",
@@ -89,6 +89,14 @@ class Settings(BaseSettings):
         alias="STORY_ENGINE_ARBITRATOR_MODEL",
     )
     story_engine_stream_model: str = Field(default="gpt-5.4", alias="STORY_ENGINE_STREAM_MODEL")
+    story_engine_outline_max_debate_rounds: int = Field(
+        default=5,
+        alias="STORY_ENGINE_OUTLINE_MAX_DEBATE_ROUNDS",
+    )
+    story_engine_final_verify_max_rounds: int = Field(
+        default=6,
+        alias="STORY_ENGINE_FINAL_VERIFY_MAX_ROUNDS",
+    )
     redis_task_events_channel_prefix: str = Field(
         default="task_updates",
         alias="REDIS_TASK_EVENTS_CHANNEL_PREFIX",

@@ -79,6 +79,8 @@ STORY_ENGINE_STYLE_MODEL=gemini-3.1-pro-preview
 STORY_ENGINE_ANCHOR_MODEL=gpt-5.4
 STORY_ENGINE_ARBITRATOR_MODEL=gpt-5.4
 STORY_ENGINE_STREAM_MODEL=gpt-5.4
+STORY_ENGINE_OUTLINE_MAX_DEBATE_ROUNDS=5
+STORY_ENGINE_FINAL_VERIFY_MAX_ROUNDS=6
 ```
 
 ## 4. 当前推荐组合
@@ -120,6 +122,12 @@ STORY_ENGINE_STREAM_MODEL=gpt-5.4
 ```bash
 cd backend
 PYTHONPATH=. python3 scripts/verify_story_engine_models.py
+```
+
+### 一键跑交付检查
+
+```bash
+bash scripts/run_delivery_checks.sh
 ```
 
 ### 直接跑一遍 Story Engine 烟雾测试

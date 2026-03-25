@@ -161,6 +161,8 @@ _EXPORTS = {
     "StoryEngineModelRoutingUpdateRequest": "schemas.story_engine",
     "StoryEngineIssueRead": "schemas.story_engine",
     "StoryEngineAgentReportRead": "schemas.story_engine",
+    "StoryEngineDeliberationEntryRead": "schemas.story_engine",
+    "StoryEngineDeliberationRoundRead": "schemas.story_engine",
     "OutlineStressTestRequest": "schemas.story_engine",
     "OutlineStressTestResponse": "schemas.story_engine",
     "RealtimeGuardRequest": "schemas.story_engine",

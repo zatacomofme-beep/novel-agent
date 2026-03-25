@@ -1232,6 +1232,25 @@ export interface StoryEngineAgentReport {
   raw_output: Record<string, unknown>;
 }
 
+export interface StoryEngineDeliberationEntry {
+  actor_key: string;
+  actor_label: string;
+  role: string;
+  stance: "review" | "challenge" | "revise" | "arbitrate" | "anchor";
+  summary: string;
+  evidence: string[];
+  actions: string[];
+  issues: StoryEngineIssue[];
+}
+
+export interface StoryEngineDeliberationRound {
+  round_number: number;
+  title: string;
+  summary: string;
+  resolution: string | null;
+  entries: StoryEngineDeliberationEntry[];
+}
+
 export interface StoryEngineWorkspace {
   project: {
     project_id: string;
@@ -1330,11 +1349,13 @@ export interface PortableStoryEngineRoutingPayload {
 }
 
 export interface OutlineStressTestRequest {
-  idea: string;
+  idea: string | null;
   genre: string | null;
   tone: string | null;
   target_chapter_count: number | null;
   target_total_words: number | null;
+  source_material: string | null;
+  source_material_name: string | null;
 }
 
 export interface OutlineStressTestResponse {
@@ -1346,6 +1367,7 @@ export interface OutlineStressTestResponse {
   optimization_plan: string[];
   debate_rounds_completed: number;
   agent_reports: StoryEngineAgentReport[];
+  deliberation_rounds: StoryEngineDeliberationRound[];
 }
 
 export interface RealtimeGuardRequest {
@@ -1392,6 +1414,7 @@ export interface FinalOptimizeResponse {
   chapter_summary: StoryChapterSummary;
   kb_update_list: StoryKnowledgeSuggestion[];
   agent_reports: StoryEngineAgentReport[];
+  deliberation_rounds: StoryEngineDeliberationRound[];
   original_draft: string;
   consensus_rounds: number;
   consensus_reached: boolean;

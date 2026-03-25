@@ -157,6 +157,20 @@ cd frontend
 npm run type-check
 ```
 
+### 一键关键检查
+
+从仓库根目录直接执行：
+
+```bash
+bash scripts/run_delivery_checks.sh
+```
+
+如果你要连模型网关一起验证：
+
+```bash
+RUN_MODEL_VERIFY=1 bash scripts/run_delivery_checks.sh
+```
+
 ### 后端语法与测试
 
 ```bash
@@ -208,6 +222,7 @@ PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 sc
 - 是否创建了 `backend/.env.compose`
 - `docker compose config` 里是否出现你期望的模型字段
 - 是否误把密钥只写进了 `backend/.env`
+- 如果本机要直接 `source backend/.env.example`，记得先同步仓库里的最新版示例文件
 
 ### 2. Story Engine 在容器里检索不到知识库
 

@@ -11,8 +11,14 @@ from typing import Any
 import httpx
 
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8010/api/v1"
+DEFAULT_BASE_URL = "http://127.0.0.1:8000/api/v1"
 DEFAULT_PASSWORD = "StoryEngineSmoke123"
+DEFAULT_IMPORT_READ_TIMEOUT = 900.0
+RETRYABLE_REQUEST_ERRORS = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+)
 
 
 def _build_headers(token: str) -> dict[str, str]:
@@ -27,13 +33,37 @@ def _build_email() -> str:
     return f"story-engine-smoke-{timestamp}@example.com"
 
 
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    retries: int = 3,
+    **kwargs: Any,
+) -> httpx.Response:
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return await client.request(method, path, **kwargs)
+        except RETRYABLE_REQUEST_ERRORS as exc:
+            last_error = exc
+            if attempt >= retries:
+                raise
+            await asyncio.sleep(1.5 * attempt)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("request retry failed unexpectedly")
+
+
 async def _register_and_login(
     client: httpx.AsyncClient,
     *,
     email: str,
     password: str,
 ) -> dict[str, Any]:
-    response = await client.post(
+    response = await _request_with_retry(
+        client,
+        "POST",
         "/auth/register",
         json={"email": email, "password": password},
     )
@@ -46,7 +76,9 @@ async def _create_project(
     *,
     token: str,
 ) -> dict[str, Any]:
-    response = await client.post(
+    response = await _request_with_retry(
+        client,
+        "POST",
         "/projects",
         headers=_build_headers(token),
         json={
@@ -66,14 +98,18 @@ async def _bulk_import_template(
     *,
     project_id: str,
     token: str,
+    import_read_timeout: float,
 ) -> dict[str, Any]:
-    response = await client.post(
+    response = await _request_with_retry(
+        client,
+        "POST",
         f"/projects/{project_id}/story-engine/imports/bulk",
         headers=_build_headers(token),
         json={
             "template_key": "xuanhuan_upgrade",
             "replace_existing_sections": [],
         },
+        timeout=httpx.Timeout(connect=20.0, read=import_read_timeout, write=60.0, pool=60.0),
     )
     response.raise_for_status()
     return response.json()
@@ -85,7 +121,9 @@ async def _load_workspace(
     project_id: str,
     token: str,
 ) -> dict[str, Any]:
-    response = await client.get(
+    response = await _request_with_retry(
+        client,
+        "GET",
         f"/projects/{project_id}/story-engine/workspace",
         headers=_build_headers(token),
     )
@@ -106,7 +144,9 @@ async def _run_realtime_guard(
         "主角眼前一黑，下一瞬却毫无代价开挂，硬生生把本不可能赢的局面翻了过来。"
         "大战后秒恢复，连半点反噬都没有，仿佛之前所有代价规则都只是摆设。"
     )
-    response = await client.post(
+    response = await _request_with_retry(
+        client,
+        "POST",
         f"/projects/{project_id}/story-engine/workflows/realtime-guard",
         headers=_build_headers(token),
         json={
@@ -181,7 +221,9 @@ async def _run_final_optimize(
     token: str,
     draft_text: str,
 ) -> dict[str, Any]:
-    response = await client.post(
+    response = await _request_with_retry(
+        client,
+        "POST",
         f"/projects/{project_id}/story-engine/workflows/final-optimize",
         headers=_build_headers(token),
         json={
@@ -202,27 +244,36 @@ async def main() -> int:
     base_url = os.getenv("STORY_ENGINE_SMOKE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     password = os.getenv("STORY_ENGINE_SMOKE_PASSWORD", DEFAULT_PASSWORD)
     skip_final = os.getenv("STORY_ENGINE_SMOKE_SKIP_FINAL", "").lower() in {"1", "true", "yes"}
+    import_read_timeout = float(
+        os.getenv("STORY_ENGINE_SMOKE_IMPORT_READ_TIMEOUT", str(DEFAULT_IMPORT_READ_TIMEOUT))
+    )
     email = _build_email()
+    total_steps = 6 if skip_final else 7
 
     timeout = httpx.Timeout(connect=20.0, read=240.0, write=60.0, pool=60.0)
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
-        print(f"[1/6] 准备注册测试账号: {email}")
+        print(f"[1/{total_steps}] 准备注册测试账号: {email}")
         auth_payload = await _register_and_login(client, email=email, password=password)
         token = str(auth_payload["access_token"])
 
-        print("[2/6] 创建测试项目")
+        print(f"[2/{total_steps}] 创建测试项目")
         project = await _create_project(client, token=token)
         project_id = str(project["id"])
 
-        print("[3/6] 导入玄幻升级流模板")
-        import_result = await _bulk_import_template(client, project_id=project_id, token=token)
+        print(f"[3/{total_steps}] 导入玄幻升级流模板")
+        import_result = await _bulk_import_template(
+            client,
+            project_id=project_id,
+            token=token,
+            import_read_timeout=import_read_timeout,
+        )
 
-        print("[4/6] 拉取工作区并定位章纲")
+        print(f"[4/{total_steps}] 拉取工作区并定位章纲")
         workspace = await _load_workspace(client, project_id=project_id, token=token)
         level_3_outlines = [item for item in workspace.get("outlines", []) if item.get("level") == "level_3"]
         current_outline = level_3_outlines[0] if level_3_outlines else None
 
-        print("[5/6] 执行实时守护烟雾测试")
+        print(f"[5/{total_steps}] 执行实时守护烟雾测试")
         guard_result = await _run_realtime_guard(
             client,
             project_id=project_id,
@@ -231,7 +282,7 @@ async def main() -> int:
             current_outline=current_outline.get("content") if current_outline else None,
         )
 
-        print("[6/6] 执行流式章节生成烟雾测试")
+        print(f"[6/{total_steps}] 执行流式章节生成烟雾测试")
         stream_result = await _run_stream_generation(
             client,
             project_id=project_id,
@@ -242,7 +293,7 @@ async def main() -> int:
 
         final_result: dict[str, Any] | None = None
         if not skip_final and stream_result.get("draft_text"):
-            print("[7/7] 执行终稿优化烟雾测试")
+            print(f"[7/{total_steps}] 执行终稿优化烟雾测试")
             final_result = await _run_final_optimize(
                 client,
                 project_id=project_id,
@@ -289,5 +340,8 @@ if __name__ == "__main__":
         print(f"HTTP 错误: {exc.response.status_code} {exc.response.text[:500]}", file=sys.stderr)
         raise SystemExit(1)
     except Exception as exc:  # pragma: no cover - 运行期诊断脚本
-        print(f"执行失败: {exc}", file=sys.stderr)
+        print(
+            f"执行失败: {type(exc).__name__} {repr(exc)}",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
