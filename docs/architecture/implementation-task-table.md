@@ -182,7 +182,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `P2-01` | 跨端云端续写草稿 | `已完成（第一版）` | `P2` | 在本机保稿之外补齐云端暂存，让桌面和手机能接着写同一章 | `backend/api/v1/story_engine.py` `backend/services/story_engine_cloud_draft_service.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/components/story-engine/draft-studio.tsx` |
 | `P2-02` | 工作台任务轨迹与流程回放 | `已完成（第一版）` | `P2` | 把已有 `workflow_timeline / task_runs / task_events` 更完整地收口到 `story-room` 与 `dashboard` | `backend/api/v1/tasks.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` |
-| `E2-01` | 章节工作流持久化并轨到任务系统 | `待开始` | `P2` | 让章节流式生成、实时守护、终稿收口不仅返回时间线，还沉到统一 `task_runs / task_events` 主链 | `backend/services/story_engine_workflow_service.py` `backend/services/task_service.py` `backend/models/task_run.py` `backend/models/task_event.py` |
+| `E2-01` | 章节工作流持久化并轨到任务系统 | `已完成（第一版）` | `P2` | 让章节流式生成、实时守护、终稿收口不仅返回时间线，还沉到统一 `task_runs / task_events` 主链 | `backend/services/story_engine_workflow_service.py` `backend/services/task_service.py` `backend/models/task_run.py` `backend/models/task_event.py` |
 
 ### `P2-01` 验收标准
 
@@ -202,13 +202,21 @@
 - 已完成（第一版）：后端已新增项目级 `/api/v1/projects/{project_id}/task-playback` 聚合接口，把最近任务与最近事件收成一份回放数据，前端不需要再自己拼多次请求。
 - 已完成（第一版）：`story-room` 已加入统一“最近过程”区，会把当前页的正文生成 / 正文检查 / 终稿收口时间线，与项目级自动补设定回放合并展示成一条写手可读的过程线。
 - 已完成（第一版）：Dashboard 的“最近任务”已收口成“最近发生了什么”，能更快看到哪本书刚跑完、正在处理中，或者停在了哪一步。
-- 已完成（第一版）：这轮只解决“展示与回放收口”，章节流式生成、实时守护、终稿收口的持久化并轨仍留给下一项 `E2-01` 继续完成。
+- 已完成（第一版）：配合后续 `E2-01`，这些回放入口现在已经能直接消费持久化的章节工作流，不再只依赖本次请求的瞬时返回。
 
 ### `E2-01` 验收标准
 
 - `chapter-stream / realtime-guard / final-optimize` 都有可查询的统一任务记录。
 - 服务级返回的时间线与 `task_runs / task_events` 中的持久化结果语义一致。
 - 后续前台做轨迹回放时，不需要再只依赖一次性接口响应。
+
+### `E2-01` 当前进度
+
+- 已完成（第一版）：`realtime-guard / chapter-stream / final-optimize` 三条章节工作流现在都会写入统一 `task_runs / task_events`，并把 `workflow_timeline`、章节号、阶段状态、关键结果一起沉到任务结果里。
+- 已完成（第一版）：`chapter-stream` 已改成边流式生成边落任务事件；`realtime-guard` 在正文流内部调用时会关闭独立持久化，避免每段正文都炸出一条单独检查任务。
+- 已完成（第一版）：`story-room` 现在会把当前 `chapter_id` 透传到三个工作流，请求能稳定绑定真实章节；未正式落章时则自动退回项目级任务记录。
+- 已完成（第一版）：Dashboard 与任务详情读取章节号时，已经支持从 `task.result.chapter_number` 回退，不会因为任务挂在项目级而丢失章号。
+- 已完成（第一版）：`story-room` 与 Dashboard 都已经识别 `workflow_status=paused`，暂停态回放不会再被误显示成普通“已完成”。
 
 ### `P2-01` 当前进度
 

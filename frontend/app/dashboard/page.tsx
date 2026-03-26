@@ -265,6 +265,9 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
 
 const recentTaskTypeLabels: Record<string, string> = {
   chapter_generation: "续写下一章",
+  "story_engine.chapter_stream": "生成正文",
+  "story_engine.realtime_guard": "检查正文",
+  "story_engine.final_optimize": "终稿收口",
   "entity_generation.characters": "补几个人物",
   "entity_generation.supporting": "补几个配角",
   "entity_generation.items": "补几件物品",
@@ -278,6 +281,7 @@ const recentTaskStatusLabels: Record<string, string> = {
   running: "处理中",
   succeeded: "已完成",
   failed: "已失败",
+  paused: "已停住",
 };
 
 function formatRecentTaskType(taskType: string): string {
@@ -288,6 +292,19 @@ function formatRecentTaskStatus(status: string): string {
   return recentTaskStatusLabels[status] ?? status;
 }
 
+function normalizeRecentTaskStatus(
+  status: string,
+  workflowStatus?: string | null,
+): "queued" | "running" | "succeeded" | "failed" | "paused" {
+  if (workflowStatus === "paused") {
+    return "paused";
+  }
+  if (status === "queued" || status === "running" || status === "succeeded" || status === "failed") {
+    return status;
+  }
+  return "queued";
+}
+
 function buildRecentTaskHref(task: DashboardRecentTask): string | null {
   if (!task.project_id) {
     return null;
@@ -296,6 +313,20 @@ function buildRecentTaskHref(task: DashboardRecentTask): string | null {
   if (task.task_type.startsWith("entity_generation.")) {
     return buildStoryRoomHref(task.project_id, {
       stage: "knowledge",
+    });
+  }
+
+  if (task.task_type === "story_engine.final_optimize") {
+    return buildStoryRoomHref(task.project_id, {
+      stage: "final",
+      chapterNumber: task.chapter_number,
+    });
+  }
+
+  if (task.task_type === "story_engine.realtime_guard" || task.task_type === "story_engine.chapter_stream") {
+    return buildStoryRoomHref(task.project_id, {
+      stage: "draft",
+      chapterNumber: task.chapter_number,
     });
   }
 
@@ -312,6 +343,9 @@ function buildRecentTaskHref(task: DashboardRecentTask): string | null {
 function buildRecentTaskActionLabel(task: DashboardRecentTask): string {
   if (task.task_type.startsWith("entity_generation.")) {
     return "去设定区";
+  }
+  if (task.task_type === "story_engine.final_optimize") {
+    return "去终稿区";
   }
   if (task.chapter_number !== null) {
     return `处理 Ch${task.chapter_number}`;
@@ -523,10 +557,7 @@ function DashboardPageShell() {
             ? `${projectTitle} · Ch${task.chapter_number}`
             : projectTitle,
         summary: task.message ?? "最近过程已记录。",
-        status:
-          task.status === "queued" || task.status === "running" || task.status === "succeeded" || task.status === "failed"
-            ? task.status
-            : "queued",
+        status: normalizeRecentTaskStatus(task.status, task.workflow_status),
         progress: task.progress,
         updatedAt: task.updated_at,
         badges: [
@@ -536,12 +567,10 @@ function DashboardPageShell() {
         steps: [
           {
             id: `${task.task_id}:latest`,
-            label: task.message ?? formatRecentTaskStatus(task.status),
+            label:
+              task.message ?? formatRecentTaskStatus(task.workflow_status ?? task.status),
             detail: null,
-            status:
-              task.status === "queued" || task.status === "running" || task.status === "succeeded" || task.status === "failed"
-                ? task.status
-                : "queued",
+            status: normalizeRecentTaskStatus(task.status, task.workflow_status),
             createdAt: task.updated_at,
           },
         ],

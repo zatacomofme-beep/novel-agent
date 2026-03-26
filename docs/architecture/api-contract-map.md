@@ -142,7 +142,8 @@ Meaning:
 - `realtime-guard` 与 `final-optimize` 现在都会返回 `workflow_timeline`
 - `chapter-stream` 的每条 NDJSON 事件现在都会带 `workflow_event`，终止事件会补齐完整 `workflow_timeline`
 - `story-room` 现在同时消费“本机保稿 + 云端续写草稿”两层写作保护；正式章节保存、回滚、片段改写后，前台会主动清理当前章的云端续写稿
-- `story-room` 现在还会把“当前页工作流时间线 + 项目任务回放”合并展示为写手可读的最近过程，但章节工作流是否持久化到任务系统仍是下一步 `E2-01`
+- `story-room` 现在还会把“当前页工作流时间线 + 项目任务回放”合并展示为写手可读的最近过程；`chapter-stream / realtime-guard / final-optimize` 也都已经正式并入统一任务系统
+- 这三条章节工作流现在都会额外接受可选 `chapter_id`，已落库章节会直接挂到真实章节任务链；未落库章节则退回项目级任务记录
 
 ### Story Bible Workspace
 

@@ -373,7 +373,22 @@ def build_dashboard_overview_payload(
                 "message": getattr(task, "message", None),
                 "project_id": getattr(task, "project_id", None),
                 "chapter_id": getattr(task, "chapter_id", None),
-                "chapter_number": getattr(getattr(task, "chapter", None), "chapter_number", None),
+                "chapter_number": (
+                    getattr(getattr(task, "chapter", None), "chapter_number", None)
+                    if getattr(getattr(task, "chapter", None), "chapter_number", None) is not None
+                    else (
+                        getattr(task, "result", {}).get("chapter_number")
+                        if isinstance(getattr(task, "result", None), dict)
+                        and isinstance(getattr(task, "result", {}).get("chapter_number"), int)
+                        else None
+                    )
+                ),
+                "workflow_status": (
+                    getattr(task, "result", {}).get("workflow_status")
+                    if isinstance(getattr(task, "result", None), dict)
+                    and isinstance(getattr(task, "result", {}).get("workflow_status"), str)
+                    else None
+                ),
                 "updated_at": getattr(task, "updated_at"),
             }
             for task in recent_tasks

@@ -43,11 +43,15 @@ async def task_detail(
 
     state = task_state_store.get(task_id)
     if state is not None:
+        chapter_number = getattr(getattr(task_run, "chapter", None), "chapter_number", None)
+        if chapter_number is None and isinstance(getattr(task_run, "result", None), dict):
+            raw_chapter_number = task_run.result.get("chapter_number")
+            chapter_number = raw_chapter_number if isinstance(raw_chapter_number, int) else None
         return state.model_copy(
             update={
                 "project_id": task_run.project_id,
                 "chapter_id": task_run.chapter_id,
-                "chapter_number": getattr(getattr(task_run, "chapter", None), "chapter_number", None),
+                "chapter_number": chapter_number,
             }
         )
 

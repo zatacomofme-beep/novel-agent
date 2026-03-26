@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional, TypedDict
 from uuid import UUID, uuid4
 
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from schemas.story_engine import (
     StoryTimelineMapEventRead,
     StoryWorldRuleRead,
 )
+from services.chapter_service import get_owned_chapter
 from services.story_engine_kb_service import (
     build_workspace,
     create_entity,
@@ -48,6 +50,9 @@ from services.story_engine_settings_service import (
     get_story_engine_guardian_consensus_config,
     resolve_story_engine_model_routing,
 )
+from services.task_service import create_task_event, create_task_run, update_task_run
+from tasks.schemas import TaskState
+from tasks.state_store import task_state_store
 
 try:
     from langgraph.graph import END, START, StateGraph
@@ -229,6 +234,7 @@ async def run_realtime_guard(
     project_id: UUID,
     user_id: UUID,
     branch_id: Optional[UUID] = None,
+    chapter_id: Optional[UUID] = None,
     chapter_number: int,
     chapter_title: Optional[str],
     outline_id: Optional[UUID],
@@ -237,9 +243,16 @@ async def run_realtime_guard(
     draft_text: str,
     latest_paragraph: Optional[str],
     model_routing: Optional[dict[str, dict[str, Any]]] = None,
+    persist_task: bool = True,
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
     workflow_id = _build_workflow_id("realtime_guard")
+    resolved_chapter_id = await _resolve_workflow_chapter_id(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        chapter_id=chapter_id,
+    )
     resolved_outline = await _resolve_stream_outline_text(
         session=session,
         project_id=project_id,
@@ -247,6 +260,28 @@ async def run_realtime_guard(
         outline_id=outline_id,
         current_outline=current_outline,
     )
+    task_state = await _create_workflow_task_state(
+        session,
+        workflow_id=workflow_id,
+        workflow_type="realtime_guard",
+        project_id=project_id,
+        user_id=user_id,
+        chapter_id=resolved_chapter_id,
+        chapter_number=chapter_number,
+        initial_message="正在检查当前正文里的人设、规则和连续性风险。",
+        initial_result=(
+            _build_workflow_task_base_result(
+                workflow_id=workflow_id,
+                workflow_type="realtime_guard",
+                workflow_status="running",
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+            )
+            if persist_task
+            else None
+        ),
+    ) if persist_task else None
     initial_state: RealtimeGuardState = {
         "session": session,
         "project_id": project_id,
@@ -264,24 +299,73 @@ async def run_realtime_guard(
         "repair_options": [],
         "should_pause": False,
     }
-    if LANGGRAPH_AVAILABLE:
-        graph = _build_realtime_guard_graph()
-        result = await graph.ainvoke(initial_state)
-    else:
-        result = await _run_realtime_guard_fallback(initial_state)
-    workflow_timeline = _build_realtime_guard_workflow_timeline(
-        workflow_id=workflow_id,
-        state=initial_state,
-        result=result,
-    )
-    return {
-        "passed": not result["alerts"],
-        "should_pause": result["should_pause"],
-        "alerts": result["alerts"],
-        "repair_options": result["repair_options"],
-        "arbitration_note": result["arbitration_note"],
-        "workflow_timeline": workflow_timeline,
-    }
+    try:
+        if LANGGRAPH_AVAILABLE:
+            graph = _build_realtime_guard_graph()
+            result = await graph.ainvoke(initial_state)
+        else:
+            result = await _run_realtime_guard_fallback(initial_state)
+        workflow_timeline = _build_realtime_guard_workflow_timeline(
+            workflow_id=workflow_id,
+            state=initial_state,
+            result=result,
+        )
+        response = {
+            "passed": not result["alerts"],
+            "should_pause": result["should_pause"],
+            "alerts": result["alerts"],
+            "repair_options": result["repair_options"],
+            "arbitration_note": result["arbitration_note"],
+            "workflow_timeline": workflow_timeline,
+        }
+        if persist_task:
+            for index, workflow_event in enumerate(workflow_timeline):
+                await _persist_workflow_task_event(
+                    session,
+                    task_state=task_state,
+                    project_id=project_id,
+                    user_id=user_id,
+                    chapter_id=resolved_chapter_id,
+                    workflow_type="realtime_guard",
+                    workflow_event=workflow_event,
+                    result_patch=(
+                        {
+                            **_build_workflow_task_base_result(
+                                workflow_id=workflow_id,
+                                workflow_type="realtime_guard",
+                                workflow_status="paused" if response["should_pause"] else "completed",
+                                chapter_number=chapter_number,
+                                chapter_title=chapter_title,
+                                branch_id=branch_id,
+                                workflow_timeline=workflow_timeline,
+                            ),
+                            "passed": response["passed"],
+                            "should_pause": response["should_pause"],
+                            "alert_count": len(response["alerts"]),
+                            "repair_option_count": len(response["repair_options"]),
+                        }
+                        if index == len(workflow_timeline) - 1
+                        else None
+                    ),
+                    finalize=index == len(workflow_timeline) - 1,
+                )
+        return response
+    except Exception as exc:
+        if persist_task:
+            await _persist_workflow_task_failure(
+                session,
+                task_state=task_state,
+                project_id=project_id,
+                user_id=user_id,
+                chapter_id=resolved_chapter_id,
+                workflow_id=workflow_id,
+                workflow_type="realtime_guard",
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                error=exc,
+            )
+        raise
 
 
 async def run_story_knowledge_guard(
@@ -760,6 +844,327 @@ def _utcnow() -> datetime:
 
 def _build_workflow_id(workflow_type: str) -> str:
     return f"{workflow_type}:{uuid4().hex}"
+
+
+_WORKFLOW_TASK_TYPE_MAP = {
+    "realtime_guard": "story_engine.realtime_guard",
+    "chapter_stream": "story_engine.chapter_stream",
+    "final_optimize": "story_engine.final_optimize",
+}
+
+
+def _supports_workflow_task_persistence(session: Any) -> bool:
+    """单元测试里经常会传入 SimpleNamespace，这里先兜底跳过真实落库。"""
+
+    return all(hasattr(session, attr) for attr in ("add", "flush", "commit"))
+
+
+def _to_jsonable_payload(value: Any) -> Any:
+    return jsonable_encoder(value)
+
+
+async def _resolve_workflow_chapter_id(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    user_id: UUID,
+    chapter_id: Optional[UUID],
+) -> Optional[UUID]:
+    """优先用显式 chapter_id 绑定任务，避免章号在多卷/分线里失真。"""
+
+    if chapter_id is None:
+        return None
+    chapter = await get_owned_chapter(
+        session,
+        chapter_id,
+        user_id,
+    )
+    if chapter.project_id != project_id:
+        raise AppError(
+            code="story_engine.chapter_project_mismatch",
+            message="当前章节不属于这个项目，暂时不能挂到这次流程里。",
+            status_code=400,
+        )
+    return chapter.id
+
+
+def _resolve_workflow_task_type(workflow_type: str) -> str:
+    return _WORKFLOW_TASK_TYPE_MAP.get(workflow_type, f"story_engine.{workflow_type}")
+
+
+def _build_workflow_task_base_result(
+    *,
+    workflow_id: str,
+    workflow_type: str,
+    workflow_status: str,
+    chapter_number: Optional[int],
+    chapter_title: Optional[str],
+    branch_id: Optional[UUID],
+    workflow_timeline: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    return {
+        "workflow_id": workflow_id,
+        "workflow_type": workflow_type,
+        "workflow_status": workflow_status,
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "branch_id": str(branch_id) if branch_id is not None else None,
+        "workflow_timeline": _to_jsonable_payload(workflow_timeline or []),
+    }
+
+
+def _resolve_workflow_task_message(
+    workflow_event: Optional[dict[str, Any]],
+    *,
+    fallback: Optional[str] = None,
+) -> Optional[str]:
+    if isinstance(workflow_event, dict):
+        message = str(workflow_event.get("message") or "").strip()
+        if message:
+            return message
+        label = str(workflow_event.get("label") or "").strip()
+        if label:
+            return label
+    return str(fallback or "").strip() or None
+
+
+def _resolve_workflow_task_progress(
+    workflow_type: str,
+    workflow_event: Optional[dict[str, Any]],
+) -> int:
+    if not isinstance(workflow_event, dict):
+        return 0
+
+    stage = str(workflow_event.get("stage") or "").strip()
+    if workflow_type == "realtime_guard":
+        progress_map = {
+            "guard_initialized": 15,
+            "guardian_review": 55,
+            "commercial_repair": 78,
+            "guard_arbitration": 100,
+        }
+        return progress_map.get(stage, 0)
+
+    if workflow_type == "chapter_stream":
+        if stage == "stream_started":
+            return 5
+        if stage == "plan_prepared":
+            return 12
+        if stage == "paragraph_generated":
+            paragraph_index = workflow_event.get("paragraph_index")
+            paragraph_total = workflow_event.get("paragraph_total")
+            if (
+                isinstance(paragraph_index, int)
+                and isinstance(paragraph_total, int)
+                and paragraph_total > 0
+            ):
+                return min(92, 12 + round((paragraph_index / paragraph_total) * 76))
+            return 45
+        if stage == "stream_guard_paused":
+            paragraph_index = workflow_event.get("paragraph_index")
+            paragraph_total = workflow_event.get("paragraph_total")
+            if (
+                isinstance(paragraph_index, int)
+                and isinstance(paragraph_total, int)
+                and paragraph_total > 0
+            ):
+                return min(96, 18 + round((paragraph_index / paragraph_total) * 78))
+            return 88
+        if stage == "stream_completed":
+            return 100
+        return 0
+
+    if workflow_type == "final_optimize":
+        progress_map = {
+            "final_optimize_started": 5,
+            "review_round_started": 10,
+            "guardian_review": 24,
+            "logic_review": 36,
+            "commercial_review": 48,
+            "style_review": 60,
+            "anchor_summary_prepared": 70,
+            "final_arbitration": 78,
+            "round_resolution": 82,
+            "final_output_finalized": 88,
+            "final_verify_concluded": 92,
+            "kb_updates_normalized": 95,
+            "chapter_summary_persisted": 98,
+            "final_optimize_completed": 100,
+        }
+        return progress_map.get(stage, 0)
+
+    return 0
+
+
+def _build_workflow_task_event_payload(workflow_event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "workflow_key": "story_engine",
+        "workflow_id": workflow_event.get("workflow_id"),
+        "workflow_type": workflow_event.get("workflow_type"),
+        "workflow_stage": workflow_event.get("stage"),
+        "workflow_status": workflow_event.get("status"),
+        "workflow_label": workflow_event.get("label"),
+        "workflow_message": workflow_event.get("message"),
+        "workflow_event": _to_jsonable_payload(workflow_event),
+        "chapter_number": workflow_event.get("chapter_number"),
+        "chapter_title": workflow_event.get("chapter_title"),
+    }
+
+
+async def _create_workflow_task_state(
+    session: AsyncSession,
+    *,
+    workflow_id: str,
+    workflow_type: str,
+    project_id: UUID,
+    user_id: UUID,
+    chapter_id: Optional[UUID],
+    chapter_number: Optional[int],
+    initial_message: str,
+    initial_result: Optional[dict[str, Any]] = None,
+) -> Optional[TaskState]:
+    if not _supports_workflow_task_persistence(session):
+        return None
+
+    task_state = TaskState(
+        task_id=workflow_id,
+        task_type=_resolve_workflow_task_type(workflow_type),
+        status="running",
+        progress=0,
+        message=initial_message,
+        result=_to_jsonable_payload(initial_result or {}),
+        project_id=project_id,
+        chapter_id=chapter_id,
+        chapter_number=chapter_number,
+    )
+    task_state_store.set(task_state)
+    await create_task_run(
+        session,
+        task_state=task_state,
+        chapter_id=chapter_id,
+        project_id=project_id,
+        user_id=user_id,
+        commit=False,
+    )
+    await session.commit()
+    return task_state
+
+
+async def _persist_workflow_task_event(
+    session: AsyncSession,
+    *,
+    task_state: Optional[TaskState],
+    project_id: UUID,
+    user_id: UUID,
+    chapter_id: Optional[UUID],
+    workflow_type: str,
+    workflow_event: dict[str, Any],
+    result_patch: Optional[dict[str, Any]] = None,
+    finalize: bool = False,
+    failed: bool = False,
+    error: Optional[str] = None,
+) -> None:
+    if task_state is None or not _supports_workflow_task_persistence(session):
+        return
+
+    next_result = dict(task_state.result or {})
+    if result_patch:
+        next_result.update(_to_jsonable_payload(result_patch))
+    next_result["workflow_status"] = str(workflow_event.get("status") or "").strip() or None
+    task_state.result = next_result
+    task_state.message = _resolve_workflow_task_message(
+        workflow_event,
+        fallback=task_state.message,
+    )
+    task_state.progress = max(
+        int(task_state.progress or 0),
+        _resolve_workflow_task_progress(workflow_type, workflow_event),
+    )
+    if failed:
+        task_state.status = "failed"
+        task_state.error = error
+    elif finalize:
+        task_state.status = "succeeded"
+        task_state.progress = 100
+        task_state.error = None
+    else:
+        task_state.status = "running"
+
+    task_state_store.set(task_state)
+    await update_task_run(
+        session,
+        task_state=task_state,
+        commit=False,
+    )
+    await create_task_event(
+        session,
+        task_state=task_state,
+        event_type=str(workflow_event.get("stage") or "workflow_event"),
+        payload=_build_workflow_task_event_payload(workflow_event),
+        chapter_id=chapter_id,
+        project_id=project_id,
+        user_id=user_id,
+        commit=False,
+    )
+    await session.commit()
+
+
+async def _persist_workflow_task_failure(
+    session: AsyncSession,
+    *,
+    task_state: Optional[TaskState],
+    project_id: UUID,
+    user_id: UUID,
+    chapter_id: Optional[UUID],
+    workflow_id: str,
+    workflow_type: str,
+    chapter_number: Optional[int],
+    chapter_title: Optional[str],
+    branch_id: Optional[UUID],
+    error: Exception,
+    workflow_timeline: Optional[list[dict[str, Any]]] = None,
+) -> None:
+    if task_state is None or not _supports_workflow_task_persistence(session):
+        return
+
+    failure_event = {
+        "workflow_id": workflow_id,
+        "workflow_type": workflow_type,
+        "sequence": len(workflow_timeline or []) + 1,
+        "stage": "workflow_failed",
+        "status": "failed",
+        "label": "流程执行失败",
+        "message": str(error),
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "branch_id": branch_id,
+        "round_number": None,
+        "paragraph_index": None,
+        "paragraph_total": None,
+        "agent_keys": [],
+        "details": {
+            "error_type": error.__class__.__name__,
+        },
+        "emitted_at": _utcnow(),
+    }
+    next_timeline = list(workflow_timeline or [])
+    next_timeline.append(failure_event)
+    await _persist_workflow_task_event(
+        session,
+        task_state=task_state,
+        project_id=project_id,
+        user_id=user_id,
+        chapter_id=chapter_id,
+        workflow_type=workflow_type,
+        workflow_event=failure_event,
+        result_patch={
+            "workflow_status": "failed",
+            "workflow_timeline": next_timeline,
+        },
+        finalize=False,
+        failed=True,
+        error=str(error),
+    )
 
 
 def _append_workflow_event(
@@ -1759,6 +2164,7 @@ async def run_chapter_stream_generate(
     project_id: UUID,
     user_id: UUID,
     branch_id: Optional[UUID] = None,
+    chapter_id: Optional[UUID] = None,
     chapter_number: int,
     chapter_title: Optional[str],
     outline_id: Optional[UUID],
@@ -1813,6 +2219,13 @@ async def run_chapter_stream_generate(
     failover_details: list[dict[str, Any]] = []
     workflow_id = _build_workflow_id("chapter_stream")
     workflow_timeline: list[dict[str, Any]] = []
+    resolved_chapter_id = await _resolve_workflow_chapter_id(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        chapter_id=chapter_id,
+    )
+    task_state: Optional[TaskState] = None
 
     def _build_stream_metadata(
         metadata: dict[str, Any],
@@ -1893,6 +2306,44 @@ async def run_chapter_stream_generate(
             "failover_details": failover_details,
         }
 
+    async def _persist_stream_event(
+        workflow_event: dict[str, Any],
+        *,
+        result_patch: Optional[dict[str, Any]] = None,
+        finalize: bool = False,
+    ) -> None:
+        await _persist_workflow_task_event(
+            session,
+            task_state=task_state,
+            project_id=project_id,
+            user_id=user_id,
+            chapter_id=resolved_chapter_id,
+            workflow_type="chapter_stream",
+            workflow_event=workflow_event,
+            result_patch=result_patch,
+            finalize=finalize,
+        )
+
+    def _build_stream_task_result(workflow_status: str, **extra: Any) -> dict[str, Any]:
+        payload = {
+            **_build_workflow_task_base_result(
+                workflow_id=workflow_id,
+                workflow_type="chapter_stream",
+                workflow_status=workflow_status,
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                workflow_timeline=workflow_timeline,
+            ),
+            "resume_mode": resume_mode,
+            "generated_length": len(running_text),
+            "paragraph_total": paragraph_total,
+            "provider_model_pairs": provider_model_pairs,
+            "rewritten_paragraph_index": rewritten_paragraph_index,
+        }
+        payload.update(extra)
+        return payload
+
     if rewrite_latest_paragraph:
         if normalized_repair_instruction is None:
             raise AppError(
@@ -1945,10 +2396,30 @@ async def run_chapter_stream_generate(
         running_paragraphs[rewritten_paragraph_index - 1] = rewritten_result.content.strip()
         running_text = _join_stream_paragraphs(running_paragraphs)
 
-    preflight_guard_result: Optional[dict[str, Any]] = None
-    latest_paragraph = _extract_latest_stream_paragraph(running_text)
-    if resume_mode and running_text:
-        preflight_guard_result = await run_realtime_guard(
+    task_state = await _create_workflow_task_state(
+        session,
+        workflow_id=workflow_id,
+        workflow_type="chapter_stream",
+        project_id=project_id,
+        user_id=user_id,
+        chapter_id=resolved_chapter_id,
+        chapter_number=chapter_number,
+        initial_message="正在按当前细纲顺正文。",
+        initial_result=_build_workflow_task_base_result(
+            workflow_id=workflow_id,
+            workflow_type="chapter_stream",
+            workflow_status="running",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+        ),
+    )
+
+    try:
+        preflight_guard_result: Optional[dict[str, Any]] = None
+        latest_paragraph = _extract_latest_stream_paragraph(running_text)
+        if resume_mode and running_text:
+            preflight_guard_result = await run_realtime_guard(
             session,
             project_id=project_id,
             user_id=user_id,
@@ -1957,111 +2428,372 @@ async def run_chapter_stream_generate(
             chapter_title=chapter_title,
             outline_id=outline_id,
             current_outline=outline_text,
-            recent_chapters=recent_chapters,
-            draft_text=running_text,
-            latest_paragraph=latest_paragraph,
-            model_routing=model_routing,
-        )
+                recent_chapters=recent_chapters,
+                draft_text=running_text,
+                latest_paragraph=latest_paragraph,
+                model_routing=model_routing,
+                persist_task=False,
+            )
 
-    start_workflow_event = _append_workflow_event(
-        workflow_timeline,
-        workflow_id=workflow_id,
-        workflow_type="chapter_stream",
-        stage="stream_started",
-        status="started",
-        label="开始顺正文",
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        branch_id=branch_id,
-        paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
-        paragraph_total=paragraph_total,
-        details={
-            "resume_mode": resume_mode,
-            "resume_from_paragraph": starting_paragraph if resume_mode else None,
-            "rewritten_paragraph_index": rewritten_paragraph_index,
-            "target_paragraph_count": target_paragraph_count,
-            "target_word_count": target_word_count,
-            "existing_paragraph_count": len(running_paragraphs),
-        },
-    )
-    yield {
-        "event": "start",
-        "message": (
-            "已经按你当前的修正方向重新校过一遍，接着往下顺正文。"
-            if resume_mode and rewritten_paragraph_index is not None
-            else "已经从停下的位置重新接上，继续往下顺正文。"
-            if resume_mode
-            else "正在按细纲顺正文，写到硬冲突会自动停下。"
-        ),
-        "text": running_text or None,
-        "paragraph_index": min(max(starting_paragraph - 1, 0), paragraph_total),
-        "metadata": _build_stream_metadata(
-            {
-                "chapter_number": chapter_number,
-                "chapter_title": chapter_title,
-                "target_paragraph_count": target_paragraph_count,
-                "target_word_count": target_word_count,
-                "status": "resumed" if resume_mode else "started",
-                "resume_from_paragraph": starting_paragraph if resume_mode else None,
-                "rewritten_paragraph_index": rewritten_paragraph_index,
-                "repair_instruction": normalized_repair_instruction,
-            },
-            start_workflow_event,
-        ),
-        "workflow_event": start_workflow_event,
-    }
-
-    if preflight_guard_result and preflight_guard_result["should_pause"]:
-        paused_at = rewritten_paragraph_index or min(max(starting_paragraph - 1, 1), paragraph_total)
-        guard_workflow_event = _append_workflow_event(
+        start_workflow_event = _append_workflow_event(
             workflow_timeline,
             workflow_id=workflow_id,
             workflow_type="chapter_stream",
-            stage="stream_guard_paused",
-            status="paused",
-            label="续写前守护拦截",
-            message=str(preflight_guard_result.get("arbitration_note") or "").strip() or None,
+            stage="stream_started",
+            status="started",
+            label="开始顺正文",
             chapter_number=chapter_number,
             chapter_title=chapter_title,
             branch_id=branch_id,
-            paragraph_index=paused_at,
+            paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
             paragraph_total=paragraph_total,
-            agent_keys=["guardian", "commercial", "arbitrator"],
             details={
-                "alert_count": len(preflight_guard_result.get("alerts") or []),
-                "repair_option_count": len(preflight_guard_result.get("repair_options") or []),
-                "guard_timeline_count": len(preflight_guard_result.get("workflow_timeline") or []),
+                "resume_mode": resume_mode,
+                "resume_from_paragraph": starting_paragraph if resume_mode else None,
+                "rewritten_paragraph_index": rewritten_paragraph_index,
+                "target_paragraph_count": target_paragraph_count,
+                "target_word_count": target_word_count,
+                "existing_paragraph_count": len(running_paragraphs),
             },
         )
-        yield {
-            "event": "guard",
-            "message": "当前修正还没完全避开硬冲突，我先继续停在这里。",
-            "text": running_text,
-            "paragraph_index": paused_at,
-            "paragraph_total": paragraph_total,
-            "guard_result": preflight_guard_result,
-            "metadata": _build_stream_metadata(
-                _build_stream_pause_metadata(
-                    beats=beats,
-                    paused_at_paragraph=paused_at,
-                    paragraph_total=paragraph_total,
-                    current_beat=beats[paused_at - 1] if 1 <= paused_at <= paragraph_total else None,
-                ),
-                guard_workflow_event,
-                include_timeline=True,
+        await _persist_stream_event(
+            start_workflow_event,
+            result_patch=_build_stream_task_result(
+                "running",
+                current_paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
             ),
-            "workflow_event": guard_workflow_event,
+        )
+        yield {
+            "event": "start",
+            "message": (
+                "已经按你当前的修正方向重新校过一遍，接着往下顺正文。"
+                if resume_mode and rewritten_paragraph_index is not None
+                else "已经从停下的位置重新接上，继续往下顺正文。"
+                if resume_mode
+                else "正在按细纲顺正文，写到硬冲突会自动停下。"
+            ),
+            "text": running_text or None,
+            "paragraph_index": min(max(starting_paragraph - 1, 0), paragraph_total),
+            "metadata": _build_stream_metadata(
+                {
+                    "chapter_number": chapter_number,
+                    "chapter_title": chapter_title,
+                    "target_paragraph_count": target_paragraph_count,
+                    "target_word_count": target_word_count,
+                    "status": "resumed" if resume_mode else "started",
+                    "resume_from_paragraph": starting_paragraph if resume_mode else None,
+                    "rewritten_paragraph_index": rewritten_paragraph_index,
+                    "repair_instruction": normalized_repair_instruction,
+                },
+                start_workflow_event,
+            ),
+            "workflow_event": start_workflow_event,
         }
-        return
 
-    if starting_paragraph > paragraph_total:
+        if preflight_guard_result and preflight_guard_result["should_pause"]:
+            paused_at = rewritten_paragraph_index or min(max(starting_paragraph - 1, 1), paragraph_total)
+            guard_workflow_event = _append_workflow_event(
+                workflow_timeline,
+                workflow_id=workflow_id,
+                workflow_type="chapter_stream",
+                stage="stream_guard_paused",
+                status="paused",
+                label="续写前守护拦截",
+                message=str(preflight_guard_result.get("arbitration_note") or "").strip() or None,
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                paragraph_index=paused_at,
+                paragraph_total=paragraph_total,
+                agent_keys=["guardian", "commercial", "arbitrator"],
+                details={
+                    "alert_count": len(preflight_guard_result.get("alerts") or []),
+                    "repair_option_count": len(preflight_guard_result.get("repair_options") or []),
+                    "guard_timeline_count": len(preflight_guard_result.get("workflow_timeline") or []),
+                },
+            )
+            await _persist_stream_event(
+                guard_workflow_event,
+                result_patch=_build_stream_task_result(
+                    "paused",
+                    paused_at_paragraph=paused_at,
+                    should_pause=True,
+                    alert_count=len(preflight_guard_result.get("alerts") or []),
+                    repair_option_count=len(preflight_guard_result.get("repair_options") or []),
+                ),
+                finalize=True,
+            )
+            yield {
+                "event": "guard",
+                "message": "当前修正还没完全避开硬冲突，我先继续停在这里。",
+                "text": running_text,
+                "paragraph_index": paused_at,
+                "paragraph_total": paragraph_total,
+                "guard_result": preflight_guard_result,
+                "metadata": _build_stream_metadata(
+                    _build_stream_pause_metadata(
+                        beats=beats,
+                        paused_at_paragraph=paused_at,
+                        paragraph_total=paragraph_total,
+                        current_beat=beats[paused_at - 1] if 1 <= paused_at <= paragraph_total else None,
+                    ),
+                    guard_workflow_event,
+                    include_timeline=True,
+                ),
+                "workflow_event": guard_workflow_event,
+            }
+            return
+
+        if starting_paragraph > paragraph_total:
+            done_workflow_event = _append_workflow_event(
+                workflow_timeline,
+                workflow_id=workflow_id,
+                workflow_type="chapter_stream",
+                stage="stream_completed",
+                status="completed",
+                label="正文续写完成",
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                paragraph_index=paragraph_total,
+                paragraph_total=paragraph_total,
+                details={
+                    "generated_length": len(running_text),
+                    "resume_mode": resume_mode,
+                    "rewritten_paragraph_index": rewritten_paragraph_index,
+                    "no_remaining_paragraphs": True,
+                },
+            )
+            await _persist_stream_event(
+                done_workflow_event,
+                result_patch=_build_stream_task_result(
+                    "completed",
+                    no_remaining_paragraphs=True,
+                ),
+                finalize=True,
+            )
+            yield {
+                "event": "done",
+                "message": "当前冲突已经修平，这一章也顺到可收口状态了。",
+                "text": running_text,
+                "paragraph_index": paragraph_total,
+                "paragraph_total": paragraph_total,
+                "metadata": _build_stream_metadata(
+                    _build_stream_done_metadata(),
+                    done_workflow_event,
+                    include_timeline=True,
+                ),
+                "workflow_event": done_workflow_event,
+            }
+            return
+
+        plan_workflow_event = _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="chapter_stream",
+            stage="plan_prepared",
+            status="completed",
+            label="本章推进计划已展开",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
+            paragraph_total=paragraph_total,
+            details={
+                "remaining_beat_count": len(beats[starting_paragraph - 1 :]),
+                "resume_mode": resume_mode,
+            },
+        )
+        await _persist_stream_event(
+            plan_workflow_event,
+            result_patch=_build_stream_task_result(
+                "running",
+                current_paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
+                remaining_beat_count=len(beats[starting_paragraph - 1 :]),
+            ),
+        )
+        yield {
+            "event": "plan",
+            "message": (
+                f"接下来从第 {starting_paragraph}/{paragraph_total} 段继续推进。"
+                if resume_mode
+                else "本章将按当前细纲拆成分段推进。"
+            ),
+            "paragraph_index": min(max(starting_paragraph - 1, 0), paragraph_total),
+            "paragraph_total": paragraph_total,
+            "metadata": _build_stream_metadata(
+                {
+                    "beats": beats[starting_paragraph - 1 :],
+                    "all_beats": beats,
+                    "outline_excerpt": outline_text[:240] if outline_text else None,
+                    "style_hint": style_hint,
+                    "resume_mode": resume_mode,
+                },
+                plan_workflow_event,
+            ),
+            "workflow_event": plan_workflow_event,
+        }
+
+        for paragraph_index in range(starting_paragraph, paragraph_total + 1):
+            beat = beats[paragraph_index - 1]
+            fallback_paragraph = _compose_stream_paragraph(
+                beat=beat,
+                paragraph_index=paragraph_index,
+                paragraph_total=paragraph_total,
+                target_word_count=target_word_count,
+                existing_text=running_text,
+                style_hint=style_hint,
+                stream_context=stream_context,
+                repair_instruction=normalized_repair_instruction if paragraph_index == starting_paragraph else None,
+            )
+            paragraph_result = await generate_story_stream_paragraph(
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                beat=beat,
+                paragraph_index=paragraph_index,
+                paragraph_total=paragraph_total,
+                draft_text=running_text,
+                outline_text=outline_text,
+                style_sample=style_sample,
+                workspace=workspace,
+                recent_chapters=recent_chapters,
+                fallback=fallback_paragraph,
+                model_routing=model_routing,
+                repair_instruction=normalized_repair_instruction if paragraph_index == starting_paragraph else None,
+            )
+            paragraph_metadata = _record_stream_generation_result(paragraph_index, paragraph_result)
+            paragraph = paragraph_result.content.strip()
+            running_paragraphs.append(paragraph)
+            running_text = _join_stream_paragraphs(running_paragraphs)
+            chunk_workflow_event = _append_workflow_event(
+                workflow_timeline,
+                workflow_id=workflow_id,
+                workflow_type="chapter_stream",
+                stage="paragraph_generated",
+                status="completed",
+                label=f"第 {paragraph_index} 段已生成",
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                paragraph_index=paragraph_index,
+                paragraph_total=paragraph_total,
+                agent_keys=["stream_writer"],
+                details={
+                    "beat": beat,
+                    "provider": paragraph_result.provider,
+                    "model": paragraph_result.model,
+                    "used_fallback": paragraph_result.used_fallback,
+                    "selected_role": paragraph_metadata.get("stream_selected_role"),
+                    "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
+                },
+            )
+            await _persist_stream_event(
+                chunk_workflow_event,
+                result_patch=_build_stream_task_result(
+                    "running",
+                    current_paragraph_index=paragraph_index,
+                    latest_provider=paragraph_result.provider,
+                    latest_model=paragraph_result.model,
+                ),
+            )
+            yield {
+                "event": "chunk",
+                "message": f"正在写第 {paragraph_index}/{paragraph_total} 段。",
+                "delta": f"{paragraph}\n\n",
+                "text": running_text,
+                "paragraph_index": paragraph_index,
+                "paragraph_total": paragraph_total,
+                "metadata": _build_stream_metadata(
+                    {
+                        "beat": beat,
+                        "provider": paragraph_result.provider,
+                        "model": paragraph_result.model,
+                        "used_fallback": paragraph_result.used_fallback,
+                        "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
+                        "failover_attempts": paragraph_metadata.get("stream_failover_attempts") or [],
+                        "selected_role": paragraph_metadata.get("stream_selected_role"),
+                        "resume_mode": resume_mode,
+                    },
+                    chunk_workflow_event,
+                ),
+                "workflow_event": chunk_workflow_event,
+            }
+
+            guard_result = await run_realtime_guard(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                branch_id=branch_id,
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                outline_id=outline_id,
+                current_outline=outline_text,
+                recent_chapters=recent_chapters,
+                draft_text=running_text,
+                latest_paragraph=paragraph,
+                model_routing=model_routing,
+                persist_task=False,
+            )
+            if guard_result["should_pause"]:
+                guard_workflow_event = _append_workflow_event(
+                    workflow_timeline,
+                    workflow_id=workflow_id,
+                    workflow_type="chapter_stream",
+                    stage="stream_guard_paused",
+                    status="paused",
+                    label=f"第 {paragraph_index} 段触发守护拦截",
+                    message=str(guard_result.get("arbitration_note") or "").strip() or None,
+                    chapter_number=chapter_number,
+                    chapter_title=chapter_title,
+                    branch_id=branch_id,
+                    paragraph_index=paragraph_index,
+                    paragraph_total=paragraph_total,
+                    agent_keys=["guardian", "commercial", "arbitrator"],
+                    details={
+                        "alert_count": len(guard_result.get("alerts") or []),
+                        "repair_option_count": len(guard_result.get("repair_options") or []),
+                        "guard_timeline_count": len(guard_result.get("workflow_timeline") or []),
+                    },
+                )
+                await _persist_stream_event(
+                    guard_workflow_event,
+                    result_patch=_build_stream_task_result(
+                        "paused",
+                        paused_at_paragraph=paragraph_index,
+                        should_pause=True,
+                        alert_count=len(guard_result.get("alerts") or []),
+                        repair_option_count=len(guard_result.get("repair_options") or []),
+                    ),
+                    finalize=True,
+                )
+                yield {
+                    "event": "guard",
+                    "message": "发现设定冲突，已经先替你停住了。",
+                    "text": running_text,
+                    "paragraph_index": paragraph_index,
+                    "paragraph_total": paragraph_total,
+                    "guard_result": guard_result,
+                    "metadata": _build_stream_metadata(
+                        _build_stream_pause_metadata(
+                            beats=beats,
+                            paused_at_paragraph=paragraph_index,
+                            paragraph_total=paragraph_total,
+                            current_beat=beat,
+                        ),
+                        guard_workflow_event,
+                        include_timeline=True,
+                    ),
+                    "workflow_event": guard_workflow_event,
+                }
+                return
+
         done_workflow_event = _append_workflow_event(
             workflow_timeline,
             workflow_id=workflow_id,
             workflow_type="chapter_stream",
             stage="stream_completed",
             status="completed",
-            label="正文续写完成",
+            label="正文生成完成",
             chapter_number=chapter_number,
             chapter_title=chapter_title,
             branch_id=branch_id,
@@ -2070,13 +2802,23 @@ async def run_chapter_stream_generate(
             details={
                 "generated_length": len(running_text),
                 "resume_mode": resume_mode,
-                "rewritten_paragraph_index": rewritten_paragraph_index,
-                "no_remaining_paragraphs": True,
+                "provider_model_pairs": provider_model_pairs,
+                "fallback_paragraphs": fallback_paragraphs,
+                "failover_paragraphs": failover_paragraphs,
             },
+        )
+        await _persist_stream_event(
+            done_workflow_event,
+            result_patch={
+                **_build_stream_task_result("completed"),
+                **_build_stream_done_metadata(),
+                "paused_at_paragraph": None,
+            },
+            finalize=True,
         )
         yield {
             "event": "done",
-            "message": "当前冲突已经修平，这一章也顺到可收口状态了。",
+            "message": "本章顺到这里了，可以继续手写，也可以直接做终稿优化。",
             "text": running_text,
             "paragraph_index": paragraph_total,
             "paragraph_total": paragraph_total,
@@ -2087,212 +2829,22 @@ async def run_chapter_stream_generate(
             ),
             "workflow_event": done_workflow_event,
         }
-        return
-
-    plan_workflow_event = _append_workflow_event(
-        workflow_timeline,
-        workflow_id=workflow_id,
-        workflow_type="chapter_stream",
-        stage="plan_prepared",
-        status="completed",
-        label="本章推进计划已展开",
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        branch_id=branch_id,
-        paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
-        paragraph_total=paragraph_total,
-        details={
-            "remaining_beat_count": len(beats[starting_paragraph - 1 :]),
-            "resume_mode": resume_mode,
-        },
-    )
-    yield {
-        "event": "plan",
-        "message": (
-            f"接下来从第 {starting_paragraph}/{paragraph_total} 段继续推进。"
-            if resume_mode
-            else "本章将按当前细纲拆成分段推进。"
-        ),
-        "paragraph_index": min(max(starting_paragraph - 1, 0), paragraph_total),
-        "paragraph_total": paragraph_total,
-        "metadata": _build_stream_metadata(
-            {
-                "beats": beats[starting_paragraph - 1 :],
-                "all_beats": beats,
-                "outline_excerpt": outline_text[:240] if outline_text else None,
-                "style_hint": style_hint,
-                "resume_mode": resume_mode,
-            },
-            plan_workflow_event,
-        ),
-        "workflow_event": plan_workflow_event,
-    }
-
-    for paragraph_index in range(starting_paragraph, paragraph_total + 1):
-        beat = beats[paragraph_index - 1]
-        fallback_paragraph = _compose_stream_paragraph(
-            beat=beat,
-            paragraph_index=paragraph_index,
-            paragraph_total=paragraph_total,
-            target_word_count=target_word_count,
-            existing_text=running_text,
-            style_hint=style_hint,
-            stream_context=stream_context,
-            repair_instruction=normalized_repair_instruction if paragraph_index == starting_paragraph else None,
-        )
-        paragraph_result = await generate_story_stream_paragraph(
-            chapter_number=chapter_number,
-            chapter_title=chapter_title,
-            beat=beat,
-            paragraph_index=paragraph_index,
-            paragraph_total=paragraph_total,
-            draft_text=running_text,
-            outline_text=outline_text,
-            style_sample=style_sample,
-            workspace=workspace,
-            recent_chapters=recent_chapters,
-            fallback=fallback_paragraph,
-            model_routing=model_routing,
-            repair_instruction=normalized_repair_instruction if paragraph_index == starting_paragraph else None,
-        )
-        paragraph_metadata = _record_stream_generation_result(paragraph_index, paragraph_result)
-        paragraph = paragraph_result.content.strip()
-        running_paragraphs.append(paragraph)
-        running_text = _join_stream_paragraphs(running_paragraphs)
-        chunk_workflow_event = _append_workflow_event(
-            workflow_timeline,
-            workflow_id=workflow_id,
-            workflow_type="chapter_stream",
-            stage="paragraph_generated",
-            status="completed",
-            label=f"第 {paragraph_index} 段已生成",
-            chapter_number=chapter_number,
-            chapter_title=chapter_title,
-            branch_id=branch_id,
-            paragraph_index=paragraph_index,
-            paragraph_total=paragraph_total,
-            agent_keys=["stream_writer"],
-            details={
-                "beat": beat,
-                "provider": paragraph_result.provider,
-                "model": paragraph_result.model,
-                "used_fallback": paragraph_result.used_fallback,
-                "selected_role": paragraph_metadata.get("stream_selected_role"),
-                "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
-            },
-        )
-        yield {
-            "event": "chunk",
-            "message": f"正在写第 {paragraph_index}/{paragraph_total} 段。",
-            "delta": f"{paragraph}\n\n",
-            "text": running_text,
-            "paragraph_index": paragraph_index,
-            "paragraph_total": paragraph_total,
-            "metadata": _build_stream_metadata(
-                {
-                    "beat": beat,
-                    "provider": paragraph_result.provider,
-                    "model": paragraph_result.model,
-                    "used_fallback": paragraph_result.used_fallback,
-                    "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
-                    "failover_attempts": paragraph_metadata.get("stream_failover_attempts") or [],
-                    "selected_role": paragraph_metadata.get("stream_selected_role"),
-                    "resume_mode": resume_mode,
-                },
-                chunk_workflow_event,
-            ),
-            "workflow_event": chunk_workflow_event,
-        }
-
-        guard_result = await run_realtime_guard(
+    except Exception as exc:
+        await _persist_workflow_task_failure(
             session,
+            task_state=task_state,
             project_id=project_id,
             user_id=user_id,
-            branch_id=branch_id,
+            chapter_id=resolved_chapter_id,
+            workflow_id=workflow_id,
+            workflow_type="chapter_stream",
             chapter_number=chapter_number,
             chapter_title=chapter_title,
-            outline_id=outline_id,
-            current_outline=outline_text,
-            recent_chapters=recent_chapters,
-            draft_text=running_text,
-            latest_paragraph=paragraph,
-            model_routing=model_routing,
+            branch_id=branch_id,
+            error=exc,
+            workflow_timeline=workflow_timeline,
         )
-        if guard_result["should_pause"]:
-            guard_workflow_event = _append_workflow_event(
-                workflow_timeline,
-                workflow_id=workflow_id,
-                workflow_type="chapter_stream",
-                stage="stream_guard_paused",
-                status="paused",
-                label=f"第 {paragraph_index} 段触发守护拦截",
-                message=str(guard_result.get("arbitration_note") or "").strip() or None,
-                chapter_number=chapter_number,
-                chapter_title=chapter_title,
-                branch_id=branch_id,
-                paragraph_index=paragraph_index,
-                paragraph_total=paragraph_total,
-                agent_keys=["guardian", "commercial", "arbitrator"],
-                details={
-                    "alert_count": len(guard_result.get("alerts") or []),
-                    "repair_option_count": len(guard_result.get("repair_options") or []),
-                    "guard_timeline_count": len(guard_result.get("workflow_timeline") or []),
-                },
-            )
-            yield {
-                "event": "guard",
-                "message": "发现设定冲突，已经先替你停住了。",
-                "text": running_text,
-                "paragraph_index": paragraph_index,
-                "paragraph_total": paragraph_total,
-                "guard_result": guard_result,
-                "metadata": _build_stream_metadata(
-                    _build_stream_pause_metadata(
-                        beats=beats,
-                        paused_at_paragraph=paragraph_index,
-                        paragraph_total=paragraph_total,
-                        current_beat=beat,
-                    ),
-                    guard_workflow_event,
-                    include_timeline=True,
-                ),
-                "workflow_event": guard_workflow_event,
-            }
-            return
-
-    done_workflow_event = _append_workflow_event(
-        workflow_timeline,
-        workflow_id=workflow_id,
-        workflow_type="chapter_stream",
-        stage="stream_completed",
-        status="completed",
-        label="正文生成完成",
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        branch_id=branch_id,
-        paragraph_index=paragraph_total,
-        paragraph_total=paragraph_total,
-        details={
-            "generated_length": len(running_text),
-            "resume_mode": resume_mode,
-            "provider_model_pairs": provider_model_pairs,
-            "fallback_paragraphs": fallback_paragraphs,
-            "failover_paragraphs": failover_paragraphs,
-        },
-    )
-    yield {
-        "event": "done",
-        "message": "本章顺到这里了，可以继续手写，也可以直接做终稿优化。",
-        "text": running_text,
-        "paragraph_index": paragraph_total,
-        "paragraph_total": paragraph_total,
-        "metadata": _build_stream_metadata(
-            _build_stream_done_metadata(),
-            done_workflow_event,
-            include_timeline=True,
-        ),
-        "workflow_event": done_workflow_event,
-    }
+        raise
 
 
 async def run_final_optimize(
@@ -2301,6 +2853,7 @@ async def run_final_optimize(
     project_id: UUID,
     user_id: UUID,
     branch_id: Optional[UUID] = None,
+    chapter_id: Optional[UUID] = None,
     chapter_number: int,
     chapter_title: Optional[str],
     draft_text: str,
@@ -2308,103 +2861,179 @@ async def run_final_optimize(
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
     model_routing = resolve_story_engine_model_routing(project)
-    result, convergence_meta, workflow_timeline = await _run_final_verify_until_converged(
-        session=session,
+    resolved_chapter_id = await _resolve_workflow_chapter_id(
+        session,
         project_id=project_id,
         user_id=user_id,
-        branch_id=branch_id,
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        draft_text=draft_text,
-        style_sample=style_sample,
-        model_routing=model_routing,
+        chapter_id=chapter_id,
     )
-    normalized_kb_updates = _normalize_kb_update_suggestions(
-        result["anchor_payload"].get("kb_updates"),
-        chapter_number=chapter_number,
-    )
-    result["anchor_payload"]["kb_updates"] = normalized_kb_updates
-    result["anchor_payload"]["chapter_summary"]["kb_update_suggestions"] = normalized_kb_updates
-    workflow_id = (
-        str(workflow_timeline[0].get("workflow_id")) if workflow_timeline else _build_workflow_id("final_optimize")
-    )
-    _append_workflow_event(
-        workflow_timeline,
+    workflow_id = _build_workflow_id("final_optimize")
+    task_state = await _create_workflow_task_state(
+        session,
         workflow_id=workflow_id,
         workflow_type="final_optimize",
-        stage="kb_updates_normalized",
-        status="completed",
-        label="设定更新建议已标准化",
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        branch_id=branch_id,
-        details={
-            "kb_update_count": len(normalized_kb_updates),
-        },
-    )
-    summary = await _upsert_chapter_summary(
-        session=session,
         project_id=project_id,
         user_id=user_id,
-        branch_id=branch_id,
+        chapter_id=resolved_chapter_id,
         chapter_number=chapter_number,
-        payload=result["anchor_payload"]["chapter_summary"],
+        initial_message="正在深度收口这一章的硬伤、节奏和文风。",
+        initial_result=_build_workflow_task_base_result(
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            workflow_status="running",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+        ),
     )
-    _append_workflow_event(
-        workflow_timeline,
-        workflow_id=workflow_id,
-        workflow_type="final_optimize",
-        stage="chapter_summary_persisted",
-        status="completed",
-        label="章节总结已入库",
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        branch_id=branch_id,
-        details={
-            "summary_id": summary.get("summary_id"),
-            "summary_version": summary.get("version"),
-            "kb_update_count": len(normalized_kb_updates),
-        },
-    )
-    _append_workflow_event(
-        workflow_timeline,
-        workflow_id=workflow_id,
-        workflow_type="final_optimize",
-        stage="final_optimize_completed",
-        status="completed" if convergence_meta["ready_for_publish"] else "paused",
-        label="终稿收口已完成",
-        message=convergence_meta["quality_summary"],
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        branch_id=branch_id,
-        details={
+    try:
+        result, convergence_meta, workflow_timeline = await _run_final_verify_until_converged(
+            session=session,
+            project_id=project_id,
+            user_id=user_id,
+            branch_id=branch_id,
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            draft_text=draft_text,
+            style_sample=style_sample,
+            model_routing=model_routing,
+            workflow_id=workflow_id,
+        )
+        normalized_kb_updates = _normalize_kb_update_suggestions(
+            result["anchor_payload"].get("kb_updates"),
+            chapter_number=chapter_number,
+        )
+        result["anchor_payload"]["kb_updates"] = normalized_kb_updates
+        result["anchor_payload"]["chapter_summary"]["kb_update_suggestions"] = normalized_kb_updates
+        workflow_id = (
+            str(workflow_timeline[0].get("workflow_id"))
+            if workflow_timeline
+            else workflow_id
+        )
+        _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            stage="kb_updates_normalized",
+            status="completed",
+            label="设定更新建议已标准化",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            details={
+                "kb_update_count": len(normalized_kb_updates),
+            },
+        )
+        summary = await _upsert_chapter_summary(
+            session=session,
+            project_id=project_id,
+            user_id=user_id,
+            branch_id=branch_id,
+            chapter_number=chapter_number,
+            payload=result["anchor_payload"]["chapter_summary"],
+        )
+        _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            stage="chapter_summary_persisted",
+            status="completed",
+            label="章节总结已入库",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            details={
+                "summary_id": summary.get("summary_id"),
+                "summary_version": summary.get("version"),
+                "kb_update_count": len(normalized_kb_updates),
+            },
+        )
+        _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            stage="final_optimize_completed",
+            status="completed" if convergence_meta["ready_for_publish"] else "paused",
+            label="终稿收口已完成",
+            message=convergence_meta["quality_summary"],
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            details={
+                "consensus_rounds": convergence_meta["consensus_rounds"],
+                "consensus_reached": convergence_meta["consensus_reached"],
+                "remaining_issue_count": convergence_meta["remaining_issue_count"],
+                "ready_for_publish": convergence_meta["ready_for_publish"],
+            },
+        )
+        response = {
+            "final_draft": result["final_package"]["final_draft"],
+            "revision_notes": result["final_package"]["revision_notes"],
+            "chapter_summary": summary,
+            "kb_update_list": result["anchor_payload"]["kb_updates"],
+            "agent_reports": [
+                result["guardian_report"],
+                result["logic_report"],
+                result["commercial_report"],
+                result["style_report"],
+                result["final_package"]["arbitrator_report"],
+            ],
+            "deliberation_rounds": result["final_package"].get("deliberation_rounds") or [],
+            "original_draft": draft_text,
             "consensus_rounds": convergence_meta["consensus_rounds"],
             "consensus_reached": convergence_meta["consensus_reached"],
             "remaining_issue_count": convergence_meta["remaining_issue_count"],
             "ready_for_publish": convergence_meta["ready_for_publish"],
-        },
-    )
-    return {
-        "final_draft": result["final_package"]["final_draft"],
-        "revision_notes": result["final_package"]["revision_notes"],
-        "chapter_summary": summary,
-        "kb_update_list": result["anchor_payload"]["kb_updates"],
-        "agent_reports": [
-            result["guardian_report"],
-            result["logic_report"],
-            result["commercial_report"],
-            result["style_report"],
-            result["final_package"]["arbitrator_report"],
-        ],
-        "deliberation_rounds": result["final_package"].get("deliberation_rounds") or [],
-        "original_draft": draft_text,
-        "consensus_rounds": convergence_meta["consensus_rounds"],
-        "consensus_reached": convergence_meta["consensus_reached"],
-        "remaining_issue_count": convergence_meta["remaining_issue_count"],
-        "ready_for_publish": convergence_meta["ready_for_publish"],
-        "quality_summary": convergence_meta["quality_summary"],
-        "workflow_timeline": workflow_timeline,
-    }
+            "quality_summary": convergence_meta["quality_summary"],
+            "workflow_timeline": workflow_timeline,
+        }
+        for index, workflow_event in enumerate(workflow_timeline):
+            await _persist_workflow_task_event(
+                session,
+                task_state=task_state,
+                project_id=project_id,
+                user_id=user_id,
+                chapter_id=resolved_chapter_id,
+                workflow_type="final_optimize",
+                workflow_event=workflow_event,
+                result_patch=(
+                    {
+                        **_build_workflow_task_base_result(
+                            workflow_id=workflow_id,
+                            workflow_type="final_optimize",
+                            workflow_status="completed" if response["ready_for_publish"] else "paused",
+                            chapter_number=chapter_number,
+                            chapter_title=chapter_title,
+                            branch_id=branch_id,
+                            workflow_timeline=workflow_timeline,
+                        ),
+                        "ready_for_publish": response["ready_for_publish"],
+                        "remaining_issue_count": response["remaining_issue_count"],
+                        "consensus_rounds": response["consensus_rounds"],
+                        "kb_update_count": len(response["kb_update_list"]),
+                        "chapter_summary_id": response["chapter_summary"].get("summary_id"),
+                    }
+                    if index == len(workflow_timeline) - 1
+                    else None
+                ),
+                finalize=index == len(workflow_timeline) - 1,
+            )
+        return response
+    except Exception as exc:
+        await _persist_workflow_task_failure(
+            session,
+            task_state=task_state,
+            project_id=project_id,
+            user_id=user_id,
+            chapter_id=resolved_chapter_id,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            error=exc,
+        )
+        raise
 
 
 def list_story_engine_agent_specs() -> list[dict[str, Any]]:
@@ -2582,6 +3211,7 @@ async def _run_final_verify_until_converged(
     draft_text: str,
     style_sample: Optional[str],
     model_routing: dict[str, dict[str, Any]],
+    workflow_id: Optional[str] = None,
 ) -> tuple[FinalVerifyState, dict[str, Any], list[dict[str, Any]]]:
     current_draft = draft_text
     previous_issue_signature: Optional[tuple[str, ...]] = None
@@ -2589,7 +3219,7 @@ async def _run_final_verify_until_converged(
     completed_rounds = 0
     deliberation_rounds: list[dict[str, Any]] = []
     max_rounds = _get_final_verify_max_rounds()
-    workflow_id = _build_workflow_id("final_optimize")
+    workflow_id = workflow_id or _build_workflow_id("final_optimize")
     workflow_timeline: list[dict[str, Any]] = []
 
     _append_workflow_event(

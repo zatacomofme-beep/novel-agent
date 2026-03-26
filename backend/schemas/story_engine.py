@@ -575,6 +575,7 @@ class OutlineStressTestResponse(ORMModel):
 
 class RealtimeGuardRequest(ORMModel):
     branch_id: Optional[UUID] = None
+    chapter_id: Optional[UUID] = None
     chapter_number: int = Field(ge=1)
     chapter_title: Optional[str] = None
     outline_id: Optional[UUID] = None
@@ -595,6 +596,7 @@ class RealtimeGuardResponse(ORMModel):
 
 class FinalOptimizeRequest(ORMModel):
     branch_id: Optional[UUID] = None
+    chapter_id: Optional[UUID] = None
     chapter_number: int = Field(ge=1)
     chapter_title: Optional[str] = None
     draft_text: str = Field(min_length=1)
@@ -633,6 +635,7 @@ class StoryKnowledgeSuggestionResolveResponse(ORMModel):
 
 class ChapterStreamGenerateRequest(ORMModel):
     branch_id: Optional[UUID] = None
+    chapter_id: Optional[UUID] = None
     chapter_number: int = Field(ge=1)
     chapter_title: Optional[str] = None
     outline_id: Optional[UUID] = None

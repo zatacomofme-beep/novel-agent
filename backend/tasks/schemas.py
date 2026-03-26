@@ -30,6 +30,11 @@ class TaskState(BaseModel):
 
     @classmethod
     def from_task_run(cls, task_run) -> "TaskState":
+        task_result = task_run.result if isinstance(task_run.result, dict) else {}
+        chapter_number = getattr(getattr(task_run, "chapter", None), "chapter_number", None)
+        if chapter_number is None:
+            raw_chapter_number = task_result.get("chapter_number")
+            chapter_number = raw_chapter_number if isinstance(raw_chapter_number, int) else None
         return cls(
             task_id=task_run.task_id,
             task_type=task_run.task_type,
@@ -40,7 +45,7 @@ class TaskState(BaseModel):
             error=task_run.error,
             project_id=task_run.project_id,
             chapter_id=task_run.chapter_id,
-            chapter_number=getattr(getattr(task_run, "chapter", None), "chapter_number", None),
+            chapter_number=chapter_number,
             created_at=task_run.created_at,
             updated_at=task_run.updated_at,
         )

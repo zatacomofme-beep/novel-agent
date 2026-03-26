@@ -369,6 +369,7 @@ export interface DashboardRecentTask {
   project_id: string | null;
   chapter_id: string | null;
   chapter_number: number | null;
+  workflow_status?: string | null;
   updated_at: string;
 }
 
@@ -1514,6 +1515,7 @@ export interface StoryEngineWorkflowEvent {
 
 export interface RealtimeGuardRequest {
   branch_id?: string | null;
+  chapter_id?: string | null;
   chapter_number: number;
   chapter_title: string | null;
   outline_id: string | null;
@@ -1534,6 +1536,7 @@ export interface RealtimeGuardResponse {
 
 export interface FinalOptimizeRequest {
   branch_id?: string | null;
+  chapter_id?: string | null;
   chapter_number: number;
   chapter_title: string | null;
   draft_text: string;
@@ -1594,6 +1597,7 @@ export interface StoryKnowledgeMutationResponse {
 
 export interface ChapterStreamGenerateRequest {
   branch_id?: string | null;
+  chapter_id?: string | null;
   chapter_number: number;
   chapter_title: string | null;
   outline_id: string | null;

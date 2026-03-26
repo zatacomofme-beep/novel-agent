@@ -277,7 +277,28 @@ function selectLatestTask(taskData: TaskState[]): TaskState | null {
   })[0] ?? null;
 }
 
-function normalizeTaskStatus(status: string): ProcessPlaybackStatus {
+function readWorkflowStatusFromTaskResult(
+  result: Record<string, unknown> | null | undefined,
+): string | null {
+  const workflowStatus = result?.workflow_status;
+  return typeof workflowStatus === "string" && workflowStatus.trim().length > 0
+    ? workflowStatus
+    : null;
+}
+
+function readWorkflowStatusFromTaskEventPayload(
+  payload: Record<string, unknown> | null | undefined,
+): string | null {
+  const workflowStatus = payload?.workflow_status;
+  return typeof workflowStatus === "string" && workflowStatus.trim().length > 0
+    ? workflowStatus
+    : null;
+}
+
+function normalizeTaskStatus(status: string, workflowStatus?: string | null): ProcessPlaybackStatus {
+  if (workflowStatus === "paused") {
+    return "paused";
+  }
   if (status === "queued" || status === "running" || status === "succeeded" || status === "failed") {
     return status;
   }
@@ -323,6 +344,9 @@ function formatWorkflowLabel(workflowType: string): string {
 function formatTaskPlaybackLabel(taskType: string): string {
   const labels: Record<string, string> = {
     chapter_generation: "正文生成",
+    "story_engine.chapter_stream": "正文生成",
+    "story_engine.realtime_guard": "正文检查",
+    "story_engine.final_optimize": "终稿收口",
     "entity_generation.characters": "自动补人物",
     "entity_generation.supporting": "自动补配角",
     "entity_generation.items": "自动补物品",
@@ -417,7 +441,22 @@ function buildWorkflowRunFromTimeline(timeline: StoryEngineWorkflowEvent[]): Sto
   };
 }
 
-function formatTaskPlaybackEventLabel(taskType: string, eventType: string): string {
+function formatTaskPlaybackEventLabel(
+  taskType: string,
+  eventType: string,
+  eventMessage: string | null,
+  payload: Record<string, unknown> | null,
+): string {
+  const workflowLabel =
+    typeof payload?.workflow_label === "string" && payload.workflow_label.trim().length > 0
+      ? payload.workflow_label.trim()
+      : null;
+  if (workflowLabel) {
+    return workflowLabel;
+  }
+  if (taskType.startsWith("story_engine.") && eventMessage?.trim()) {
+    return eventMessage.trim();
+  }
   if (taskType.startsWith("entity_generation.")) {
     const labels: Record<string, string> = {
       queued: "已收下这轮补全",
@@ -444,6 +483,29 @@ function formatTaskPlaybackEventLabel(taskType: string, eventType: string): stri
 function summarizeTaskPlaybackEventPayload(payload: Record<string, unknown> | null): string | null {
   if (!payload) {
     return null;
+  }
+  if (typeof payload.workflow_message === "string" && payload.workflow_message.trim().length > 0) {
+    return payload.workflow_message.trim();
+  }
+  const workflowEvent =
+    payload.workflow_event && typeof payload.workflow_event === "object"
+      ? (payload.workflow_event as Record<string, unknown>)
+      : null;
+  const workflowDetails =
+    workflowEvent?.details && typeof workflowEvent.details === "object"
+      ? (workflowEvent.details as Record<string, unknown>)
+      : null;
+  if (typeof workflowDetails?.alert_count === "number") {
+    return `发现 ${workflowDetails.alert_count} 处提醒`;
+  }
+  if (typeof workflowDetails?.repair_option_count === "number") {
+    return `给出 ${workflowDetails.repair_option_count} 个修法`;
+  }
+  if (typeof workflowDetails?.remaining_issue_count === "number") {
+    return `剩余 ${workflowDetails.remaining_issue_count} 个问题`;
+  }
+  if (typeof workflowDetails?.generated_length === "number") {
+    return `正文约 ${workflowDetails.generated_length} 字`;
   }
   if (typeof payload.requested_count === "number") {
     return `目标 ${payload.requested_count} 条`;
@@ -473,7 +535,7 @@ function buildTaskPlaybackSteps(task: TaskPlayback): ProcessPlaybackStep[] {
         id: `${task.task_id}:state`,
         label: task.message?.trim() || "最近过程已记录",
         detail: task.error?.trim() || null,
-        status: normalizeTaskStatus(task.status),
+        status: normalizeTaskStatus(task.status, readWorkflowStatusFromTaskResult(task.result)),
         createdAt: task.updated_at,
       },
     ];
@@ -482,9 +544,17 @@ function buildTaskPlaybackSteps(task: TaskPlayback): ProcessPlaybackStep[] {
     .slice(-4)
     .map((event) => ({
       id: event.id,
-      label: formatTaskPlaybackEventLabel(task.task_type, event.event_type),
+      label: formatTaskPlaybackEventLabel(
+        task.task_type,
+        event.event_type,
+        event.message,
+        event.payload,
+      ),
       detail: summarizeTaskPlaybackEventPayload(event.payload),
-      status: normalizeTaskStatus(event.status),
+      status: normalizeTaskStatus(
+        event.status,
+        readWorkflowStatusFromTaskEventPayload(event.payload),
+      ),
       createdAt: event.created_at,
     }))
     .reverse();
@@ -2352,7 +2422,10 @@ export default function StoryRoomPage() {
             ? `第 ${task.chapter_number} 章 · ${formatTaskPlaybackLabel(task.task_type)}`
             : formatTaskPlaybackLabel(task.task_type),
         summary: task.message?.trim() || task.error?.trim() || "最近过程已记录。",
-        status: normalizeTaskStatus(task.status),
+        status: normalizeTaskStatus(
+          task.status,
+          readWorkflowStatusFromTaskResult(task.result),
+        ),
         progress: task.progress,
         updatedAt: task.updated_at,
         badges: [
@@ -3088,6 +3161,7 @@ export default function StoryRoomPage() {
           method: "POST",
           body: JSON.stringify({
             branch_id: selectedBranchId,
+            chapter_id: activeChapter?.id ?? null,
             chapter_number: chapterNumber,
             chapter_title: chapterTitle || null,
             outline_id: currentOutline?.outline_id ?? null,
@@ -3114,6 +3188,7 @@ export default function StoryRoomPage() {
       setCheckingGuard(false);
     }
   }, [
+    activeChapter?.id,
     chapterNumber,
     chapterTitle,
     currentOutline?.content,
@@ -3165,6 +3240,7 @@ export default function StoryRoomPage() {
           method: "POST",
           body: JSON.stringify({
             branch_id: selectedBranchId,
+            chapter_id: activeChapter?.id ?? null,
             chapter_number: chapterNumber,
             chapter_title: chapterTitle || null,
             outline_id: currentOutline?.outline_id ?? null,
@@ -3304,6 +3380,7 @@ export default function StoryRoomPage() {
           method: "POST",
           body: JSON.stringify({
             branch_id: selectedBranchId,
+            chapter_id: activeChapter?.id ?? null,
             chapter_number: chapterNumber,
             chapter_title: chapterTitle || null,
             draft_text: draftText,
