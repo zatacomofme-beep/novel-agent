@@ -13,9 +13,11 @@ import {
   trendDirectionClassName,
   trendDirectionLabel,
 } from "@/app/dashboard/_components/quality-trend";
+import { ProcessPlaybackPanel, type ProcessPlaybackItem } from "@/components/process-playback-panel";
 import { apiFetchWithAuth, downloadWithAuth } from "@/lib/api";
 import { clearAuthSession, loadAuthSession } from "@/lib/auth";
 import type {
+  DashboardFocusItem,
   DashboardOverview,
   DashboardProjectQualityTrend,
   DashboardProjectSummary,
@@ -48,6 +50,44 @@ function buildStoryRoomHref(
 
 function buildCollaboratorsHref(projectId: string): string {
   return `/dashboard/projects/${projectId}/collaborators`;
+}
+
+function formatCompactCount(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  if (value >= 10000) {
+    return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`;
+  }
+  return value.toLocaleString("zh-CN");
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  return `${(value * 100).toFixed(0)}%`;
+}
+
+function focusRiskClassName(riskLevel: string): string {
+  if (riskLevel === "high") {
+    return "border-amber-200 bg-amber-50 text-amber-800";
+  }
+  if (riskLevel === "medium") {
+    return "border-sky-200 bg-sky-50 text-sky-700";
+  }
+  return "border-emerald-200 bg-emerald-50 text-emerald-700";
+}
+
+function buildFocusItemHref(item: DashboardFocusItem): string {
+  return buildStoryRoomHref(item.project_id, {
+    stage:
+      item.stage === "outline" || item.stage === "final" || item.stage === "knowledge"
+        ? item.stage
+        : "draft",
+    chapterNumber: item.chapter_number,
+    tool: item.stage === "draft" && item.focus_type === "risk_review" ? "review" : null,
+  });
 }
 
 type ProjectPrimaryAction = {
@@ -455,6 +495,12 @@ function DashboardPageShell() {
   const projectSummaries = overview?.project_summaries ?? [];
   const qualityTrends = overview?.project_quality_trends ?? [];
   const recentTasks = overview?.recent_tasks ?? [];
+  const focusQueue = overview?.focus_queue ?? [];
+  const genreDistribution = overview?.genre_distribution ?? [];
+  const activitySnapshot = overview?.activity_snapshot;
+  const qualitySnapshot = overview?.quality_snapshot;
+  const taskHealth = overview?.task_health;
+  const pipelineSnapshot = overview?.pipeline_snapshot;
   const recentProjectHighlights = projectSummaries.slice(0, 3);
   const projectTitleMap = useMemo(
     () =>
@@ -463,27 +509,47 @@ function DashboardPageShell() {
       ),
     [overview?.project_summaries],
   );
-  const priorityReviewItems = useMemo(
-    () =>
-      (overview?.project_quality_trends ?? [])
-        .flatMap((trend) =>
-          trend.chapter_points
-            .filter((point) => trend.risk_chapter_numbers.includes(point.chapter_number))
-            .map((point) => ({
-              projectId: trend.project_id,
-              projectTitle: trend.title,
-              chapterNumber: point.chapter_number,
-              overallScore: point.overall_score,
-            })),
-        )
-        .sort((left, right) => {
-          const leftScore = typeof left.overallScore === "number" ? left.overallScore : 99;
-          const rightScore = typeof right.overallScore === "number" ? right.overallScore : 99;
-          return leftScore - rightScore;
-        })
-        .slice(0, 6),
-    [overview?.project_quality_trends],
-  );
+  const recentProcessItems = useMemo<ProcessPlaybackItem[]>(() => {
+    return recentTasks.map((task) => {
+      const taskHref = buildRecentTaskHref(task);
+      const projectTitle =
+        task.project_id ? projectTitleMap[task.project_id] ?? "当前项目" : "最近过程";
+
+      return {
+        id: task.task_id,
+        label: formatRecentTaskType(task.task_type),
+        title:
+          task.chapter_number !== null
+            ? `${projectTitle} · Ch${task.chapter_number}`
+            : projectTitle,
+        summary: task.message ?? "最近过程已记录。",
+        status:
+          task.status === "queued" || task.status === "running" || task.status === "succeeded" || task.status === "failed"
+            ? task.status
+            : "queued",
+        progress: task.progress,
+        updatedAt: task.updated_at,
+        badges: [
+          "项目记录",
+          ...(task.chapter_number !== null ? [`第 ${task.chapter_number} 章`] : []),
+        ],
+        steps: [
+          {
+            id: `${task.task_id}:latest`,
+            label: task.message ?? formatRecentTaskStatus(task.status),
+            detail: null,
+            status:
+              task.status === "queued" || task.status === "running" || task.status === "succeeded" || task.status === "failed"
+                ? task.status
+                : "queued",
+            createdAt: task.updated_at,
+          },
+        ],
+        actionLabel: taskHref ? buildRecentTaskActionLabel(task) : null,
+        actionHref: taskHref,
+      };
+    });
+  }, [projectTitleMap, recentTasks]);
   const isFirstBookFlow = searchParams.get("intent") === "new" || projectSummaries.length === 0;
   const plannedChapterCount = Math.max(
     10,
@@ -582,13 +648,21 @@ function DashboardPageShell() {
                   <p className="text-xs uppercase tracking-[0.18em] text-copper">新书信息</p>
                   <h2 className="mt-2 text-2xl font-semibold">填完就去定大纲</h2>
                 </div>
-                <button
-                  className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium"
-                  onClick={handleLogout}
-                  type="button"
-                >
-                  退出登录
-                </button>
+                <div className="flex flex-wrap gap-3">
+                  <Link
+                    className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium transition hover:bg-[#f6f0e6]"
+                    href="/dashboard/preferences"
+                  >
+                    风格中心
+                  </Link>
+                  <button
+                    className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium"
+                    onClick={handleLogout}
+                    type="button"
+                  >
+                    退出登录
+                  </button>
+                </div>
               </div>
 
               <div className="mt-6 grid gap-4">
@@ -789,20 +863,40 @@ function DashboardPageShell() {
           <div className="mt-6 space-y-6">
             <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">项目数</p>
-                <p className="mt-3 text-3xl font-semibold">{overview?.total_projects ?? 0}</p>
+                <p className="text-sm text-black/55">近 7 天活跃项目</p>
+                <p className="mt-3 text-3xl font-semibold">
+                  {activitySnapshot?.active_projects_last_7_days ?? 0}
+                </p>
+                <p className="mt-2 text-xs text-black/45">
+                  全部项目 {overview?.total_projects ?? 0} 本
+                </p>
               </article>
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">总字数</p>
-                <p className="mt-3 text-3xl font-semibold">{overview?.total_words ?? 0}</p>
+                <p className="text-sm text-black/55">近 7 天更新章节</p>
+                <p className="mt-3 text-3xl font-semibold">
+                  {activitySnapshot?.chapters_updated_last_7_days ?? 0}
+                </p>
+                <p className="mt-2 text-xs text-black/45">
+                  最近活跃字数 {formatCompactCount(activitySnapshot?.active_words_last_7_days ?? 0)}
+                </p>
               </article>
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">待收口</p>
-                <p className="mt-3 text-3xl font-semibold">{overview?.review_ready_chapters ?? 0}</p>
+                <p className="text-sm text-black/55">待收口章节</p>
+                <p className="mt-3 text-3xl font-semibold">
+                  {overview?.review_ready_chapters ?? 0}
+                </p>
+                <p className="mt-2 text-xs text-black/45">
+                  近 30 天确认终稿 {activitySnapshot?.final_chapters_last_30_days ?? 0} 章
+                </p>
               </article>
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">活跃任务</p>
-                <p className="mt-3 text-3xl font-semibold">{overview?.active_task_count ?? 0}</p>
+                <p className="text-sm text-black/55">风险章节</p>
+                <p className="mt-3 text-3xl font-semibold">
+                  {qualitySnapshot?.risk_chapter_count ?? 0}
+                </p>
+                <p className="mt-2 text-xs text-black/45">
+                  走低项目 {qualitySnapshot?.declining_project_count ?? 0} 本
+                </p>
               </article>
             </section>
 
@@ -810,7 +904,66 @@ function DashboardPageShell() {
               <div className="grid gap-6">
                 <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
                   <div className="flex items-center justify-between gap-3">
-                    <h2 className="text-xl font-semibold">最近任务</h2>
+                    <h2 className="text-xl font-semibold">当前最该处理</h2>
+                    <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
+                      {focusQueue.length} 条
+                    </span>
+                  </div>
+
+                  {loading ? (
+                    <p className="mt-4 text-sm text-black/60">整理当前优先级...</p>
+                  ) : null}
+
+                  {!loading && focusQueue.length === 0 ? (
+                    <p className="mt-4 text-sm text-black/60">创建第一本书后，这里会给你下一步。</p>
+                  ) : null}
+
+                  <div className="mt-4 grid gap-3">
+                    {focusQueue.map((item) => (
+                      <article
+                        key={`${item.project_id}:${item.focus_type}:${item.chapter_number ?? "none"}`}
+                        className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-black/82">{item.title}</p>
+                            <p className="mt-2 text-sm text-black/68">{item.reason}</p>
+                          </div>
+                          <span
+                            className={`rounded-full border px-3 py-1 text-xs ${focusRiskClassName(item.risk_level)}`}
+                          >
+                            {item.risk_level === "high"
+                              ? "先处理"
+                              : item.risk_level === "medium"
+                                ? "尽快推进"
+                                : "可继续"}
+                          </span>
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-black/45">
+                            更新于 {formatDateTime(item.updated_at)}
+                          </span>
+                          {item.genre ? (
+                            <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
+                              {item.genre}
+                            </span>
+                          ) : null}
+                          <Link
+                            className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs font-medium text-black/72 transition hover:bg-[#f6f0e6]"
+                            href={buildFocusItemHref(item)}
+                          >
+                            {item.action_label}
+                          </Link>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="text-xl font-semibold">阶段与任务</h2>
                     <button
                       className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
                       type="button"
@@ -821,111 +974,75 @@ function DashboardPageShell() {
                   </div>
 
                   {loading ? (
-                    <p className="mt-4 text-sm text-black/60">加载任务概览中...</p>
+                    <p className="mt-4 text-sm text-black/60">整理阶段与任务状态...</p>
                   ) : null}
 
-                  {!loading && recentTasks.length === 0 ? (
-                    <p className="mt-4 text-sm text-black/60">暂时没有任务记录。</p>
-                  ) : null}
-
-                  <div className="mt-4 grid gap-3">
-                    {recentTasks.map((task) => {
-                      const taskHref = buildRecentTaskHref(task);
-                      const projectTitle =
-                        task.project_id ? projectTitleMap[task.project_id] ?? "当前项目" : null;
-
-                      return (
-                        <article
-                          key={task.task_id}
-                          className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-4"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                                {formatRecentTaskType(task.task_type)}
-                              </p>
-                              {projectTitle ? (
-                                <p className="mt-2 text-sm font-medium text-black/78">
-                                  {projectTitle}
-                                  {task.chapter_number !== null ? ` · Ch${task.chapter_number}` : ""}
-                                </p>
-                              ) : null}
-                              <p className="mt-2 text-sm text-black/75">
-                                {task.message ?? "暂无说明"}
-                              </p>
-                            </div>
-                            <div className="text-right text-xs text-black/50">
-                              <p>{formatRecentTaskStatus(task.status)}</p>
-                              <p className="mt-1">{task.progress}%</p>
-                            </div>
-                          </div>
-                          <div className="mt-3 flex flex-wrap items-center gap-2">
-                            <span className="text-xs text-black/45">
-                              更新于 {formatDateTime(task.updated_at)}
-                            </span>
-                            {taskHref ? (
-                              <Link
-                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs font-medium text-black/72 transition hover:bg-[#f6f0e6]"
-                                href={taskHref}
-                              >
-                                {buildRecentTaskActionLabel(task)}
-                              </Link>
-                            ) : null}
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                  <div className="flex items-center justify-between gap-3">
-                    <h2 className="text-xl font-semibold">优先回看</h2>
-                    <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
-                      {priorityReviewItems.length} 条
-                    </span>
-                  </div>
-
-                  {loading ? (
-                    <p className="mt-4 text-sm text-black/60">整理需要回看的章节...</p>
-                  ) : null}
-
-                  {!loading && priorityReviewItems.length === 0 ? (
-                    <p className="mt-4 text-sm text-black/60">最近没有需要回看的章节。</p>
-                  ) : null}
-
-                  <div className="mt-4 grid gap-3">
-                    {priorityReviewItems.map((item) => (
-                      <article
-                        key={`${item.projectId}:${item.chapterNumber}`}
-                        className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-4"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-medium text-black/82">
-                              {item.projectTitle}
-                              {" · "}
-                              Ch{item.chapterNumber}
-                            </p>
-                            <p className="mt-2 text-xs text-black/50">
-                              当前评分 {formatScore(item.overallScore)}
-                            </p>
-                          </div>
-                          <Link
-                            className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-100"
-                            href={buildStoryRoomHref(item.projectId, {
-                              stage: "draft",
-                              chapterNumber: item.chapterNumber,
-                              tool: "review",
-                            })}
-                          >
-                            去处理
-                          </Link>
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <article className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-4">
+                      <p className="text-xs uppercase tracking-[0.16em] text-copper">项目阶段</p>
+                      <div className="mt-3 grid gap-2 text-sm text-black/72">
+                        <div className="flex items-center justify-between gap-3">
+                          <span>待定大纲</span>
+                          <span>{pipelineSnapshot?.outline_pending_projects ?? 0}</span>
                         </div>
-                      </article>
-                    ))}
+                        <div className="flex items-center justify-between gap-3">
+                          <span>待开第一章</span>
+                          <span>{pipelineSnapshot?.ready_for_first_chapter_projects ?? 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span>正在写作</span>
+                          <span>{pipelineSnapshot?.writing_in_progress_projects ?? 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span>待确认终稿</span>
+                          <span>{pipelineSnapshot?.awaiting_finalization_projects ?? 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span>稳定输出</span>
+                          <span>{pipelineSnapshot?.stable_output_projects ?? 0}</span>
+                        </div>
+                      </div>
+                    </article>
+
+                    <article className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-4">
+                      <p className="text-xs uppercase tracking-[0.16em] text-copper">任务健康</p>
+                      <div className="mt-3 grid gap-2 text-sm text-black/72">
+                        <div className="flex items-center justify-between gap-3">
+                          <span>运行中</span>
+                          <span>{taskHealth?.running_count ?? 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span>排队中</span>
+                          <span>{taskHealth?.queued_count ?? 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span>失败</span>
+                          <span>{taskHealth?.failed_count ?? 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span>卡住</span>
+                          <span>{taskHealth?.stalled_active_task_count ?? 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span>近期待失败</span>
+                          <span>{taskHealth?.recent_failed_task_count ?? 0}</span>
+                        </div>
+                      </div>
+                    </article>
                   </div>
                 </section>
+
+                <ProcessPlaybackPanel
+                  title="最近发生了什么"
+                  subtitle="用来快速看到哪本书刚跑完、还在处理中，或者卡在了哪一步。"
+                  items={recentProcessItems}
+                  emptyTitle={loading ? "正在整理最近过程" : "暂时没有过程记录"}
+                  emptyDescription={
+                    loading
+                      ? "稍等一下，书架正在汇总最近的处理记录。"
+                      : "开始起稿、补设定或处理章节后，这里会自动出现最近过程。"
+                  }
+                />
               </div>
 
               <section className="rounded-3xl border border-black/10 bg-white/75 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
@@ -956,6 +1073,72 @@ function DashboardPageShell() {
                   ))}
                 </div>
               </section>
+            </section>
+
+            <section className="grid gap-4 xl:grid-cols-3">
+              <article className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
+                <h2 className="text-xl font-semibold">质量快照</h2>
+                <div className="mt-4 grid gap-3 text-sm text-black/72">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>上升项目</span>
+                    <span>{qualitySnapshot?.improving_project_count ?? 0}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>走低项目</span>
+                    <span>{qualitySnapshot?.declining_project_count ?? 0}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>机械感偏高章节</span>
+                    <span>{qualitySnapshot?.high_ai_taste_chapter_count ?? 0}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>评分覆盖率</span>
+                    <span>{formatPercent(qualitySnapshot?.average_coverage_ratio)}</span>
+                  </div>
+                </div>
+              </article>
+
+              <article className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
+                <h2 className="text-xl font-semibold">题材分布</h2>
+                {loading ? (
+                  <p className="mt-4 text-sm text-black/60">整理题材分布中...</p>
+                ) : null}
+                {!loading && genreDistribution.length === 0 ? (
+                  <p className="mt-4 text-sm text-black/60">还没有题材数据。</p>
+                ) : null}
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {genreDistribution.map((item) => (
+                    <span
+                      key={item.genre}
+                      className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/65"
+                    >
+                      {item.genre} · {item.project_count}
+                    </span>
+                  ))}
+                </div>
+              </article>
+
+              <article className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
+                <h2 className="text-xl font-semibold">书架状态</h2>
+                <div className="mt-4 grid gap-3 text-sm text-black/72">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>近 30 天新开书</span>
+                    <span>{activitySnapshot?.new_projects_last_30_days ?? 0}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>14 天未更新</span>
+                    <span>{activitySnapshot?.stale_projects_last_14_days ?? 0}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>总字数</span>
+                    <span>{formatCompactCount(overview?.total_words ?? 0)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>总任务数</span>
+                    <span>{formatCompactCount(taskHealth?.total_task_count ?? 0)}</span>
+                  </div>
+                </div>
+              </article>
             </section>
 
             <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">

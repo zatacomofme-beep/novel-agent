@@ -372,6 +372,65 @@ export interface DashboardRecentTask {
   updated_at: string;
 }
 
+export interface DashboardActivitySnapshot {
+  active_projects_last_7_days: number;
+  chapters_updated_last_7_days: number;
+  active_words_last_7_days: number;
+  new_projects_last_30_days: number;
+  final_chapters_last_30_days: number;
+  stale_projects_last_14_days: number;
+}
+
+export interface DashboardQualitySnapshot {
+  risk_chapter_count: number;
+  projects_with_risk_count: number;
+  low_score_chapter_count: number;
+  high_ai_taste_chapter_count: number;
+  improving_project_count: number;
+  declining_project_count: number;
+  stable_project_count: number;
+  average_coverage_ratio: number;
+}
+
+export interface DashboardTaskHealth {
+  total_task_count: number;
+  queued_count: number;
+  running_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  cancelled_count: number;
+  stalled_active_task_count: number;
+  recent_failed_task_count: number;
+  status_breakdown: Record<string, number>;
+}
+
+export interface DashboardPipelineSnapshot {
+  outline_pending_projects: number;
+  ready_for_first_chapter_projects: number;
+  writing_in_progress_projects: number;
+  awaiting_finalization_projects: number;
+  stable_output_projects: number;
+}
+
+export interface DashboardGenreDistributionItem {
+  genre: string;
+  project_count: number;
+}
+
+export interface DashboardFocusItem {
+  project_id: string;
+  title: string;
+  genre: string | null;
+  focus_type: string;
+  stage: string;
+  action_label: string;
+  reason: string;
+  chapter_number: number | null;
+  priority: number;
+  risk_level: string;
+  updated_at: string;
+}
+
 export interface DashboardOverview {
   total_projects: number;
   total_chapters: number;
@@ -386,6 +445,12 @@ export interface DashboardOverview {
   project_summaries: DashboardProjectSummary[];
   project_quality_trends: DashboardProjectQualityTrend[];
   recent_tasks: DashboardRecentTask[];
+  activity_snapshot: DashboardActivitySnapshot;
+  quality_snapshot: DashboardQualitySnapshot;
+  task_health: DashboardTaskHealth;
+  pipeline_snapshot: DashboardPipelineSnapshot;
+  genre_distribution: DashboardGenreDistributionItem[];
+  focus_queue: DashboardFocusItem[];
 }
 
 export interface CharacterItem {
@@ -840,6 +905,9 @@ export interface TaskState {
   message: string | null;
   result: Record<string, unknown> | null;
   error: string | null;
+  project_id: string | null;
+  chapter_id: string | null;
+  chapter_number: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -854,6 +922,10 @@ export interface TaskEvent {
   message: string | null;
   payload: Record<string, unknown> | null;
   created_at: string;
+}
+
+export interface TaskPlayback extends TaskState {
+  recent_events: TaskEvent[];
 }
 
 export interface EvaluationIssue {
@@ -1290,6 +1362,38 @@ export interface StoryEngineWorkspace {
   story_bible: StoryBible | null;
 }
 
+export interface StoryRoomCloudDraftSummary {
+  draft_snapshot_id: string;
+  project_id: string;
+  branch_id: string | null;
+  volume_id: string | null;
+  scope_key: string;
+  chapter_number: number;
+  chapter_title: string;
+  outline_id: string | null;
+  source_chapter_id: string | null;
+  source_version_number: number | null;
+  excerpt: string;
+  char_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoryRoomCloudDraft extends StoryRoomCloudDraftSummary {
+  draft_text: string;
+}
+
+export interface StoryRoomCloudDraftUpsertRequest {
+  branch_id?: string | null;
+  volume_id?: string | null;
+  chapter_number: number;
+  chapter_title: string;
+  draft_text: string;
+  outline_id?: string | null;
+  source_chapter_id?: string | null;
+  source_version_number?: number | null;
+}
+
 export type StoryEngineReasoningEffort = "minimal" | "low" | "medium" | "high";
 
 export interface StoryEngineRoleCatalogItem {
@@ -1389,6 +1493,25 @@ export interface OutlineStressTestResponse {
   deliberation_rounds: StoryEngineDeliberationRound[];
 }
 
+export interface StoryEngineWorkflowEvent {
+  workflow_id: string;
+  workflow_type: string;
+  sequence: number;
+  stage: string;
+  status: "started" | "completed" | "paused" | "skipped" | "failed";
+  label: string;
+  message: string | null;
+  chapter_number: number | null;
+  chapter_title: string | null;
+  branch_id: string | null;
+  round_number: number | null;
+  paragraph_index: number | null;
+  paragraph_total: number | null;
+  agent_keys: string[];
+  details: Record<string, unknown>;
+  emitted_at: string;
+}
+
 export interface RealtimeGuardRequest {
   branch_id?: string | null;
   chapter_number: number;
@@ -1406,6 +1529,7 @@ export interface RealtimeGuardResponse {
   alerts: StoryEngineIssue[];
   repair_options: string[];
   arbitration_note: string | null;
+  workflow_timeline: StoryEngineWorkflowEvent[];
 }
 
 export interface FinalOptimizeRequest {
@@ -1442,6 +1566,7 @@ export interface FinalOptimizeResponse {
   remaining_issue_count: number;
   ready_for_publish: boolean;
   quality_summary: string | null;
+  workflow_timeline: StoryEngineWorkflowEvent[];
 }
 
 export interface StoryKnowledgeSuggestionResolveRequest {
@@ -1492,6 +1617,7 @@ export interface ChapterStreamEvent {
   paragraph_total: number | null;
   guard_result: RealtimeGuardResponse | null;
   metadata: Record<string, unknown>;
+  workflow_event: StoryEngineWorkflowEvent | null;
 }
 
 export interface StoryOutlineImportItem {

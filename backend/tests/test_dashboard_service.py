@@ -70,6 +70,10 @@ class DashboardServiceTests(unittest.TestCase):
                     updated_at=datetime.now(timezone.utc),
                 )
             ],
+            task_status_counts={
+                "running": 1,
+                "succeeded": 1,
+            },
             preference_profile=SimpleNamespace(
                 id=uuid4(),
                 user_id=uuid4(),
@@ -120,6 +124,17 @@ class DashboardServiceTests(unittest.TestCase):
             1,
         )
         self.assertEqual(overview["recent_tasks"][0]["chapter_number"], 2)
+        self.assertEqual(overview["activity_snapshot"]["active_projects_last_7_days"], 1)
+        self.assertEqual(overview["activity_snapshot"]["chapters_updated_last_7_days"], 2)
+        self.assertEqual(overview["activity_snapshot"]["active_words_last_7_days"], 3300)
+        self.assertEqual(overview["quality_snapshot"]["risk_chapter_count"], 1)
+        self.assertEqual(overview["quality_snapshot"]["declining_project_count"], 1)
+        self.assertEqual(overview["task_health"]["running_count"], 1)
+        self.assertEqual(overview["task_health"]["succeeded_count"], 1)
+        self.assertEqual(overview["pipeline_snapshot"]["awaiting_finalization_projects"], 1)
+        self.assertEqual(overview["focus_queue"][0]["focus_type"], "risk_review")
+        self.assertEqual(overview["focus_queue"][0]["chapter_number"], 2)
+        self.assertEqual(overview["genre_distribution"][0]["genre"], "悬疑")
 
     def test_build_project_quality_trend_payload_reports_direction_and_risks(self) -> None:
         payload = build_project_quality_trend_payload(

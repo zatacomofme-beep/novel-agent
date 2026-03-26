@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,9 @@ class TaskState(BaseModel):
     message: Optional[str] = None
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    project_id: Optional[UUID] = None
+    chapter_id: Optional[UUID] = None
+    chapter_number: Optional[int] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -34,6 +38,9 @@ class TaskState(BaseModel):
             message=task_run.message,
             result=task_run.result,
             error=task_run.error,
+            project_id=task_run.project_id,
+            chapter_id=task_run.chapter_id,
+            chapter_number=getattr(getattr(task_run, "chapter", None), "chapter_number", None),
             created_at=task_run.created_at,
             updated_at=task_run.updated_at,
         )
@@ -63,3 +70,7 @@ class TaskEventRead(BaseModel):
             payload=task_event.payload,
             created_at=task_event.created_at,
         )
+
+
+class TaskPlaybackRead(TaskState):
+    recent_events: list[TaskEventRead] = Field(default_factory=list)

@@ -73,6 +73,12 @@ type DraftStudioProps = {
   localDraftRecoveredAt: string | null;
   pendingLocalDraftUpdatedAt: string | null;
   pendingLocalDraftRecoveryState: StoryRoomLocalDraftRecoveryState | null;
+  cloudDraftSavedAt: string | null;
+  cloudDraftRecoveredAt: string | null;
+  pendingCloudDraftUpdatedAt: string | null;
+  pendingCloudDraftRecoveryState: StoryRoomLocalDraftRecoveryState | null;
+  cloudSyncing: boolean;
+  cloudSyncEnabled: boolean;
   recoverableDrafts: RecoverableDraftCard[];
   editorRef: MutableRefObject<DraftEditorHandle | null>;
   onChapterNumberChange: (value: number) => void;
@@ -93,6 +99,8 @@ type DraftStudioProps = {
   onOpenRecoverableDraft: (draft: RecoverableDraftCard) => void;
   onRestoreLocalDraft: () => void;
   onDismissLocalDraft: () => void;
+  onRestoreCloudDraft: () => void;
+  onDismissCloudDraft: () => void;
 };
 
 const ALERT_TONES: Record<string, string> = {
@@ -182,6 +190,36 @@ function formatLocalDraftRecoveryDetail(
   }
 }
 
+function formatCloudDraftRecoveryTitle(
+  state: StoryRoomLocalDraftRecoveryState | null,
+): string {
+  switch (state) {
+    case "server_newer":
+      return "发现上一版留下的续写稿";
+    case "local_newer":
+      return "发现更新的续写稿";
+    case "relinked":
+      return "发现旧版本留下的续写稿";
+    default:
+      return "发现可接着写的续写稿";
+  }
+}
+
+function formatCloudDraftRecoveryDetail(
+  state: StoryRoomLocalDraftRecoveryState | null,
+): string {
+  switch (state) {
+    case "server_newer":
+      return "这份续写稿比当前正式版本更早，恢复前先看一眼，确认是不是你要接回的内容。";
+    case "local_newer":
+      return "这份续写稿比当前正式版本更新，恢复后就能继续往下写。";
+    case "relinked":
+      return "这一章的正式版本已经变过，但之前留下的续写稿还在，确认后可以重新接回。";
+    default:
+      return "这份续写稿会跟着账号带走，换台设备也能从这里继续写。";
+  }
+}
+
 export function DraftStudio({
   chapterNumber,
   chapterTitle,
@@ -207,6 +245,12 @@ export function DraftStudio({
   localDraftRecoveredAt,
   pendingLocalDraftUpdatedAt,
   pendingLocalDraftRecoveryState,
+  cloudDraftSavedAt,
+  cloudDraftRecoveredAt,
+  pendingCloudDraftUpdatedAt,
+  pendingCloudDraftRecoveryState,
+  cloudSyncing,
+  cloudSyncEnabled,
   recoverableDrafts,
   editorRef,
   onChapterNumberChange,
@@ -227,6 +271,8 @@ export function DraftStudio({
   onOpenRecoverableDraft,
   onRestoreLocalDraft,
   onDismissLocalDraft,
+  onRestoreCloudDraft,
+  onDismissCloudDraft,
 }: DraftStudioProps) {
   const currentOutline = findChapterOutline(outlines, chapterNumber);
   const outlineNodes = buildOutlineNodes(currentOutline?.title ?? null, currentOutline?.content ?? null);
@@ -389,6 +435,355 @@ export function DraftStudio({
       state: hasFinalResult ? "done" : activeChapter && !draftDirty ? "current" : "pending",
     },
   ];
+  const sidebarSections = (
+    <>
+      <section
+        className={`rounded-[30px] border p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)] ${chapterStatusCardTone}`}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.18em]">本章进度</p>
+            <h3 className="mt-2 text-lg font-semibold">
+              {activeChapter ? formatPublishStatus(activeChapter.final_gate_status) : "待保存"}
+            </h3>
+          </div>
+          <span className="rounded-full border border-current/20 px-3 py-1 text-xs">
+            {formatChapterStatus(activeChapter?.status ?? null)}
+          </span>
+        </div>
+
+        <div className="mt-4 space-y-3">
+          {chapterFlowSteps.map((step) => (
+            <div
+              key={step.key}
+              className="flex items-center justify-between gap-3 rounded-[20px] border border-current/20 bg-white/70 px-4 py-3"
+            >
+              <div>
+                <p className="text-sm font-semibold">{step.title}</p>
+                <p className="mt-1 text-xs opacity-75">{step.detail}</p>
+              </div>
+              <span className="rounded-full border border-current/20 px-3 py-1 text-[11px]">
+                {step.state === "done" ? "已完成" : step.state === "current" ? "当前" : "待处理"}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {activeChapter ? (
+          <div className="mt-4 flex flex-wrap gap-2 text-xs">
+            <span className="rounded-full border border-current/20 px-3 py-1">
+              检查 {formatEvaluationStatus(activeChapter.latest_evaluation_status)}
+            </span>
+            <span className="rounded-full border border-current/20 px-3 py-1">
+              待确认 {activeChapter.pending_checkpoint_count}
+            </span>
+            {activeChapter.latest_review_verdict ? (
+              <span className="rounded-full border border-current/20 px-3 py-1">
+                复核 {formatReviewVerdict(activeChapter.latest_review_verdict)}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        {activeChapter?.latest_checkpoint_title ? (
+          <div className="mt-4 rounded-[22px] border border-current/20 bg-white/70 px-4 py-3 text-sm">
+            最近卡点：{activeChapter.latest_checkpoint_title}
+            {activeChapter.latest_checkpoint_status
+              ? ` · ${formatCheckpointStatus(activeChapter.latest_checkpoint_status)}`
+              : ""}
+          </div>
+        ) : null}
+
+        {activeChapter?.final_gate_reason ? (
+          <div className="mt-4 rounded-[22px] border border-current/20 bg-white/70 px-4 py-3 text-sm leading-7">
+            {activeChapter.final_gate_reason}
+          </div>
+        ) : null}
+
+        <button
+          className="mt-4 w-full rounded-full bg-white/90 px-4 py-3 text-sm font-semibold text-black transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={primaryAction.disabled}
+          onClick={primaryAction.onClick}
+          type="button"
+        >
+          {primaryAction.label}
+        </button>
+      </section>
+
+      <section className="rounded-[30px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.18em] text-copper">写作保护</p>
+            <h3 className="mt-2 text-lg font-semibold">
+              {pendingLocalDraftUpdatedAt || pendingCloudDraftUpdatedAt
+                ? "发现可续写版本"
+                : cloudSyncEnabled
+                  ? cloudSyncing
+                    ? "正在顺手续存"
+                    : "保稿已开启"
+                  : "断网也会继续保稿"}
+            </h3>
+          </div>
+          <span
+            className={`rounded-full border px-3 py-1 text-xs ${
+              isOnline
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-amber-200 bg-amber-50 text-amber-700"
+            }`}
+          >
+            {isOnline ? "在线" : "离线"}
+          </span>
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <div className="rounded-[22px] border border-black/10 bg-[#fbfaf5] px-4 py-3 text-sm text-black/62">
+            {pendingLocalDraftUpdatedAt ? (
+              <>
+                <p className="font-semibold text-black/82">
+                  {formatLocalDraftRecoveryTitle(pendingLocalDraftRecoveryState)}
+                </p>
+                <p className="mt-2 leading-7 text-black/62">
+                  {formatLocalDraftRecoveryDetail(pendingLocalDraftRecoveryState)}
+                </p>
+                <p className="mt-2 text-xs text-black/52">
+                  本机时间 {formatDateTime(pendingLocalDraftUpdatedAt)}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-semibold text-black/82">
+                  {isOnline
+                    ? "你在这章里的改动会持续记在本机。"
+                    : "当前断网，但你写下的内容还会继续留在本机。"}
+                </p>
+                {localDraftSavedAt ? (
+                  <p className="mt-2 text-xs text-black/52">
+                    最近保稿 {formatDateTime(localDraftSavedAt)}
+                  </p>
+                ) : (
+                  <p className="mt-2 text-xs text-black/52">这一章一有内容就会自动保稿。</p>
+                )}
+              </>
+            )}
+          </div>
+
+          {pendingLocalDraftUpdatedAt ? (
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-full bg-[#566246] px-4 py-2 text-xs font-semibold text-white transition hover:opacity-90"
+                onClick={onRestoreLocalDraft}
+                type="button"
+              >
+                恢复这章内容
+              </button>
+              <button
+                className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                onClick={onDismissLocalDraft}
+                type="button"
+              >
+                忽略这份暂存
+              </button>
+            </div>
+          ) : null}
+
+          <div className="rounded-[22px] border border-black/10 bg-[#f6f8fc] px-4 py-3 text-sm text-black/62">
+            {pendingCloudDraftUpdatedAt ? (
+              <>
+                <p className="font-semibold text-black/82">
+                  {formatCloudDraftRecoveryTitle(pendingCloudDraftRecoveryState)}
+                </p>
+                <p className="mt-2 leading-7 text-black/62">
+                  {formatCloudDraftRecoveryDetail(pendingCloudDraftRecoveryState)}
+                </p>
+                <p className="mt-2 text-xs text-black/52">
+                  续写时间 {formatDateTime(pendingCloudDraftUpdatedAt)}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-semibold text-black/82">
+                  {cloudSyncEnabled
+                    ? "联网时会顺手记一份续写稿，换设备也能从这一章继续。"
+                    : "当前离线，等网络恢复后会继续保留跨设备续写。"}
+                </p>
+                {cloudDraftSavedAt ? (
+                  <p className="mt-2 text-xs text-black/52">
+                    最近续存 {formatDateTime(cloudDraftSavedAt)}
+                    {cloudSyncing ? " · 正在更新" : ""}
+                  </p>
+                ) : (
+                  <p className="mt-2 text-xs text-black/52">
+                    {cloudSyncEnabled
+                      ? "这一章一有改动，就会自动续存一份。"
+                      : "网络恢复后，就会继续顺手续存。"}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+
+          {pendingCloudDraftUpdatedAt ? (
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-full bg-[#2f5d91] px-4 py-2 text-xs font-semibold text-white transition hover:opacity-90"
+                onClick={onRestoreCloudDraft}
+                type="button"
+              >
+                恢复续写稿
+              </button>
+              <button
+                className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                onClick={onDismissCloudDraft}
+                type="button"
+              >
+                清掉这份续写稿
+              </button>
+            </div>
+          ) : null}
+
+          {otherRecoverableDrafts.length > 0 ? (
+            <div className="rounded-[22px] border border-black/10 bg-white px-4 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-black/82">其他可恢复章节</p>
+                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-[11px] text-black/55">
+                  {otherRecoverableDrafts.length} 条
+                </span>
+              </div>
+              <div className="mt-3 space-y-2">
+                {otherRecoverableDrafts.map((draft) => (
+                  <button
+                    key={draft.storageKey}
+                    className="w-full rounded-[18px] border border-black/10 bg-[#fbfaf5] px-4 py-3 text-left transition hover:bg-white"
+                    onClick={() => onOpenRecoverableDraft(draft)}
+                    type="button"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-black/82">
+                        第 {draft.chapterNumber} 章
+                        {draft.chapterTitle.trim() ? ` · ${draft.chapterTitle.trim()}` : ""}
+                      </p>
+                      <span className="text-[11px] text-black/45">
+                        {formatDateTime(draft.updatedAt)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-black/48">{draft.scopeLabel}</p>
+                    {draft.excerpt ? (
+                      <p className="mt-2 line-clamp-2 text-xs leading-6 text-black/58">
+                        {draft.excerpt}
+                      </p>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {localDraftRecoveredAt ? (
+            <div className="rounded-[22px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+              已恢复本机稿 · {formatDateTime(localDraftRecoveredAt)}
+            </div>
+          ) : null}
+
+          {cloudDraftRecoveredAt ? (
+            <div className="rounded-[22px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+              已恢复续写稿 · {formatDateTime(cloudDraftRecoveredAt)}
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="rounded-[30px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.18em] text-copper">实时提醒</p>
+            <h3 className="mt-2 text-lg font-semibold">
+              {shouldShowGuard ? "有冲突待修" : "当前无明显冲突"}
+            </h3>
+          </div>
+          <span
+            className={`rounded-full border px-3 py-1 text-xs ${
+              shouldShowGuard
+                ? "border-red-200 bg-red-50 text-red-700"
+                : "border-emerald-200 bg-emerald-50 text-emerald-700"
+            }`}
+          >
+            {shouldShowGuard ? "需处理" : "安全"}
+          </span>
+        </div>
+
+        {guardResult ? (
+          <div className="mt-4 space-y-3">
+            {guardResult.alerts.length > 0 ? (
+              guardResult.alerts.map((alert) => (
+                <article
+                  key={`${alert.title}-${alert.detail}`}
+                  className={`rounded-[22px] border p-4 ${
+                    ALERT_TONES[alert.severity] ?? ALERT_TONES.low
+                  }`}
+                >
+                  <p className="text-sm font-semibold">{alert.title}</p>
+                  <p className="mt-2 text-sm leading-7">{alert.detail}</p>
+                  {alert.suggestion ? (
+                    <p className="mt-3 text-sm">修正建议：{alert.suggestion}</p>
+                  ) : null}
+                </article>
+              ))
+            ) : (
+              <div className="rounded-[22px] border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
+                当前正文没有发现硬冲突。
+              </div>
+            )}
+
+            {guardResult.repair_options.length > 0 ? (
+              <div className="rounded-[22px] border border-black/10 bg-[#fbfaf5] p-4">
+                <p className="text-sm font-semibold">选择修法</p>
+                <div className="mt-3 space-y-2">
+                  {guardResult.repair_options.map((option) => (
+                    <button
+                      key={option}
+                      className={`w-full rounded-[18px] border px-3 py-3 text-left text-sm leading-7 transition ${
+                        activeRepairInstruction === option && streaming
+                          ? "border-copper bg-[#f6eee1] text-black"
+                          : "border-black/10 bg-white text-black/68 hover:bg-[#f8f3ea]"
+                      }`}
+                      disabled={streaming}
+                      onClick={() => onContinueWithRepair(option)}
+                      type="button"
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {pausedStreamState ? (
+              <div className="rounded-[22px] border border-[#d8c9b3] bg-[#fbf5ec] p-4">
+                <p className="text-sm font-semibold">
+                  已停在第 {pausedStreamState.pausedAtParagraph}/{pausedStreamState.paragraphTotal} 段
+                </p>
+                <button
+                  className="mt-3 w-full rounded-[18px] border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f8f3ea] disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={streaming}
+                  onClick={onContinueAfterManualFix}
+                  type="button"
+                >
+                  我已经改好，继续往下写
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+
+      {finalResult ? (
+        <section className="rounded-[30px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+          <p className="text-xs uppercase tracking-[0.18em] text-copper">本章总结</p>
+          <p className="mt-3 text-sm leading-7 text-black/62">{finalResult.chapter_summary.content}</p>
+        </section>
+      ) : null}
+    </>
+  );
 
   return (
     <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -471,14 +866,29 @@ export function DraftStudio({
                 有未保存改动
               </span>
             ) : null}
+            {cloudSyncing ? (
+              <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs text-sky-700">
+                正在续存
+              </span>
+            ) : null}
             {localDraftSavedAt ? (
               <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs text-emerald-700">
                 本机已暂存
               </span>
             ) : null}
+            {cloudDraftSavedAt ? (
+              <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs text-sky-700">
+                换设备可续写
+              </span>
+            ) : null}
             {localDraftRecoveredAt ? (
               <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs text-sky-700">
                 已恢复暂存
+              </span>
+            ) : null}
+            {cloudDraftRecoveredAt ? (
+              <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs text-sky-700">
+                已恢复续写稿
               </span>
             ) : null}
           </div>
@@ -661,281 +1071,16 @@ export function DraftStudio({
             onLocateSelectionInKnowledge={onLocateSelectionInKnowledge}
           />
         </section>
+
+        <details className="rounded-[28px] border border-black/10 bg-white/82 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)] md:hidden">
+          <summary className="cursor-pointer list-none text-base font-semibold text-black/82">
+            本章状态、保稿与提醒
+          </summary>
+          <div className="mt-4 space-y-4">{sidebarSections}</div>
+        </details>
       </div>
 
-      <aside className="space-y-4">
-        <section className={`rounded-[30px] border p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)] ${chapterStatusCardTone}`}>
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs uppercase tracking-[0.18em]">本章进度</p>
-              <h3 className="mt-2 text-lg font-semibold">
-                {activeChapter ? formatPublishStatus(activeChapter.final_gate_status) : "待保存"}
-              </h3>
-            </div>
-            <span className="rounded-full border border-current/20 px-3 py-1 text-xs">
-              {formatChapterStatus(activeChapter?.status ?? null)}
-            </span>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            {chapterFlowSteps.map((step) => (
-              <div
-                key={step.key}
-                className="flex items-center justify-between gap-3 rounded-[20px] border border-current/20 bg-white/70 px-4 py-3"
-              >
-                <div>
-                  <p className="text-sm font-semibold">{step.title}</p>
-                  <p className="mt-1 text-xs opacity-75">{step.detail}</p>
-                </div>
-                <span className="rounded-full border border-current/20 px-3 py-1 text-[11px]">
-                  {step.state === "done" ? "已完成" : step.state === "current" ? "当前" : "待处理"}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          {activeChapter ? (
-            <div className="mt-4 flex flex-wrap gap-2 text-xs">
-              <span className="rounded-full border border-current/20 px-3 py-1">
-                检查 {formatEvaluationStatus(activeChapter.latest_evaluation_status)}
-              </span>
-              <span className="rounded-full border border-current/20 px-3 py-1">
-                待确认 {activeChapter.pending_checkpoint_count}
-              </span>
-              {activeChapter.latest_review_verdict ? (
-                <span className="rounded-full border border-current/20 px-3 py-1">
-                  复核 {formatReviewVerdict(activeChapter.latest_review_verdict)}
-                </span>
-              ) : null}
-            </div>
-          ) : null}
-
-          {activeChapter?.latest_checkpoint_title ? (
-            <div className="mt-4 rounded-[22px] border border-current/20 bg-white/70 px-4 py-3 text-sm">
-              最近卡点：{activeChapter.latest_checkpoint_title}
-              {activeChapter.latest_checkpoint_status
-                ? ` · ${formatCheckpointStatus(activeChapter.latest_checkpoint_status)}`
-                : ""}
-            </div>
-          ) : null}
-
-          {activeChapter?.final_gate_reason ? (
-            <div className="mt-4 rounded-[22px] border border-current/20 bg-white/70 px-4 py-3 text-sm leading-7">
-              {activeChapter.final_gate_reason}
-            </div>
-          ) : null}
-
-          <button
-            className="mt-4 w-full rounded-full bg-white/90 px-4 py-3 text-sm font-semibold text-black transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={primaryAction.disabled}
-            onClick={primaryAction.onClick}
-            type="button"
-          >
-            {primaryAction.label}
-          </button>
-        </section>
-
-        <section className="rounded-[30px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs uppercase tracking-[0.18em] text-copper">写作保护</p>
-              <h3 className="mt-2 text-lg font-semibold">
-                {pendingLocalDraftUpdatedAt ? formatLocalDraftRecoveryTitle(pendingLocalDraftRecoveryState) : isOnline ? "本机保稿正常" : "断网也会继续保稿"}
-              </h3>
-            </div>
-            <span
-              className={`rounded-full border px-3 py-1 text-xs ${
-                isOnline
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                  : "border-amber-200 bg-amber-50 text-amber-700"
-              }`}
-            >
-              {isOnline ? "在线" : "离线"}
-            </span>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            <div className="rounded-[22px] border border-black/10 bg-[#fbfaf5] px-4 py-3 text-sm text-black/62">
-              {pendingLocalDraftUpdatedAt ? (
-                <>
-                  <p className="font-semibold text-black/82">
-                    {formatLocalDraftRecoveryDetail(pendingLocalDraftRecoveryState)}
-                  </p>
-                  <p className="mt-2 text-xs text-black/52">
-                    本机时间 {formatDateTime(pendingLocalDraftUpdatedAt)}
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="font-semibold text-black/82">
-                    {isOnline
-                      ? "你在这章里的改动会持续记在本机。"
-                      : "当前断网，但你写下的内容还会继续留在本机。"}
-                  </p>
-                  {localDraftSavedAt ? (
-                    <p className="mt-2 text-xs text-black/52">
-                      最近保稿 {formatDateTime(localDraftSavedAt)}
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-xs text-black/52">这一章一有内容就会自动保稿。</p>
-                  )}
-                </>
-              )}
-            </div>
-
-            {pendingLocalDraftUpdatedAt ? (
-              <div className="flex flex-wrap gap-2">
-                <button
-                  className="rounded-full bg-[#566246] px-4 py-2 text-xs font-semibold text-white transition hover:opacity-90"
-                  onClick={onRestoreLocalDraft}
-                  type="button"
-                >
-                  恢复这章内容
-                </button>
-                <button
-                  className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
-                  onClick={onDismissLocalDraft}
-                  type="button"
-                >
-                  忽略这份暂存
-                </button>
-              </div>
-            ) : null}
-
-            {otherRecoverableDrafts.length > 0 ? (
-              <div className="rounded-[22px] border border-black/10 bg-white px-4 py-4">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-black/82">其他可恢复章节</p>
-                  <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-[11px] text-black/55">
-                    {otherRecoverableDrafts.length} 条
-                  </span>
-                </div>
-                <div className="mt-3 space-y-2">
-                  {otherRecoverableDrafts.map((draft) => (
-                    <button
-                      key={draft.storageKey}
-                      className="w-full rounded-[18px] border border-black/10 bg-[#fbfaf5] px-4 py-3 text-left transition hover:bg-white"
-                      onClick={() => onOpenRecoverableDraft(draft)}
-                      type="button"
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-semibold text-black/82">
-                          第 {draft.chapterNumber} 章
-                          {draft.chapterTitle.trim() ? ` · ${draft.chapterTitle.trim()}` : ""}
-                        </p>
-                        <span className="text-[11px] text-black/45">
-                          {formatDateTime(draft.updatedAt)}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs text-black/48">{draft.scopeLabel}</p>
-                      {draft.excerpt ? (
-                        <p className="mt-2 line-clamp-2 text-xs leading-6 text-black/58">
-                          {draft.excerpt}
-                        </p>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {localDraftRecoveredAt ? (
-              <div className="rounded-[22px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
-                已恢复本机稿 · {formatDateTime(localDraftRecoveredAt)}
-              </div>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="rounded-[30px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs uppercase tracking-[0.18em] text-copper">实时提醒</p>
-              <h3 className="mt-2 text-lg font-semibold">
-                {shouldShowGuard ? "有冲突待修" : "当前无明显冲突"}
-              </h3>
-            </div>
-            <span
-              className={`rounded-full border px-3 py-1 text-xs ${
-                shouldShowGuard
-                  ? "border-red-200 bg-red-50 text-red-700"
-                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
-              }`}
-            >
-              {shouldShowGuard ? "需处理" : "安全"}
-            </span>
-          </div>
-
-          {guardResult ? (
-            <div className="mt-4 space-y-3">
-              {guardResult.alerts.length > 0 ? (
-                guardResult.alerts.map((alert) => (
-                  <article
-                    key={`${alert.title}-${alert.detail}`}
-                    className={`rounded-[22px] border p-4 ${ALERT_TONES[alert.severity] ?? ALERT_TONES.low}`}
-                  >
-                    <p className="text-sm font-semibold">{alert.title}</p>
-                    <p className="mt-2 text-sm leading-7">{alert.detail}</p>
-                    {alert.suggestion ? (
-                      <p className="mt-3 text-sm">修正建议：{alert.suggestion}</p>
-                    ) : null}
-                  </article>
-                ))
-              ) : (
-                <div className="rounded-[22px] border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
-                  当前正文没有发现硬冲突。
-                </div>
-              )}
-
-              {guardResult.repair_options.length > 0 ? (
-                <div className="rounded-[22px] border border-black/10 bg-[#fbfaf5] p-4">
-                  <p className="text-sm font-semibold">选择修法</p>
-                  <div className="mt-3 space-y-2">
-                    {guardResult.repair_options.map((option) => (
-                      <button
-                        key={option}
-                        className={`w-full rounded-[18px] border px-3 py-3 text-left text-sm leading-7 transition ${
-                          activeRepairInstruction === option && streaming
-                            ? "border-copper bg-[#f6eee1] text-black"
-                            : "border-black/10 bg-white text-black/68 hover:bg-[#f8f3ea]"
-                        }`}
-                        disabled={streaming}
-                        onClick={() => onContinueWithRepair(option)}
-                        type="button"
-                      >
-                        {option}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              {pausedStreamState ? (
-                <div className="rounded-[22px] border border-[#d8c9b3] bg-[#fbf5ec] p-4">
-                  <p className="text-sm font-semibold">
-                    已停在第 {pausedStreamState.pausedAtParagraph}/{pausedStreamState.paragraphTotal} 段
-                  </p>
-                  <button
-                    className="mt-3 w-full rounded-[18px] border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f8f3ea] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={streaming}
-                    onClick={onContinueAfterManualFix}
-                    type="button"
-                  >
-                    我已经改好，继续往下写
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </section>
-
-        {finalResult ? (
-          <section className="rounded-[30px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-            <p className="text-xs uppercase tracking-[0.18em] text-copper">本章总结</p>
-            <p className="mt-3 text-sm leading-7 text-black/62">{finalResult.chapter_summary.content}</p>
-          </section>
-        ) : null}
-      </aside>
+      <aside className="hidden space-y-4 md:block">{sidebarSections}</aside>
     </section>
   );
 }

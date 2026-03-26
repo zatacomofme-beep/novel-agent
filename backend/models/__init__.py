@@ -24,6 +24,7 @@ from models.story_bible_version import (
     StoryBibleSection,
     StoryBibleVersion,
 )
+from models.story_room_cloud_draft import StoryRoomCloudDraft
 from models.story_engine import (
     StoryChapterSummary,
     StoryCharacter,
@@ -66,6 +67,7 @@ __all__ = [
     "StoryBiblePendingChangeStatus",
     "StoryBibleSection",
     "StoryBibleVersion",
+    "StoryRoomCloudDraft",
     "StoryChapterSummary",
     "StoryCharacter",
     "StoryForeshadow",

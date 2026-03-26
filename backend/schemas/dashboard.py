@@ -84,6 +84,65 @@ class DashboardRecentTaskRead(ORMModel):
     updated_at: datetime
 
 
+class DashboardActivitySnapshotRead(ORMModel):
+    active_projects_last_7_days: int = 0
+    chapters_updated_last_7_days: int = 0
+    active_words_last_7_days: int = 0
+    new_projects_last_30_days: int = 0
+    final_chapters_last_30_days: int = 0
+    stale_projects_last_14_days: int = 0
+
+
+class DashboardQualitySnapshotRead(ORMModel):
+    risk_chapter_count: int = 0
+    projects_with_risk_count: int = 0
+    low_score_chapter_count: int = 0
+    high_ai_taste_chapter_count: int = 0
+    improving_project_count: int = 0
+    declining_project_count: int = 0
+    stable_project_count: int = 0
+    average_coverage_ratio: float = 0.0
+
+
+class DashboardTaskHealthRead(ORMModel):
+    total_task_count: int = 0
+    queued_count: int = 0
+    running_count: int = 0
+    succeeded_count: int = 0
+    failed_count: int = 0
+    cancelled_count: int = 0
+    stalled_active_task_count: int = 0
+    recent_failed_task_count: int = 0
+    status_breakdown: dict[str, int]
+
+
+class DashboardPipelineSnapshotRead(ORMModel):
+    outline_pending_projects: int = 0
+    ready_for_first_chapter_projects: int = 0
+    writing_in_progress_projects: int = 0
+    awaiting_finalization_projects: int = 0
+    stable_output_projects: int = 0
+
+
+class DashboardGenreDistributionItemRead(ORMModel):
+    genre: str
+    project_count: int
+
+
+class DashboardFocusItemRead(ORMModel):
+    project_id: UUID
+    title: str
+    genre: Optional[str] = None
+    focus_type: str
+    stage: str
+    action_label: str
+    reason: str
+    chapter_number: Optional[int] = None
+    priority: int
+    risk_level: str = "low"
+    updated_at: datetime
+
+
 class DashboardOverviewRead(ORMModel):
     total_projects: int
     total_chapters: int
@@ -98,3 +157,9 @@ class DashboardOverviewRead(ORMModel):
     project_summaries: list[DashboardProjectSummaryRead]
     project_quality_trends: list[DashboardProjectQualityTrendRead]
     recent_tasks: list[DashboardRecentTaskRead]
+    activity_snapshot: DashboardActivitySnapshotRead
+    quality_snapshot: DashboardQualitySnapshotRead
+    task_health: DashboardTaskHealthRead
+    pipeline_snapshot: DashboardPipelineSnapshotRead
+    genre_distribution: list[DashboardGenreDistributionItemRead]
+    focus_queue: list[DashboardFocusItemRead]

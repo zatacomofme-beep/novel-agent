@@ -350,6 +350,38 @@ class StoryEngineWorkspaceRead(ORMModel):
     knowledge_provenance: list[StoryKnowledgeProvenanceRead] = Field(default_factory=list)
 
 
+class StoryRoomCloudDraftUpsertRequest(ORMModel):
+    branch_id: Optional[UUID] = None
+    volume_id: Optional[UUID] = None
+    chapter_number: int = Field(ge=1)
+    chapter_title: str = ""
+    draft_text: str = ""
+    outline_id: Optional[UUID] = None
+    source_chapter_id: Optional[UUID] = None
+    source_version_number: Optional[int] = Field(default=None, ge=1)
+
+
+class StoryRoomCloudDraftSummaryRead(ORMModel):
+    draft_snapshot_id: UUID
+    project_id: UUID
+    branch_id: Optional[UUID] = None
+    volume_id: Optional[UUID] = None
+    scope_key: str
+    chapter_number: int
+    chapter_title: str
+    outline_id: Optional[UUID] = None
+    source_chapter_id: Optional[UUID] = None
+    source_version_number: Optional[int] = None
+    excerpt: str
+    char_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoryRoomCloudDraftRead(StoryRoomCloudDraftSummaryRead):
+    draft_text: str
+
+
 class StoryKnowledgeUpsertRequest(ORMModel):
     entity_id: Optional[str] = None
     branch_id: Optional[UUID] = None

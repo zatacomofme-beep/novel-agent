@@ -1,10 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import type { StyleTemplate, UserPreferenceProfile } from "@/types/api";
 
-type PreferencePayload = {
+export type StylePreferencePayload = {
   prose_style: string;
   narrative_mode: string;
   pacing_preference: string;
@@ -18,6 +19,9 @@ type PreferencePayload = {
 
 type StyleControlPanelProps = {
   chapterSample: string;
+  mode?: "story-room" | "center";
+  secondaryActionHref?: string | null;
+  secondaryActionLabel?: string | null;
   preferenceProfile: UserPreferenceProfile | null;
   styleTemplates: StyleTemplate[];
   loading: boolean;
@@ -25,7 +29,7 @@ type StyleControlPanelProps = {
   onChapterSampleChange: (value: string) => void;
   onApplyTemplate: (templateKey: string) => void;
   onClearTemplate: () => void;
-  onSavePreference: (payload: PreferencePayload) => void;
+  onSavePreference: (payload: StylePreferencePayload) => void;
 };
 
 const OPTION_LABELS: Record<string, string> = {
@@ -100,6 +104,9 @@ function FieldLabel({ label }: { label: string }) {
 
 export function StyleControlPanel({
   chapterSample,
+  mode = "story-room",
+  secondaryActionHref,
+  secondaryActionLabel,
   preferenceProfile,
   styleTemplates,
   loading,
@@ -152,6 +159,15 @@ export function StyleControlPanel({
     });
   }
 
+  const isCenterMode = mode === "center";
+  const eyebrow = isCenterMode ? "风格中心" : "声音设置";
+  const title = isCenterMode ? "先把整本书的声音定稳" : "本章样文 + 整本书手感";
+  const sampleTitle = isCenterMode ? "风格样文参考" : "这一章的声音参考";
+  const samplePlaceholder = isCenterMode
+    ? "贴一段最能代表你想要的笔感、节奏和句式气口。"
+    : "贴一小段你自己的正文。";
+  const sampleScopeHint = isCenterMode ? "这里只是校准参考，不会直接写进正文" : "只影响这一章";
+
   return (
     <section
       id="voice-settings"
@@ -159,24 +175,34 @@ export function StyleControlPanel({
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-copper">声音设置</p>
-          <h2 className="mt-2 text-2xl font-semibold">本章样文 + 整本书手感</h2>
+          <p className="text-xs uppercase tracking-[0.24em] text-copper">{eyebrow}</p>
+          <h2 className="mt-2 text-2xl font-semibold">{title}</h2>
         </div>
-        {preferenceProfile ? (
-          <div className="flex flex-wrap gap-2 text-xs">
-            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-700">
-              完成度 {(preferenceProfile.completion_score * 100).toFixed(0)}%
-            </span>
-            <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-black/55">
-              已观察 {preferenceProfile.learning_snapshot.observation_count} 次
-            </span>
-            {preferenceProfile.active_template ? (
-              <span className="rounded-full border border-copper/20 bg-[#f6ede3] px-3 py-1 text-copper">
-                当前底稿 {preferenceProfile.active_template.name}
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {preferenceProfile ? (
+            <>
+              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-700">
+                完成度 {(preferenceProfile.completion_score * 100).toFixed(0)}%
               </span>
-            ) : null}
-          </div>
-        ) : null}
+              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-black/55">
+                已观察 {preferenceProfile.learning_snapshot.observation_count} 次
+              </span>
+              {preferenceProfile.active_template ? (
+                <span className="rounded-full border border-copper/20 bg-[#f6ede3] px-3 py-1 text-copper">
+                  当前底稿 {preferenceProfile.active_template.name}
+                </span>
+              ) : null}
+            </>
+          ) : null}
+          {secondaryActionHref && secondaryActionLabel ? (
+            <Link
+              className="rounded-full border border-black/10 bg-white px-3 py-2 text-xs font-semibold text-black/68 transition hover:bg-[#f6f0e6]"
+              href={secondaryActionHref}
+            >
+              {secondaryActionLabel}
+            </Link>
+          ) : null}
+        </div>
       </div>
 
       {loading ? (
@@ -188,10 +214,10 @@ export function StyleControlPanel({
       <div className="mt-6 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
         <div className="space-y-6">
           <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
-            <p className="text-sm font-semibold">这一章的声音参考</p>
+            <p className="text-sm font-semibold">{sampleTitle}</p>
             <textarea
               className="mt-4 min-h-[180px] w-full rounded-[22px] border border-black/10 bg-white px-4 py-3 text-sm leading-7 outline-none"
-              placeholder="贴一小段你自己的正文。"
+              placeholder={samplePlaceholder}
               value={chapterSample}
               onChange={(event) => onChapterSampleChange(event.target.value)}
             />
@@ -200,7 +226,7 @@ export function StyleControlPanel({
                 {chapterSample.trim().length > 0 ? `已贴 ${chapterSample.trim().length} 字` : "当前未贴样文"}
               </span>
               <span className="rounded-full border border-black/10 bg-white px-3 py-1">
-                只影响这一章
+                {sampleScopeHint}
               </span>
             </div>
           </section>

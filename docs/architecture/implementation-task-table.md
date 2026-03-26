@@ -134,9 +134,9 @@
 | --- | --- | --- | --- | --- | --- |
 | `P1-01` | 管理员模型路由 / 策略页 | `已完成（第一版）` | `P1` | 只给管理员，不给写手前台 | `backend/api/v1/model_routing.py` `frontend/app/dashboard/admin/model-routing/page.tsx` |
 | `P1-02` | 实体生成并入统一任务链 | `已完成（第一版）` | `P1` | 实体补全已并入项目任务链，并回写阶段事件与执行轨迹 | `backend/services/entity_generation_service.py` `backend/tasks/entity_generation.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` |
-| `P1-03` | Dashboard 创作数据深化 | `待开始` | `P1` | 已有概览和趋势，但还没做成真正的创作效率与质量总览 | `backend/services/dashboard_service.py` `frontend/app/dashboard/page.tsx` |
-| `P1-04` | 独立风格中心 | `待开始` | `P1` | 当前已并入 `story-room`，后续可再决定是否拆出职业模式 | `frontend/components/story-engine/style-control-panel.tsx` |
-| `P1-05` | 移动端轻量化创作模式 | `待开始` | `P1` | 当前响应式已在做基础适配，但未形成完整移动创作模式 | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` |
+| `P1-03` | Dashboard 创作数据深化 | `已完成（第一版）` | `P1` | 已有概览和趋势，但还没做成真正的创作效率与质量总览 | `backend/services/dashboard_service.py` `frontend/app/dashboard/page.tsx` |
+| `P1-04` | 独立风格中心 | `已完成（第一版）` | `P1` | 已拆出独立入口，同时保留 `story-room` 内嵌轻量面板 | `frontend/components/story-engine/style-control-panel.tsx` `frontend/app/dashboard/preferences/page.tsx` |
+| `P1-05` | 移动端轻量化创作模式 | `已完成（第一版）` | `P1` | `story-room` 已补齐手机端轻量模式，主写作链不再只是桌面页面缩放 | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/components/story-engine/draft-studio.tsx` |
 
 ### `P1-01` 当前进度
 
@@ -149,6 +149,73 @@
 - 已完成（第一版）：实体补全服务已改成统一补全管线，会读取项目级模型路由，并按职责候选链自动切换补全模型。
 - 已完成（第一版）：实体任务现在会把执行轨迹、回退情况、上下文快照写入 `task result` 和 `task events`，不再只是返回一个最终候选数组。
 - 已完成（第一版）：`story-room` 设定区已接入实体补全事件时间线，写手能直接看到“已装载设定 / 正在生成 / 结果已备好”的完整过程。
+
+### `P1-03` 当前进度
+
+- 已完成（第一版）：Dashboard 总览接口现在会额外返回 `activity_snapshot / quality_snapshot / task_health / pipeline_snapshot / genre_distribution / focus_queue`，不再只有总量和走势。
+- 已完成（第一版）：首页看板已经改成“近 7 天活跃项目 / 更新章节 / 活跃字数 / 风险章节 + 当前最该处理 + 阶段与任务 + 题材分布”的结构，更像创作工作台，而不是松散信息堆叠。
+- 已完成（第一版）：聚合指标明确区分真实统计与代理指标，例如“最近活跃字数”使用最近更新章节的当前字数汇总，避免伪造精确时序。
+- 已完成（第一版）：Dashboard 的后端聚合与前端展示已经有类型与测试兜底，后续再做精修时不需要重拆契约。
+
+### `P1-04` 当前进度
+
+- 已完成（第一版）：`/dashboard/preferences` 已从跳转占位改成真实可用的独立风格中心，能直接读取和保存长期偏好、套用声音底稿、清空当前底稿。
+- 已完成（第一版）：`StyleControlPanel` 已支持 `story-room / center` 两种模式，正文区保留轻量入口，整本书级的长期手感集中到独立页面收口。
+- 已完成（第一版）：书架已补入风格中心入口，`story-room` 内也能直接跳过去细调，并支持通过 `projectId` 回到当前故事工作台。
+- 已完成（第一版）：风格样文已在独立风格中心做本地持久化，避免用户切页后丢掉长期校准文本。
+
+### `P1-05` 当前进度
+
+- 已完成（第一版）：`story-room` 已新增移动端底部固定阶段栏，手机上可以一只手切换“大纲 / 正文 / 终稿 / 设定”，并随时触发当前推荐动作。
+- 已完成（第一版）：故事工作台顶部的阶段卡、卷线区和正文辅助面板已改成移动端轻模式，默认先看主写作区域，重区块改为按需展开。
+- 已完成（第一版）：正文页的“本章进度 / 写作保护 / 实时提醒 / 本章总结”已在移动端折叠收口，不再把桌面右侧整列原样堆到手机长页里。
+- 已完成（第一版）：精修台在移动端已改成折叠打开，桌面端仍保留完整展开态，保证跨端操作习惯一致但信息密度不同。
+
+---
+
+## 下一阶段任务
+
+当前 `P0 / P1 / E1` 已完成第一轮主链收口，下面这组任务进入下一阶段。
+它们的目标不是重开新流程，而是在不破坏现有单工作台主链的前提下，继续补齐“跨端续写、任务回放、持久化观测”三块能力。
+
+| ID | 任务 | 状态 | 优先级 | 说明 | 关键文件 |
+| --- | --- | --- | --- | --- | --- |
+| `P2-01` | 跨端云端续写草稿 | `已完成（第一版）` | `P2` | 在本机保稿之外补齐云端暂存，让桌面和手机能接着写同一章 | `backend/api/v1/story_engine.py` `backend/services/story_engine_cloud_draft_service.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/components/story-engine/draft-studio.tsx` |
+| `P2-02` | 工作台任务轨迹与流程回放 | `已完成（第一版）` | `P2` | 把已有 `workflow_timeline / task_runs / task_events` 更完整地收口到 `story-room` 与 `dashboard` | `backend/api/v1/tasks.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` |
+| `E2-01` | 章节工作流持久化并轨到任务系统 | `待开始` | `P2` | 让章节流式生成、实时守护、终稿收口不仅返回时间线，还沉到统一 `task_runs / task_events` 主链 | `backend/services/story_engine_workflow_service.py` `backend/services/task_service.py` `backend/models/task_run.py` `backend/models/task_event.py` |
+
+### `P2-01` 验收标准
+
+- 用户在桌面端未正式保存的正文，可以在手机端继续恢复。
+- 云端暂存不替代正式章节保存，只服务跨设备接续。
+- 当前章正式保存、回滚或重写后，对应云端暂存会同步清掉，避免旧稿反复覆盖。
+- 写手前台仍然只看到“保稿 / 恢复 / 继续写”，不会暴露技术术语。
+
+### `P2-02` 验收标准
+
+- 写手能在工作台里看到最近一次正文生成、检查收口、设定补全的大致执行轨迹。
+- 轨迹展示要写手可理解，不暴露模型路由、任务系统内部细节。
+- Dashboard 能快速定位“哪本书最近在跑、卡在哪一步、刚完成了什么”。
+
+### `P2-02` 当前进度
+
+- 已完成（第一版）：后端已新增项目级 `/api/v1/projects/{project_id}/task-playback` 聚合接口，把最近任务与最近事件收成一份回放数据，前端不需要再自己拼多次请求。
+- 已完成（第一版）：`story-room` 已加入统一“最近过程”区，会把当前页的正文生成 / 正文检查 / 终稿收口时间线，与项目级自动补设定回放合并展示成一条写手可读的过程线。
+- 已完成（第一版）：Dashboard 的“最近任务”已收口成“最近发生了什么”，能更快看到哪本书刚跑完、正在处理中，或者停在了哪一步。
+- 已完成（第一版）：这轮只解决“展示与回放收口”，章节流式生成、实时守护、终稿收口的持久化并轨仍留给下一项 `E2-01` 继续完成。
+
+### `E2-01` 验收标准
+
+- `chapter-stream / realtime-guard / final-optimize` 都有可查询的统一任务记录。
+- 服务级返回的时间线与 `task_runs / task_events` 中的持久化结果语义一致。
+- 后续前台做轨迹回放时，不需要再只依赖一次性接口响应。
+
+### `P2-01` 当前进度
+
+- 已完成（第一版）：后端已补齐云端续写稿快照表、迁移、服务层和四个接口，支持按项目列出、读取当前章快照、按 scope 覆写、删除单条续写稿。
+- 已完成（第一版）：`story-room` 已接入“本机保稿 + 云端续写”双层保护，联网时会自动续存，切章后能识别当前章是否存在可恢复的续写稿。
+- 已完成（第一版）：正文区“写作保护”已加入写手可理解的续写提示，只暴露“恢复续写稿 / 清掉这份续写稿 / 换设备可续写”，没有暴露任务系统或技术术语。
+- 已完成（第一版）：正式保存、版本回退、片段改写、终稿确认后都会主动清理当前章续写稿，避免旧草稿反复覆盖正式章节。
 
 ---
 
@@ -212,6 +279,11 @@
 8. `E1-01` `items / factions` 底层领域模型原生化
 9. `E1-02` Story Bible 关联与溯源能力增强
 10. `E1-03` 章节工作流事件化与可观测性增强
+11. `P1-04` 独立风格中心
+12. `P1-05` 移动端轻量化创作模式
+13. `P2-01` 跨端云端续写草稿
+14. `P2-02` 工作台任务轨迹与流程回放
+15. `E2-01` 章节工作流持久化并轨到任务系统
 
 ---
 
@@ -224,4 +296,4 @@
 - 后台工程链路继续并轨，减少“已能调用但未进入统一任务链”的分叉实现
 - 领域模型与事件流继续纯化，为后续长期维护、观测和移动端适配打底
 
-按当前任务表，`E1-03` 也已完成第一版收口。到这里，写手主链与章节工作流的核心工程纯化项已经走完一轮，后续如果继续严格沿表推进，应转入 `P1-03 / P1-04 / P1-05` 这些“可后做但不阻塞主链”的产品深化项，而不是回头新增分叉入口。
+按当前任务表，`P2-02` 也已经完成第一版。现在写手前台已经能看到“最近做了什么、卡在哪一步、怎么回看过程”，所以下一步要进入 `E2-01`，把章节流式生成、实时守护、终稿收口彻底并轨进统一 `task_runs / task_events` 主链，结束“当前页可回放但未完全持久化”的状态。

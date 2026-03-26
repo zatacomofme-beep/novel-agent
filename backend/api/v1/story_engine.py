@@ -32,6 +32,9 @@ from schemas.story_engine import (
     StoryCharacterRead,
     StoryCharacterCreate,
     StoryCharacterUpdate,
+    StoryRoomCloudDraftRead,
+    StoryRoomCloudDraftSummaryRead,
+    StoryRoomCloudDraftUpsertRequest,
     StoryEnginePresetCatalogRead,
     StoryEngineModelRoutingRead,
     StoryEngineModelRoutingUpdateRequest,
@@ -66,6 +69,12 @@ from services.story_engine_import_service import (
     bulk_import_story_payload,
     get_import_template,
     list_import_templates,
+)
+from services.story_engine_cloud_draft_service import (
+    delete_story_room_cloud_draft,
+    get_story_room_cloud_draft,
+    list_story_room_cloud_drafts,
+    upsert_story_room_cloud_draft,
 )
 from services.story_engine_candidate_service import accept_generated_candidate
 from services.story_engine_kb_service import (
@@ -204,6 +213,95 @@ async def story_engine_search(
         limit=limit,
     )
     return [StorySearchResultRead.model_validate(item) for item in results]
+
+
+@router.get(
+    "/projects/{project_id}/story-engine/cloud-drafts",
+    response_model=list[StoryRoomCloudDraftSummaryRead],
+)
+async def story_engine_cloud_drafts(
+    project_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[StoryRoomCloudDraftSummaryRead]:
+    payload = await list_story_room_cloud_drafts(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+    )
+    return [StoryRoomCloudDraftSummaryRead.model_validate(item) for item in payload]
+
+
+@router.get(
+    "/projects/{project_id}/story-engine/cloud-drafts/{draft_snapshot_id}",
+    response_model=Optional[StoryRoomCloudDraftRead],
+)
+async def story_engine_cloud_draft_detail(
+    project_id: UUID,
+    draft_snapshot_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Optional[StoryRoomCloudDraftRead]:
+    payload = await get_story_room_cloud_draft(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+        draft_snapshot_id=draft_snapshot_id,
+    )
+    if payload is None:
+        return None
+    return StoryRoomCloudDraftRead.model_validate(payload)
+
+
+@router.put(
+    "/projects/{project_id}/story-engine/cloud-drafts/current",
+    response_model=StoryRoomCloudDraftRead,
+)
+async def story_engine_cloud_draft_upsert(
+    project_id: UUID,
+    payload: StoryRoomCloudDraftUpsertRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> StoryRoomCloudDraftRead:
+    result = await upsert_story_room_cloud_draft(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+        branch_id=payload.branch_id,
+        volume_id=payload.volume_id,
+        chapter_number=payload.chapter_number,
+        chapter_title=payload.chapter_title,
+        draft_text=payload.draft_text,
+        outline_id=payload.outline_id,
+        source_chapter_id=payload.source_chapter_id,
+        source_version_number=payload.source_version_number,
+    )
+    return StoryRoomCloudDraftRead.model_validate(result)
+
+
+@router.delete(
+    "/projects/{project_id}/story-engine/cloud-drafts/{draft_snapshot_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def story_engine_cloud_draft_delete(
+    project_id: UUID,
+    draft_snapshot_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    deleted = await delete_story_room_cloud_draft(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+        draft_snapshot_id=draft_snapshot_id,
+    )
+    if not deleted:
+        raise AppError(
+            code="story_engine.cloud_draft.not_found",
+            message="Cloud draft not found.",
+            status_code=404,
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

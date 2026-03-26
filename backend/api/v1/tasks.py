@@ -16,7 +16,7 @@ from services.task_service import (
     list_task_runs_for_chapter,
     list_task_runs_for_project,
 )
-from tasks.schemas import TaskEventRead, TaskState
+from tasks.schemas import TaskEventRead, TaskPlaybackRead, TaskState
 from tasks.state_store import task_state_store
 
 
@@ -43,7 +43,13 @@ async def task_detail(
 
     state = task_state_store.get(task_id)
     if state is not None:
-        return state
+        return state.model_copy(
+            update={
+                "project_id": task_run.project_id,
+                "chapter_id": task_run.chapter_id,
+                "chapter_number": getattr(getattr(task_run, "chapter", None), "chapter_number", None),
+            }
+        )
 
     state = TaskState.from_task_run(task_run)
     task_state_store.set(state)
@@ -121,6 +127,45 @@ async def tasks_for_project(
     for state in states:
         task_state_store.set(state)
     return states
+
+
+@router.get("/projects/{project_id}/task-playback", response_model=list[TaskPlaybackRead])
+async def task_playback_for_project(
+    project_id: UUID,
+    task_type_prefix: Optional[str] = Query(default=None),
+    limit: int = Query(default=8, ge=1, le=20),
+    event_limit: int = Query(default=5, ge=1, le=10),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[TaskPlaybackRead]:
+    await get_owned_project(
+        session,
+        project_id,
+        current_user.id,
+        permission=PROJECT_PERMISSION_READ,
+    )
+    task_runs = await list_task_runs_for_project(
+        session,
+        project_id,
+        limit=limit,
+        task_type_prefix=task_type_prefix,
+    )
+    playback_items: list[TaskPlaybackRead] = []
+    for task_run in task_runs:
+        recent_events = await list_task_events_for_task(
+            session,
+            task_run.task_id,
+            limit=event_limit,
+        )
+        state = TaskState.from_task_run(task_run)
+        task_state_store.set(state)
+        playback_items.append(
+            TaskPlaybackRead(
+                **state.model_dump(),
+                recent_events=[TaskEventRead.from_task_event(event) for event in recent_events],
+            )
+        )
+    return playback_items
 
 
 async def _assert_task_access(session: AsyncSession, task_run, user_id: UUID) -> None:

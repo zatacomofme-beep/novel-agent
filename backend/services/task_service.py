@@ -4,6 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.task_event import TaskEvent
@@ -71,7 +72,7 @@ async def get_task_run_by_task_id(
     *,
     user_id: Optional[UUID] = None,
 ) -> Optional[TaskRun]:
-    statement = select(TaskRun).where(TaskRun.task_id == task_id)
+    statement = select(TaskRun).options(selectinload(TaskRun.chapter)).where(TaskRun.task_id == task_id)
     if user_id is not None:
         statement = statement.where(TaskRun.user_id == user_id)
     result = await session.execute(statement)
@@ -85,7 +86,7 @@ async def list_task_runs_for_chapter(
     user_id: Optional[UUID] = None,
     limit: int = 10,
 ) -> list[TaskRun]:
-    statement = select(TaskRun).where(TaskRun.chapter_id == chapter_id)
+    statement = select(TaskRun).options(selectinload(TaskRun.chapter)).where(TaskRun.chapter_id == chapter_id)
     if user_id is not None:
         statement = statement.where(TaskRun.user_id == user_id)
     result = await session.execute(
@@ -102,7 +103,7 @@ async def list_task_runs_for_project(
     limit: int = 20,
     task_type_prefix: Optional[str] = None,
 ) -> list[TaskRun]:
-    statement = select(TaskRun).where(TaskRun.project_id == project_id)
+    statement = select(TaskRun).options(selectinload(TaskRun.chapter)).where(TaskRun.project_id == project_id)
     if user_id is not None:
         statement = statement.where(TaskRun.user_id == user_id)
     if task_type_prefix:

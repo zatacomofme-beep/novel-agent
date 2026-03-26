@@ -133,3 +133,4 @@
 - 想理解“章节生成为什么会经过这么多环节”，看 `agent-collaboration.md`
 - 想做联调、修页面、补接口，对照 `api-contract-map.md`
 - 想开始系统化收口当前偏差，看 `alignment-backlog.md`
+- 想看当前书架该先处理哪本、最近写作势头怎么样，直接看 Dashboard 总览实现：它已经补入活动快照、质量快照、任务健康和焦点队列。

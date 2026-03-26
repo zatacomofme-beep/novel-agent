@@ -8,6 +8,12 @@ import { FinalPublishPanel } from "@/components/story-engine/final-publish-panel
 import { DraftStudio } from "@/components/story-engine/draft-studio";
 import { FinalDiffViewer } from "@/components/story-engine/final-diff-viewer";
 import { ChapterReviewPanel } from "@/components/story-engine/chapter-review-panel";
+import {
+  ProcessPlaybackPanel,
+  type ProcessPlaybackItem,
+  type ProcessPlaybackStatus,
+  type ProcessPlaybackStep,
+} from "@/components/process-playback-panel";
 import type { DraftEditorHandle } from "@/components/story-engine/draft-editor-handle";
 import { StyleControlPanel } from "@/components/story-engine/style-control-panel";
 import { StoryScopeSwitcher } from "@/components/story-engine/story-scope-switcher";
@@ -52,8 +58,12 @@ import type {
   StoryBibleVersionList,
   StoryBulkImportResponse,
   StoryEngineWorkspace,
+  StoryEngineWorkflowEvent,
   StoryGeneratedCandidateAcceptResponse,
   StoryChapterSummary,
+  StoryRoomCloudDraft,
+  StoryRoomCloudDraftSummary,
+  StoryRoomCloudDraftUpsertRequest,
   StoryKnowledgeSuggestion,
   StoryKnowledgeSuggestionResolveResponse,
   StoryKnowledgeMutationResponse,
@@ -62,6 +72,7 @@ import type {
   StoryOutline,
   StyleTemplate,
   TaskEvent,
+  TaskPlayback,
   TaskState,
   UserPreferenceProfile,
 } from "@/types/api";
@@ -89,6 +100,20 @@ type StoryRoomStageKey = "outline" | "draft" | "final" | "knowledge";
 type DraftStudioRecoverableDraft = StoryRoomLocalDraftSummary & {
   scopeLabel: string;
   isCurrent: boolean;
+};
+
+type StoryRoomWorkflowRun = {
+  id: string;
+  workflowType: string;
+  stage: StoryRoomStageKey;
+  label: string;
+  title: string;
+  summary: string;
+  status: ProcessPlaybackStatus;
+  progress: number | null;
+  updatedAt: string;
+  chapterNumber: number | null;
+  steps: ProcessPlaybackStep[];
 };
 
 function parseStoryRoomStage(value: string | null): StoryRoomStageKey | null {
@@ -221,10 +246,261 @@ function createClientUuid(): string {
   return crypto.randomUUID();
 }
 
+function buildCloudDraftScopeKey(
+  branchId: string | null,
+  volumeId: string | null,
+  chapterNumber: number,
+): string {
+  return `${branchId ?? "default"}:${volumeId ?? "default"}:${chapterNumber}`;
+}
+
+function toLocalDraftSnapshotFromCloudDraft(
+  draft: StoryRoomCloudDraft,
+): StoryRoomLocalDraftSnapshot {
+  return {
+    projectId: draft.project_id,
+    branchId: draft.branch_id,
+    volumeId: draft.volume_id,
+    chapterNumber: draft.chapter_number,
+    chapterTitle: draft.chapter_title,
+    draftText: draft.draft_text,
+    outlineId: draft.outline_id,
+    sourceChapterId: draft.source_chapter_id,
+    sourceVersionNumber: draft.source_version_number,
+    updatedAt: draft.updated_at,
+  };
+}
+
 function selectLatestTask(taskData: TaskState[]): TaskState | null {
   return [...taskData].sort((left, right) => {
     return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
   })[0] ?? null;
+}
+
+function normalizeTaskStatus(status: string): ProcessPlaybackStatus {
+  if (status === "queued" || status === "running" || status === "succeeded" || status === "failed") {
+    return status;
+  }
+  return "queued";
+}
+
+function normalizeWorkflowStatus(status: string): ProcessPlaybackStatus {
+  if (status === "completed") {
+    return "succeeded";
+  }
+  if (status === "failed") {
+    return "failed";
+  }
+  if (status === "paused") {
+    return "paused";
+  }
+  return "running";
+}
+
+function resolveWorkflowStage(workflowType: string): StoryRoomStageKey {
+  if (workflowType === "final_optimize") {
+    return "final";
+  }
+  if (workflowType === "outline_stress_test") {
+    return "outline";
+  }
+  if (workflowType.startsWith("entity_generation")) {
+    return "knowledge";
+  }
+  return "draft";
+}
+
+function formatWorkflowLabel(workflowType: string): string {
+  const labels: Record<string, string> = {
+    chapter_stream: "正文生成",
+    realtime_guard: "正文检查",
+    final_optimize: "终稿收口",
+    outline_stress_test: "三级大纲整理",
+  };
+  return labels[workflowType] ?? "最近过程";
+}
+
+function formatTaskPlaybackLabel(taskType: string): string {
+  const labels: Record<string, string> = {
+    chapter_generation: "正文生成",
+    "entity_generation.characters": "自动补人物",
+    "entity_generation.supporting": "自动补配角",
+    "entity_generation.items": "自动补物品",
+    "entity_generation.locations": "自动补地点",
+    "entity_generation.factions": "自动补势力",
+    "entity_generation.plot_threads": "自动补剧情线",
+  };
+  return labels[taskType] ?? taskType.replaceAll(".", " / ");
+}
+
+function resolveTaskPlaybackStage(taskType: string): StoryRoomStageKey {
+  if (taskType.startsWith("entity_generation.")) {
+    return "knowledge";
+  }
+  if (taskType.includes("outline")) {
+    return "outline";
+  }
+  if (taskType.includes("final")) {
+    return "final";
+  }
+  return "draft";
+}
+
+function summarizeWorkflowEventDetails(event: StoryEngineWorkflowEvent): string | null {
+  if (event.message && event.message.trim().length > 0) {
+    return event.message.trim();
+  }
+  const details = event.details ?? {};
+  if (typeof details.alert_count === "number") {
+    return `发现 ${details.alert_count} 处提醒`;
+  }
+  if (typeof details.repair_option_count === "number") {
+    return `给出 ${details.repair_option_count} 个修法`;
+  }
+  if (typeof details.remaining_beat_count === "number") {
+    return `还要推进 ${details.remaining_beat_count} 个节点`;
+  }
+  if (typeof details.generated_length === "number") {
+    return `当前正文约 ${details.generated_length} 字`;
+  }
+  if (typeof details.candidate_count === "number") {
+    return `整理出 ${details.candidate_count} 条结果`;
+  }
+  if (typeof details.provider === "string" && details.provider.trim().length > 0) {
+    return `${details.provider}${typeof details.model === "string" ? ` / ${details.model}` : ""}`;
+  }
+  return null;
+}
+
+function buildWorkflowPlaybackStep(event: StoryEngineWorkflowEvent): ProcessPlaybackStep {
+  return {
+    id: `${event.workflow_id}:${event.sequence}`,
+    label: event.label,
+    detail: summarizeWorkflowEventDetails(event),
+    status: normalizeWorkflowStatus(event.status),
+    createdAt: event.emitted_at,
+  };
+}
+
+function buildWorkflowRunFromTimeline(timeline: StoryEngineWorkflowEvent[]): StoryRoomWorkflowRun | null {
+  if (timeline.length === 0) {
+    return null;
+  }
+  const lastEvent = timeline[timeline.length - 1];
+  const chapterLabel =
+    lastEvent.chapter_number !== null
+      ? `第 ${lastEvent.chapter_number} 章`
+      : "当前内容";
+  const progress =
+    typeof lastEvent.paragraph_index === "number" &&
+    typeof lastEvent.paragraph_total === "number" &&
+    lastEvent.paragraph_total > 0
+      ? Math.round((lastEvent.paragraph_index / lastEvent.paragraph_total) * 100)
+      : normalizeWorkflowStatus(lastEvent.status) === "succeeded"
+        ? 100
+        : null;
+  return {
+    id: lastEvent.workflow_id,
+    workflowType: lastEvent.workflow_type,
+    stage: resolveWorkflowStage(lastEvent.workflow_type),
+    label: formatWorkflowLabel(lastEvent.workflow_type),
+    title: `${chapterLabel} · ${formatWorkflowLabel(lastEvent.workflow_type)}`,
+    summary: summarizeWorkflowEventDetails(lastEvent) ?? lastEvent.label,
+    status: normalizeWorkflowStatus(lastEvent.status),
+    progress,
+    updatedAt: lastEvent.emitted_at,
+    chapterNumber: lastEvent.chapter_number,
+    steps: timeline
+      .slice(-4)
+      .map((event) => buildWorkflowPlaybackStep(event))
+      .reverse(),
+  };
+}
+
+function formatTaskPlaybackEventLabel(taskType: string, eventType: string): string {
+  if (taskType.startsWith("entity_generation.")) {
+    const labels: Record<string, string> = {
+      queued: "已收下这轮补全",
+      dispatched: "已经排进处理队列",
+      started: "开始整理当前设定",
+      context_loaded: "已装载当前设定",
+      generation_started: "正在生成候选",
+      generation_completed: "候选初稿已完成",
+      outputs_ready: "结果已整理好",
+      succeeded: "这轮补全已完成",
+      failed: "这轮补全没跑通",
+    };
+    return labels[eventType] ?? eventType;
+  }
+  const labels: Record<string, string> = {
+    queued: "已收下",
+    started: "开始处理",
+    succeeded: "已经完成",
+    failed: "这轮没跑通",
+  };
+  return labels[eventType] ?? eventType;
+}
+
+function summarizeTaskPlaybackEventPayload(payload: Record<string, unknown> | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  if (typeof payload.requested_count === "number") {
+    return `目标 ${payload.requested_count} 条`;
+  }
+  if (typeof payload.candidate_count === "number") {
+    return `整理出 ${payload.candidate_count} 条`;
+  }
+  if (typeof payload.returned_count === "number") {
+    return `整理出 ${payload.returned_count} 条`;
+  }
+  if (Array.isArray(payload.entity_preview) && payload.entity_preview.length > 0) {
+    const preview = payload.entity_preview
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .slice(0, 2);
+    return preview.join(" / ") || null;
+  }
+  if (typeof payload.response_source === "string") {
+    return payload.response_source === "local_fallback" ? "已启用备用方案" : "已走主方案";
+  }
+  return null;
+}
+
+function buildTaskPlaybackSteps(task: TaskPlayback): ProcessPlaybackStep[] {
+  if (task.recent_events.length === 0) {
+    return [
+      {
+        id: `${task.task_id}:state`,
+        label: task.message?.trim() || "最近过程已记录",
+        detail: task.error?.trim() || null,
+        status: normalizeTaskStatus(task.status),
+        createdAt: task.updated_at,
+      },
+    ];
+  }
+  return task.recent_events
+    .slice(-4)
+    .map((event) => ({
+      id: event.id,
+      label: formatTaskPlaybackEventLabel(task.task_type, event.event_type),
+      detail: summarizeTaskPlaybackEventPayload(event.payload),
+      status: normalizeTaskStatus(event.status),
+      createdAt: event.created_at,
+    }))
+    .reverse();
+}
+
+function readWorkflowTimelineMetadata(metadata: Record<string, unknown>): StoryEngineWorkflowEvent[] {
+  const value = metadata.workflow_timeline;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(
+    (item): item is StoryEngineWorkflowEvent =>
+      Boolean(item) &&
+      typeof item === "object" &&
+      typeof (item as StoryEngineWorkflowEvent).workflow_id === "string",
+  );
 }
 
 function buildFactionKey(name: string, currentKey?: string): string {
@@ -871,6 +1147,14 @@ export default function StoryRoomPage() {
   const [recoverableLocalDrafts, setRecoverableLocalDrafts] = useState<
     StoryRoomLocalDraftSummary[]
   >([]);
+  const [cloudDrafts, setCloudDrafts] = useState<StoryRoomCloudDraftSummary[]>([]);
+  const [cloudDraftSavedAt, setCloudDraftSavedAt] = useState<string | null>(null);
+  const [cloudDraftRecoveredAt, setCloudDraftRecoveredAt] = useState<string | null>(null);
+  const [pendingCloudDraftRecoveryState, setPendingCloudDraftRecoveryState] =
+    useState<StoryRoomLocalDraftRecoveryState | null>(null);
+  const [pendingCloudDraftSnapshot, setPendingCloudDraftSnapshot] =
+    useState<StoryRoomCloudDraft | null>(null);
+  const [cloudSyncing, setCloudSyncing] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<"md" | "txt" | null>(null);
   const [finalizingAction, setFinalizingAction] = useState<"save" | "continue" | null>(null);
   const [reviewWorkspace, setReviewWorkspace] = useState<ChapterReviewWorkspace | null>(null);
@@ -892,6 +1176,8 @@ export default function StoryRoomPage() {
   const [searchResults, setSearchResults] = useState<StorySearchResult[]>([]);
   const [entityTaskState, setEntityTaskState] = useState<TaskState | null>(null);
   const [entityTaskEvents, setEntityTaskEvents] = useState<TaskEvent[]>([]);
+  const [projectTaskPlayback, setProjectTaskPlayback] = useState<TaskPlayback[]>([]);
+  const [workflowRuns, setWorkflowRuns] = useState<StoryRoomWorkflowRun[]>([]);
   const [dispatchingEntityKind, setDispatchingEntityKind] =
     useState<KnowledgeSuggestionKind | null>(null);
   const [acceptingCandidateIndex, setAcceptingCandidateIndex] = useState<number | null>(null);
@@ -999,6 +1285,7 @@ export default function StoryRoomPage() {
       remaining_issue_count: 0,
       ready_for_publish: false,
       quality_summary: null,
+      workflow_timeline: [],
     } satisfies FinalOptimizeResponse;
   }, [draftText, finalResult, persistedChapterSummary]);
 
@@ -1161,6 +1448,17 @@ export default function StoryRoomPage() {
     selectedBranchId,
     selectedVolumeId,
   ]);
+  const currentCloudDraftSummary = useMemo(
+    () =>
+      cloudDrafts.find(
+        (item) =>
+          item.scope_key ===
+          buildCloudDraftScopeKey(selectedBranchId, selectedVolumeId, chapterNumber),
+      ) ?? null,
+    [chapterNumber, cloudDrafts, selectedBranchId, selectedVolumeId],
+  );
+  const currentCloudDraftSnapshotId = currentCloudDraftSummary?.draft_snapshot_id ?? null;
+  const currentCloudDraftUpdatedAt = currentCloudDraftSummary?.updated_at ?? null;
 
   const recoverableDraftCards = useMemo<DraftStudioRecoverableDraft[]>(() => {
     return recoverableLocalDrafts.map((draft) => {
@@ -1216,6 +1514,63 @@ export default function StoryRoomPage() {
     setPendingReviewPanelFocus(true);
   }, []);
 
+  const upsertWorkflowRun = useCallback((run: StoryRoomWorkflowRun) => {
+    setWorkflowRuns((current) => {
+      const next = current.filter((item) => item.id !== run.id);
+      next.unshift(run);
+      next.sort((left, right) => {
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      });
+      return next.slice(0, 8);
+    });
+  }, []);
+
+  const registerWorkflowEvent = useCallback((event: StoryEngineWorkflowEvent) => {
+    const chapterLabel =
+      event.chapter_number !== null ? `第 ${event.chapter_number} 章` : "当前内容";
+    const progress =
+      typeof event.paragraph_index === "number" &&
+      typeof event.paragraph_total === "number" &&
+      event.paragraph_total > 0
+        ? Math.round((event.paragraph_index / event.paragraph_total) * 100)
+        : normalizeWorkflowStatus(event.status) === "succeeded"
+          ? 100
+          : null;
+
+    setWorkflowRuns((current) => {
+      const existing = current.find((item) => item.id === event.workflow_id);
+      const nextSteps = [
+        ...(existing?.steps ?? []).filter((item) => item.id !== `${event.workflow_id}:${event.sequence}`),
+        buildWorkflowPlaybackStep(event),
+      ]
+        .sort((left, right) => {
+          return new Date(right.createdAt ?? 0).getTime() - new Date(left.createdAt ?? 0).getTime();
+        })
+        .slice(0, 4);
+
+      const nextRun: StoryRoomWorkflowRun = {
+        id: event.workflow_id,
+        workflowType: event.workflow_type,
+        stage: resolveWorkflowStage(event.workflow_type),
+        label: formatWorkflowLabel(event.workflow_type),
+        title: `${chapterLabel} · ${formatWorkflowLabel(event.workflow_type)}`,
+        summary: summarizeWorkflowEventDetails(event) ?? event.label,
+        status: normalizeWorkflowStatus(event.status),
+        progress,
+        updatedAt: event.emitted_at,
+        chapterNumber: event.chapter_number,
+        steps: nextSteps,
+      };
+
+      const next = current.filter((item) => item.id !== event.workflow_id);
+      next.unshift(nextRun);
+      next.sort((left, right) => {
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      });
+      return next.slice(0, 8);
+    });
+  }, []);
+
   const loadRecoverableLocalDrafts = useCallback(async () => {
     const drafts = await listStoryRoomLocalDrafts(projectId);
     setRecoverableLocalDrafts(drafts);
@@ -1252,6 +1607,115 @@ export default function StoryRoomPage() {
     );
   }, []);
 
+  const upsertCloudDraftSummary = useCallback((draft: StoryRoomCloudDraftSummary) => {
+    setCloudDrafts((current) => {
+      const next = current.filter((item) => item.draft_snapshot_id !== draft.draft_snapshot_id);
+      next.unshift(draft);
+      next.sort((left, right) => {
+        return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+      });
+      return next;
+    });
+  }, []);
+
+  const removeCloudDraftSummary = useCallback((draftSnapshotId: string) => {
+    setCloudDrafts((current) =>
+      current.filter((item) => item.draft_snapshot_id !== draftSnapshotId),
+    );
+  }, []);
+
+  const loadCloudDrafts = useCallback(async () => {
+    if (!isOnline) {
+      return;
+    }
+    try {
+      const data = await apiFetchWithAuth<StoryRoomCloudDraftSummary[]>(
+        `/api/v1/projects/${projectId}/story-engine/cloud-drafts`,
+      );
+      setCloudDrafts(data);
+    } catch {
+      setCloudDrafts([]);
+    }
+  }, [isOnline, projectId]);
+
+  const loadCurrentCloudDraft = useCallback(async () => {
+    if (!isOnline || !currentCloudDraftSnapshotId) {
+      setPendingCloudDraftSnapshot(null);
+      setPendingCloudDraftRecoveryState(null);
+      setCloudDraftSavedAt(currentCloudDraftUpdatedAt);
+      return;
+    }
+
+    try {
+      const data = await apiFetchWithAuth<StoryRoomCloudDraft | null>(
+        `/api/v1/projects/${projectId}/story-engine/cloud-drafts/${currentCloudDraftSnapshotId}`,
+      );
+      if (!data) {
+        setPendingCloudDraftSnapshot(null);
+        setPendingCloudDraftRecoveryState(null);
+        setCloudDraftSavedAt(null);
+        removeCloudDraftSummary(currentCloudDraftSnapshotId);
+        return;
+      }
+
+      const cloudSnapshot = toLocalDraftSnapshotFromCloudDraft(data);
+      const recovery = analyzeStoryRoomLocalDraftRecovery(cloudSnapshot, {
+        chapterId: activeChapter?.id ?? null,
+        chapterTitle: activeChapter?.title ?? "",
+        draftText: activeChapter?.content ?? "",
+        currentVersionNumber: activeChapter?.current_version_number ?? null,
+      });
+
+      setPendingCloudDraftSnapshot(recovery?.canRestore ? data : null);
+      setPendingCloudDraftRecoveryState(recovery?.canRestore ? recovery.state : null);
+      setCloudDraftSavedAt(data.updated_at);
+      upsertCloudDraftSummary(data);
+    } catch {
+      setPendingCloudDraftSnapshot(null);
+      setPendingCloudDraftRecoveryState(null);
+    }
+  }, [
+    activeChapter?.content,
+    activeChapter?.current_version_number,
+    activeChapter?.id,
+    activeChapter?.title,
+    currentCloudDraftSnapshotId,
+    currentCloudDraftUpdatedAt,
+    isOnline,
+    projectId,
+    removeCloudDraftSummary,
+    upsertCloudDraftSummary,
+  ]);
+
+  const clearCurrentCloudDraft = useCallback(async () => {
+    const targetDraftSnapshotId =
+      currentCloudDraftSnapshotId ?? pendingCloudDraftSnapshot?.draft_snapshot_id ?? null;
+    if (!isOnline || !targetDraftSnapshotId) {
+      return;
+    }
+    try {
+      await apiFetchWithAuth<void>(
+        `/api/v1/projects/${projectId}/story-engine/cloud-drafts/${targetDraftSnapshotId}`,
+        {
+          method: "DELETE",
+        },
+      );
+    } catch {
+      return;
+    }
+    removeCloudDraftSummary(targetDraftSnapshotId);
+    setPendingCloudDraftSnapshot(null);
+    setPendingCloudDraftRecoveryState(null);
+    setCloudDraftSavedAt(null);
+    setCloudDraftRecoveredAt(null);
+  }, [
+    currentCloudDraftSnapshotId,
+    isOnline,
+    pendingCloudDraftSnapshot?.draft_snapshot_id,
+    projectId,
+    removeCloudDraftSummary,
+  ]);
+
   const confirmLeaveDirtyDraft = useCallback(
     (nextLabel: string): boolean => {
       if (!draftDirty) {
@@ -1262,6 +1726,23 @@ export default function StoryRoomPage() {
       );
     },
     [draftDirty],
+  );
+
+  const openPlaybackTarget = useCallback(
+    (stage: StoryRoomStageKey, targetChapterNumber: number | null = null) => {
+      if (
+        targetChapterNumber !== null &&
+        targetChapterNumber !== chapterNumber &&
+        !confirmLeaveDirtyDraft(`第 ${targetChapterNumber} 章`)
+      ) {
+        return;
+      }
+      if (targetChapterNumber !== null) {
+        setChapterNumber(targetChapterNumber);
+      }
+      openStage(stage);
+    },
+    [chapterNumber, confirmLeaveDirtyDraft, openStage],
   );
 
   const openNextChapterDraft = useCallback(
@@ -1298,6 +1779,9 @@ export default function StoryRoomPage() {
       setPendingLocalDraftSnapshot(null);
       setPendingLocalDraftRecoveryState(null);
       setLocalDraftRecoveredAt(null);
+      setPendingCloudDraftSnapshot(null);
+      setPendingCloudDraftRecoveryState(null);
+      setCloudDraftRecoveredAt(null);
       openStage("draft");
 
       if (candidate.has_existing_content) {
@@ -1577,6 +2061,9 @@ export default function StoryRoomPage() {
     setPendingLocalDraftSnapshot(null);
     setPendingLocalDraftRecoveryState(null);
     setLocalDraftRecoveredAt(null);
+    setPendingCloudDraftSnapshot(null);
+    setPendingCloudDraftRecoveryState(null);
+    setCloudDraftRecoveredAt(null);
     setChapterTitle(value);
     setDraftDirty(true);
   }
@@ -1585,6 +2072,9 @@ export default function StoryRoomPage() {
     setPendingLocalDraftSnapshot(null);
     setPendingLocalDraftRecoveryState(null);
     setLocalDraftRecoveredAt(null);
+    setPendingCloudDraftSnapshot(null);
+    setPendingCloudDraftRecoveryState(null);
+    setCloudDraftRecoveredAt(null);
     setDraftText(value);
     setDraftDirty(true);
   }
@@ -1600,6 +2090,9 @@ export default function StoryRoomPage() {
     setLocalDraftSavedAt(pendingLocalDraftSnapshot.updatedAt);
     setPendingLocalDraftSnapshot(null);
     setPendingLocalDraftRecoveryState(null);
+    setPendingCloudDraftSnapshot(null);
+    setPendingCloudDraftRecoveryState(null);
+    setCloudDraftRecoveredAt(null);
     setSuccess("已恢复本机暂存的正文。");
   }
 
@@ -1617,6 +2110,27 @@ export default function StoryRoomPage() {
 
   function handleDismissLocalDraft() {
     void clearCurrentLocalDraft();
+  }
+
+  function handleRestoreCloudDraft() {
+    if (!pendingCloudDraftSnapshot) {
+      return;
+    }
+    setChapterTitle(pendingCloudDraftSnapshot.chapter_title);
+    setDraftText(pendingCloudDraftSnapshot.draft_text);
+    setDraftDirty(true);
+    setCloudDraftRecoveredAt(pendingCloudDraftSnapshot.updated_at);
+    setCloudDraftSavedAt(pendingCloudDraftSnapshot.updated_at);
+    setPendingCloudDraftSnapshot(null);
+    setPendingCloudDraftRecoveryState(null);
+    setPendingLocalDraftSnapshot(null);
+    setPendingLocalDraftRecoveryState(null);
+    setLocalDraftRecoveredAt(null);
+    setSuccess("已恢复这份续写稿，现在可以直接接着写。");
+  }
+
+  function handleDismissCloudDraft() {
+    void clearCurrentCloudDraft();
   }
 
   function handleOpenRecoverableDraft(draft: DraftStudioRecoverableDraft) {
@@ -1745,6 +2259,22 @@ export default function StoryRoomPage() {
     }
   }, []);
 
+  const loadProjectTaskPlayback = useCallback(async (showError = false) => {
+    try {
+      const playback = await apiFetchWithAuth<TaskPlayback[]>(
+        `/api/v1/projects/${projectId}/task-playback?limit=8&event_limit=5`,
+      );
+      setProjectTaskPlayback(playback);
+      return playback;
+    } catch (requestError) {
+      setProjectTaskPlayback([]);
+      if (showError) {
+        setError(buildUserFriendlyError(requestError));
+      }
+      return [];
+    }
+  }, [projectId]);
+
   const loadProjectEntityTaskState = useCallback(async (showError = false) => {
     try {
       const taskData = await apiFetchWithAuth<TaskState[]>(
@@ -1754,19 +2284,93 @@ export default function StoryRoomPage() {
       setEntityTaskState(latestTask);
       if (!latestTask) {
         setEntityTaskEvents([]);
+        await loadProjectTaskPlayback(showError);
         return null;
       }
       await loadEntityTaskEvents(latestTask.task_id, showError);
+      await loadProjectTaskPlayback(showError);
       return latestTask;
     } catch (requestError) {
       setEntityTaskState(null);
       setEntityTaskEvents([]);
+      setProjectTaskPlayback([]);
       if (showError) {
         setError(buildUserFriendlyError(requestError));
       }
       return null;
     }
-  }, [loadEntityTaskEvents, projectId]);
+  }, [loadEntityTaskEvents, loadProjectTaskPlayback, projectId]);
+
+  const playbackItems = useMemo<ProcessPlaybackItem[]>(() => {
+    const localRuns = workflowRuns.map((run) => {
+      const actionLabel =
+        run.stage === "knowledge"
+          ? "去设定区"
+          : run.stage === "final"
+            ? "去终稿区"
+            : run.stage === "outline"
+              ? "去大纲区"
+              : run.chapterNumber !== null
+                ? `回第 ${run.chapterNumber} 章`
+                : "回正文区";
+
+      return {
+        id: `local:${run.id}`,
+        label: run.label,
+        title: run.title,
+        summary: run.summary,
+        status: run.status,
+        progress: run.progress,
+        updatedAt: run.updatedAt,
+        badges: [
+          "当前页",
+          ...(run.chapterNumber !== null ? [`第 ${run.chapterNumber} 章`] : []),
+        ],
+        steps: run.steps,
+        actionLabel,
+        onAction: () => openPlaybackTarget(run.stage, run.chapterNumber),
+      } satisfies ProcessPlaybackItem;
+    });
+
+    const persistedRuns = projectTaskPlayback.map((task) => {
+      const stage = resolveTaskPlaybackStage(task.task_type);
+      const actionLabel =
+        stage === "knowledge"
+          ? "去设定区"
+          : stage === "final"
+            ? "去终稿区"
+            : stage === "outline"
+              ? "去大纲区"
+              : task.chapter_number !== null
+                ? `看第 ${task.chapter_number} 章`
+                : "去正文区";
+      return {
+        id: `task:${task.task_id}`,
+        label: formatTaskPlaybackLabel(task.task_type),
+        title:
+          task.chapter_number !== null
+            ? `第 ${task.chapter_number} 章 · ${formatTaskPlaybackLabel(task.task_type)}`
+            : formatTaskPlaybackLabel(task.task_type),
+        summary: task.message?.trim() || task.error?.trim() || "最近过程已记录。",
+        status: normalizeTaskStatus(task.status),
+        progress: task.progress,
+        updatedAt: task.updated_at,
+        badges: [
+          "项目记录",
+          ...(task.chapter_number !== null ? [`第 ${task.chapter_number} 章`] : []),
+        ],
+        steps: buildTaskPlaybackSteps(task),
+        actionLabel,
+        onAction: () => openPlaybackTarget(stage, task.chapter_number),
+      } satisfies ProcessPlaybackItem;
+    });
+
+    return [...localRuns, ...persistedRuns]
+      .sort((left, right) => {
+        return new Date(right.updatedAt ?? 0).getTime() - new Date(left.updatedAt ?? 0).getTime();
+      })
+      .slice(0, 6);
+  }, [openPlaybackTarget, projectTaskPlayback, workflowRuns]);
 
   const loadStyleControlState = useCallback(async (showSpinner = true) => {
     if (showSpinner) {
@@ -1881,6 +2485,8 @@ export default function StoryRoomPage() {
   useEffect(() => {
     bootstrapHydratedRef.current = false;
     setActiveStage(null);
+    setWorkflowRuns([]);
+    setProjectTaskPlayback([]);
     void loadWorkspace();
   }, [loadWorkspace, projectId]);
 
@@ -1904,6 +2510,14 @@ export default function StoryRoomPage() {
   useEffect(() => {
     void loadRecoverableLocalDrafts();
   }, [loadRecoverableLocalDrafts]);
+
+  useEffect(() => {
+    if (!isOnline) {
+      setCloudSyncing(false);
+      return;
+    }
+    void loadCloudDrafts();
+  }, [isOnline, loadCloudDrafts]);
 
   useEffect(() => {
     if (!projectStructure) {
@@ -2046,6 +2660,9 @@ export default function StoryRoomPage() {
       setFinalResult(null);
       setStreamStatus(null);
       setLocalDraftRecoveredAt(null);
+      setPendingCloudDraftSnapshot(null);
+      setPendingCloudDraftRecoveryState(null);
+      setCloudDraftRecoveredAt(null);
     }
     hydratedChapterKeyRef.current = chapterKey;
     setDraftDirty(false);
@@ -2093,6 +2710,13 @@ export default function StoryRoomPage() {
     selectedBranchId,
     selectedVolumeId,
   ]);
+
+  useEffect(() => {
+    if (draftDirty) {
+      return;
+    }
+    void loadCurrentCloudDraft();
+  }, [draftDirty, loadCurrentCloudDraft]);
 
   useEffect(() => {
     if (!draftDirty || !currentLocalDraftKey || !projectStructure) {
@@ -2143,6 +2767,84 @@ export default function StoryRoomPage() {
     selectedBranchId,
     selectedVolumeId,
     upsertRecoverableLocalDraft,
+  ]);
+
+  useEffect(() => {
+    if (
+      !draftDirty ||
+      !isOnline ||
+      !projectStructure ||
+      savingDraft ||
+      finalizingAction !== null ||
+      reviewSubmittingActionKey !== null
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        if (!chapterTitle.trim() && !draftText.trim()) {
+          await clearCurrentCloudDraft();
+          return;
+        }
+
+        setCloudSyncing(true);
+        try {
+          const payload: StoryRoomCloudDraftUpsertRequest = {
+            branch_id: selectedBranchId,
+            volume_id: selectedVolumeId,
+            chapter_number: chapterNumber,
+            chapter_title: chapterTitle,
+            draft_text: draftText,
+            outline_id: currentOutline?.outline_id ?? null,
+            source_chapter_id: activeChapter?.id ?? null,
+            source_version_number: activeChapter?.current_version_number ?? null,
+          };
+          const draft = await apiFetchWithAuth<StoryRoomCloudDraft>(
+            `/api/v1/projects/${projectId}/story-engine/cloud-drafts/current`,
+            {
+              method: "PUT",
+              body: JSON.stringify(payload),
+            },
+          );
+          if (cancelled) {
+            return;
+          }
+          upsertCloudDraftSummary(draft);
+          setCloudDraftSavedAt(draft.updated_at);
+        } catch {
+          // 云端续存失败时保留现有页面状态，避免打断当前写作。
+        } finally {
+          if (!cancelled) {
+            setCloudSyncing(false);
+          }
+        }
+      })();
+    }, 1200);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    activeChapter?.current_version_number,
+    activeChapter?.id,
+    chapterNumber,
+    chapterTitle,
+    clearCurrentCloudDraft,
+    currentOutline?.outline_id,
+    draftDirty,
+    draftText,
+    isOnline,
+    finalizingAction,
+    projectId,
+    projectStructure,
+    reviewSubmittingActionKey,
+    savingDraft,
+    selectedBranchId,
+    selectedVolumeId,
+    upsertCloudDraftSummary,
   ]);
 
   useEffect(() => {
@@ -2397,6 +3099,10 @@ export default function StoryRoomPage() {
         },
       );
       setGuardResult(data);
+      const workflowRun = buildWorkflowRunFromTimeline(data.workflow_timeline ?? []);
+      if (workflowRun) {
+        upsertWorkflowRun(workflowRun);
+      }
       if (showSuccess && data.alerts.length === 0) {
         setSuccess("本章暂时没发现明显的人设和设定硬伤。");
       }
@@ -2416,6 +3122,7 @@ export default function StoryRoomPage() {
     projectId,
     recentChapterTexts,
     selectedBranchId,
+    upsertWorkflowRun,
   ]);
 
   useEffect(() => {
@@ -2473,6 +3180,17 @@ export default function StoryRoomPage() {
           }),
         },
         async (event) => {
+          if (event.workflow_event) {
+            registerWorkflowEvent(event.workflow_event);
+          }
+          const workflowTimeline = readWorkflowTimelineMetadata(event.metadata ?? {});
+          if (workflowTimeline.length > 0) {
+            const workflowRun = buildWorkflowRunFromTimeline(workflowTimeline);
+            if (workflowRun) {
+              upsertWorkflowRun(workflowRun);
+            }
+          }
+
           if (event.event === "start") {
             setStreamStatus(event.message ?? "正在整理本章推进节奏...");
             if (event.text) {
@@ -2594,6 +3312,10 @@ export default function StoryRoomPage() {
         },
       );
       setFinalResult(data);
+      const workflowRun = buildWorkflowRunFromTimeline(data.workflow_timeline ?? []);
+      if (workflowRun) {
+        upsertWorkflowRun(workflowRun);
+      }
       setActiveStage("final");
       setPendingStageScroll("final");
       setSuccess(
@@ -3004,6 +3726,7 @@ export default function StoryRoomPage() {
       setDraftText(response.chapter.content);
       setDraftDirty(false);
       await clearCurrentLocalDraft();
+      await clearCurrentCloudDraft();
       setFinalResult(null);
       await Promise.all([
         refreshActiveChapterReviewState(chapter.id, {
@@ -3057,6 +3780,7 @@ export default function StoryRoomPage() {
       setDraftText(response.chapter.content);
       setDraftDirty(false);
       await clearCurrentLocalDraft();
+      await clearCurrentCloudDraft();
       setFinalResult(null);
       await Promise.all([
         refreshActiveChapterReviewState(chapter.id, {
@@ -3114,6 +3838,7 @@ export default function StoryRoomPage() {
         );
         setDraftDirty(false);
         await clearCurrentLocalDraft();
+        await clearCurrentCloudDraft();
         setSuccess(`第 ${chapterNumber} 章已保存，版本和发布状态都会按这版继续跟进。`);
       } else {
         const createdChapter = await apiFetchWithAuth<Chapter>(
@@ -3135,6 +3860,7 @@ export default function StoryRoomPage() {
         setChapters((current) => sortChapters([...current, createdChapter]));
         setDraftDirty(false);
         await clearCurrentLocalDraft();
+        await clearCurrentCloudDraft();
         setSuccess(`第 ${chapterNumber} 章已经存成正式章节，后续修改都会留下版本记录。`);
       }
 
@@ -3186,6 +3912,7 @@ export default function StoryRoomPage() {
           create_version: false,
         }),
       });
+      await clearCurrentCloudDraft();
 
       setChapters((current) =>
         sortChapters([
@@ -3668,6 +4395,7 @@ export default function StoryRoomPage() {
       );
       setEntityTaskState(data.task);
       await loadEntityTaskEvents(data.task.task_id);
+      await loadProjectTaskPlayback();
       setSuccess(`已经开始补${ENTITY_GENERATION_SUCCESS_LABELS[kind]}，结果会挂在右侧。`);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
@@ -3789,7 +4517,7 @@ export default function StoryRoomPage() {
   }
 
   return (
-    <main className="min-h-screen px-4 py-8 md:px-6">
+    <main className="min-h-screen px-4 py-8 pb-40 md:px-6 md:pb-8">
       <div className="mx-auto max-w-7xl space-y-6">
         <section className="rounded-[42px] border border-black/10 bg-white/78 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)] md:p-8">
           <div className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
@@ -3816,26 +4544,34 @@ export default function StoryRoomPage() {
                   <div>
                     <p className="text-xs uppercase tracking-[0.18em] text-copper">下一步</p>
                     <h2 className="mt-2 text-xl font-semibold">{recommendedStageCard.title}</h2>
-                    <p className="mt-2 text-sm leading-7 text-black/58">
+                    <p className="mt-2 hidden text-sm leading-7 text-black/58 md:block">
                       {recommendedStageSummaryMap[recommendedStageCard.key]}
                     </p>
+                    <div className="mt-3 flex flex-wrap gap-2 md:hidden">
+                      <span className="rounded-full border border-copper/20 bg-white px-3 py-1 text-xs text-copper">
+                        当前推荐
+                      </span>
+                      <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
+                        {recommendedStageSummaryMap[recommendedStageCard.key]}
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-3">
+                  <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:flex-wrap">
                     <button
-                      className="rounded-full bg-copper px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                      className="w-full rounded-full bg-copper px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90 sm:w-auto"
                       onClick={handlePrimaryStageAction}
                       type="button"
                     >
                       {primaryStageActionLabelMap[recommendedStageCard.key]}
                     </button>
                     <Link
-                      className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                      className="inline-flex w-full items-center justify-center rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6] sm:w-auto"
                       href={`/dashboard/projects/${projectId}/collaborators`}
                     >
                       协作成员
                     </Link>
                     <Link
-                      className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                      className="inline-flex w-full items-center justify-center rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6] sm:w-auto"
                       href="/dashboard"
                     >
                       返回项目总览
@@ -3843,7 +4579,7 @@ export default function StoryRoomPage() {
                   </div>
                 </div>
 
-                <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="mt-5 hidden gap-3 md:grid md:grid-cols-2 xl:grid-cols-4">
                   {stageCards.map((card, index) => {
                     const isActive = activeStageValue === card.key;
                     const isRecommended = recommendedStage === card.key;
@@ -3870,6 +4606,27 @@ export default function StoryRoomPage() {
                         </div>
                         <p className="mt-3 text-sm font-semibold">{card.title}</p>
                         <p className="mt-2 text-xs text-black/52">{card.status}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-5 flex gap-2 overflow-x-auto pb-1 md:hidden">
+                  {stageCards.map((card) => {
+                    const isActive = activeStageValue === card.key;
+                    return (
+                      <button
+                        key={`mobile-stage-card-${card.key}`}
+                        className={`min-w-[110px] rounded-[18px] border px-3 py-3 text-left transition ${
+                          isActive
+                            ? "border-copper/30 bg-white shadow-[0_12px_24px_rgba(176,112,53,0.1)]"
+                            : "border-black/10 bg-white/80"
+                        }`}
+                        onClick={() => openStage(card.key)}
+                        type="button"
+                      >
+                        <p className="text-sm font-semibold text-black/82">{card.title}</p>
+                        <p className="mt-1 text-[11px] text-black/52">{card.status}</p>
                       </button>
                     );
                   })}
@@ -3941,24 +4698,66 @@ export default function StoryRoomPage() {
                 </div>
               </section>
 
-              <StoryScopeSwitcher
-                branches={projectStructure?.branches ?? []}
-                volumes={projectStructure?.volumes ?? []}
-                selectedBranchId={selectedBranchId}
-                selectedVolumeId={selectedVolumeId}
-                chapterCount={savedChapterCount}
-                pendingChangeCount={storyBiblePendingChanges.length}
-                scopeChapters={scopeChapters}
-                activeChapterNumber={chapterNumber}
-                actionKey={scopeActionKey}
-                onSelectBranchId={handleSelectBranchId}
-                onSelectVolumeId={handleSelectVolumeId}
-                onJumpToChapter={handleJumpToChapter}
-                onCreateBranch={handleCreateBranch}
-                onUpdateBranch={handleUpdateBranch}
-                onCreateVolume={handleCreateVolume}
-                onUpdateVolume={handleUpdateVolume}
-              />
+              <div className="hidden md:block">
+                <StoryScopeSwitcher
+                  branches={projectStructure?.branches ?? []}
+                  volumes={projectStructure?.volumes ?? []}
+                  selectedBranchId={selectedBranchId}
+                  selectedVolumeId={selectedVolumeId}
+                  chapterCount={savedChapterCount}
+                  pendingChangeCount={storyBiblePendingChanges.length}
+                  scopeChapters={scopeChapters}
+                  activeChapterNumber={chapterNumber}
+                  actionKey={scopeActionKey}
+                  onSelectBranchId={handleSelectBranchId}
+                  onSelectVolumeId={handleSelectVolumeId}
+                  onJumpToChapter={handleJumpToChapter}
+                  onCreateBranch={handleCreateBranch}
+                  onUpdateBranch={handleUpdateBranch}
+                  onCreateVolume={handleCreateVolume}
+                  onUpdateVolume={handleUpdateVolume}
+                />
+              </div>
+
+              <details className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5 md:hidden">
+                <summary className="cursor-pointer list-none text-base font-semibold text-black/82">
+                  卷线与章节范围
+                </summary>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+                    {selectedBranchTitle}
+                  </span>
+                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+                    {selectedVolumeTitle}
+                  </span>
+                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+                    已存 {savedChapterCount} 章
+                  </span>
+                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+                    待确认 {storyBiblePendingChanges.length} 条
+                  </span>
+                </div>
+                <div className="mt-4">
+                  <StoryScopeSwitcher
+                    branches={projectStructure?.branches ?? []}
+                    volumes={projectStructure?.volumes ?? []}
+                    selectedBranchId={selectedBranchId}
+                    selectedVolumeId={selectedVolumeId}
+                    chapterCount={savedChapterCount}
+                    pendingChangeCount={storyBiblePendingChanges.length}
+                    scopeChapters={scopeChapters}
+                    activeChapterNumber={chapterNumber}
+                    actionKey={scopeActionKey}
+                    onSelectBranchId={handleSelectBranchId}
+                    onSelectVolumeId={handleSelectVolumeId}
+                    onJumpToChapter={handleJumpToChapter}
+                    onCreateBranch={handleCreateBranch}
+                    onUpdateBranch={handleUpdateBranch}
+                    onCreateVolume={handleCreateVolume}
+                    onUpdateVolume={handleUpdateVolume}
+                  />
+                </div>
+              </details>
             </div>
           </div>
 
@@ -3973,6 +4772,14 @@ export default function StoryRoomPage() {
             </div>
           ) : null}
         </section>
+
+        <ProcessPlaybackPanel
+          title="刚刚发生了什么"
+          subtitle="这里会把正文生成、检查收口和自动补设定收成一条线，方便你快速回看。"
+          items={playbackItems}
+          emptyTitle="最近还没有过程记录"
+          emptyDescription="开始起稿、检查正文或补设定后，这里会自动记下最近几步。"
+        />
 
         {activeStageValue === "outline" ? (
           <section id="story-stage-outline" className="scroll-mt-6 space-y-4">
@@ -4042,6 +4849,12 @@ export default function StoryRoomPage() {
               localDraftRecoveredAt={localDraftRecoveredAt}
               pendingLocalDraftUpdatedAt={pendingLocalDraftSnapshot?.updatedAt ?? null}
               pendingLocalDraftRecoveryState={pendingLocalDraftRecoveryState}
+              cloudDraftSavedAt={cloudDraftSavedAt}
+              cloudDraftRecoveredAt={cloudDraftRecoveredAt}
+              pendingCloudDraftUpdatedAt={pendingCloudDraftSnapshot?.updated_at ?? null}
+              pendingCloudDraftRecoveryState={pendingCloudDraftRecoveryState}
+              cloudSyncing={cloudSyncing}
+              cloudSyncEnabled={isOnline}
               recoverableDrafts={recoverableDraftCards}
               editorRef={editorRef}
               onChapterNumberChange={handleChapterNumberChange}
@@ -4064,12 +4877,14 @@ export default function StoryRoomPage() {
               onOpenRecoverableDraft={handleOpenRecoverableDraft}
               onRestoreLocalDraft={handleRestoreLocalDraft}
               onDismissLocalDraft={handleDismissLocalDraft}
+              onRestoreCloudDraft={handleRestoreCloudDraft}
+              onDismissCloudDraft={handleDismissCloudDraft}
             />
 
             <section
               ref={reviewPanelRef}
               id="story-stage-review-tools"
-              className="scroll-mt-6 space-y-4"
+              className="scroll-mt-6 hidden space-y-4 md:block"
             >
               <div className="flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-4 py-3 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
                 <div className="flex flex-wrap items-center gap-3">
@@ -4111,13 +4926,53 @@ export default function StoryRoomPage() {
               />
             </section>
 
+            <details className="rounded-[32px] border border-black/10 bg-white/80 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)] md:hidden">
+              <summary className="cursor-pointer list-none text-lg font-semibold">
+                精修台
+              </summary>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                  版本 {chapterVersions.length}
+                </span>
+                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                  批注 {reviewWorkspace?.open_comment_count ?? 0}
+                </span>
+                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                  确认点 {reviewWorkspace?.pending_checkpoint_count ?? 0}
+                </span>
+              </div>
+              <div className="mt-4">
+                <ChapterReviewPanel
+                  activeChapter={activeChapter}
+                  draftText={draftText}
+                  draftDirty={draftDirty}
+                  reviewWorkspace={reviewWorkspace}
+                  chapterVersions={chapterVersions}
+                  loading={loadingChapterReview}
+                  submittingActionKey={reviewSubmittingActionKey}
+                  editorRef={editorRef}
+                  onCreateComment={handleCreateReviewComment}
+                  onUpdateComment={handleUpdateReviewComment}
+                  onDeleteComment={handleDeleteReviewComment}
+                  onCreateCheckpoint={handleCreateCheckpoint}
+                  onUpdateCheckpoint={handleUpdateCheckpoint}
+                  onCreateDecision={handleCreateReviewDecision}
+                  onRollback={handleRollbackVersion}
+                  onRewriteSelection={handleRewriteSelection}
+                />
+              </div>
+            </details>
+
             <details className="rounded-[32px] border border-black/10 bg-white/80 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
               <summary className="cursor-pointer list-none text-lg font-semibold">
                 文风与写法控制
               </summary>
               <div className="mt-5">
                 <StyleControlPanel
+                  mode="story-room"
                   chapterSample={styleSample}
+                  secondaryActionHref={`/dashboard/preferences?projectId=${projectId}`}
+                  secondaryActionLabel="去风格中心细调"
                   preferenceProfile={preferenceProfile}
                   styleTemplates={styleTemplates}
                   loading={loadingStyleControl}
@@ -4280,6 +5135,39 @@ export default function StoryRoomPage() {
           </section>
         ) : null}
 
+      </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-black/10 bg-white/92 shadow-[0_-12px_40px_rgba(16,20,23,0.08)] backdrop-blur md:hidden">
+        <div className="mx-auto max-w-7xl px-4 pb-[calc(env(safe-area-inset-bottom)+12px)] pt-3">
+          <button
+            className="w-full rounded-2xl bg-copper px-4 py-3 text-sm font-semibold text-white"
+            onClick={handlePrimaryStageAction}
+            type="button"
+          >
+            {primaryStageActionLabelMap[recommendedStageCard.key]}
+          </button>
+
+          <div className="mt-3 grid grid-cols-4 gap-2">
+            {stageCards.map((card) => {
+              const isActive = activeStageValue === card.key;
+              return (
+                <button
+                  key={`mobile-dock-${card.key}`}
+                  className={`rounded-2xl border px-2 py-2 text-center transition ${
+                    isActive
+                      ? "border-copper/30 bg-[#fbf3e8] text-copper"
+                      : "border-black/10 bg-white text-black/62"
+                  }`}
+                  onClick={() => openStage(card.key)}
+                  type="button"
+                >
+                  <p className="text-xs font-semibold">{card.title}</p>
+                  <p className="mt-1 text-[10px] leading-4 opacity-80">{card.status}</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </main>
   );

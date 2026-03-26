@@ -45,7 +45,7 @@ Primary page sources:
 | --- | --- | --- | --- |
 | `/dashboard` | `GET /dashboard/overview`, `POST /projects`, `GET /projects/{id}/export` | `dashboard.py`, `projects.py` | `dashboard_service`, `project_service`, `export_service` |
 | `/dashboard/preferences` | `GET/PATCH /profile/preferences`, `GET /profile/style-templates`, `POST /profile/style-templates/{key}/apply`, `DELETE /profile/style-templates/active` | `profile.py` | `preference_service` |
-| `/dashboard/projects/[projectId]/story-room` | Story Engine workspace, import templates, bulk import, outline stress test, realtime guard, chapter stream, final optimize, knowledge CRUD, search, project structure, chapter list/create/patch | `story_engine.py`, `projects.py`, `chapters.py` | `story_engine_workflow_service`, `story_engine_kb_service`, `project_service`, `chapter_service` |
+| `/dashboard/projects/[projectId]/story-room` | Story Engine workspace, import templates, bulk import, outline stress test, realtime guard, chapter stream, final optimize, cloud drafts, project task playback, knowledge CRUD, search, project structure, chapter list/create/patch | `story_engine.py`, `tasks.py`, `projects.py`, `chapters.py` | `story_engine_workflow_service`, `story_engine_cloud_draft_service`, `task_service`, `story_engine_kb_service`, `project_service`, `chapter_service` |
 | `/dashboard/projects/[projectId]/chapters` | `GET /projects/{id}/structure`, `GET /projects/{id}/chapters`, `POST /projects/{id}/chapters`, volume and branch create/update routes, project export | `projects.py`, `chapters.py` | `project_service`, `chapter_service`, `export_service` |
 | `/dashboard/projects/[projectId]/bible` | `GET/PUT /projects/{id}/bible`, `GET /projects/{id}/canon-snapshot`, `GET /projects/{id}/bible/versions`, `GET /projects/{id}/bible/pending-changes`, branch item upsert/remove | `projects.py` | `project_service`, `story_bible_version_service`, `canon.service` |
 | `/dashboard/projects/[projectId]/quality` | `GET /dashboard/projects/{id}/quality-trend` | `dashboard.py` | `dashboard_service` |
@@ -68,6 +68,9 @@ Backend:
 Meaning:
 - dashboard is a summary aggregator, not a raw project list page
 - project creation is minimal and relies on backend default structure creation
+- `GET /api/v1/dashboard/overview` 现在除了基础总量，还会返回 `activity_snapshot / quality_snapshot / task_health / pipeline_snapshot / genre_distribution / focus_queue`
+- dashboard 前端已经开始把“当前最该处理什么”作为主视图之一，而不只是平铺项目列表
+- dashboard 里的“最近发生了什么”目前主要消费 `overview.recent_tasks`，用于快速定位哪本书刚跑完、还在处理中，或者卡在了哪一步
 
 ### Preferences
 
@@ -84,6 +87,9 @@ Backend:
 Meaning:
 - profile preferences are both explicit settings and a view over learned style signals
 - style templates are separate from learning snapshots
+- `/dashboard/preferences` 现在是独立风格中心，不再只是跳转占位页
+- 页面会把长期写法、底稿模板和一段本地保存的风格样文放在同一处收口
+- 该页面支持通过 `projectId` 查询参数回跳到当前 `story-room`
 
 ### Project Structure and Chapters Workspace
 
@@ -117,6 +123,11 @@ Backend:
 - `POST /api/v1/projects/{project_id}/story-engine/workflows/chapter-stream`
 - `POST /api/v1/projects/{project_id}/story-engine/workflows/final-optimize`
 - `GET /api/v1/projects/{project_id}/story-engine/search`
+- `GET /api/v1/projects/{project_id}/story-engine/cloud-drafts`
+- `GET /api/v1/projects/{project_id}/story-engine/cloud-drafts/{draft_snapshot_id}`
+- `PUT /api/v1/projects/{project_id}/story-engine/cloud-drafts/current`
+- `DELETE /api/v1/projects/{project_id}/story-engine/cloud-drafts/{draft_snapshot_id}`
+- `GET /api/v1/projects/{project_id}/task-playback`
 - Story Engine entity CRUD routes
 - `GET /api/v1/projects/{project_id}/structure`
 - `GET /api/v1/projects/{project_id}/chapters`
@@ -130,6 +141,8 @@ Meaning:
 - workspace 返回里已经补入 `knowledge_provenance`，后台可以按实体维度给出来源章节、关联设定和最近变更摘要，前台暂时仍保持黑盒
 - `realtime-guard` 与 `final-optimize` 现在都会返回 `workflow_timeline`
 - `chapter-stream` 的每条 NDJSON 事件现在都会带 `workflow_event`，终止事件会补齐完整 `workflow_timeline`
+- `story-room` 现在同时消费“本机保稿 + 云端续写草稿”两层写作保护；正式章节保存、回滚、片段改写后，前台会主动清理当前章的云端续写稿
+- `story-room` 现在还会把“当前页工作流时间线 + 项目任务回放”合并展示为写手可读的最近过程，但章节工作流是否持久化到任务系统仍是下一步 `E2-01`
 
 ### Story Bible Workspace
 
