@@ -39,6 +39,7 @@ from services.project_service import (
     PROJECT_PERMISSION_EDIT,
     STORY_BIBLE_PUBLIC_SECTION_KEYS,
     build_public_story_bible_sections,
+    canonicalize_story_bible_branch_payload,
     delete_story_bible_branch_item,
     get_owned_project,
     get_project_branch_story_bible,
@@ -170,13 +171,24 @@ async def rollback_story_bible(
         project.id,
         branch_id,
     )
+    resolution = await resolve_story_bible_resolution(
+        session,
+        project,
+        branch_id=branch_id,
+    )
     current_snapshot = (
-        deepcopy(branch_story_bible.payload)
+        canonicalize_story_bible_branch_payload(
+            resolution.base_sections,
+            deepcopy(branch_story_bible.payload),
+        )
         if branch_story_bible is not None and isinstance(branch_story_bible.payload, dict)
         else {}
     )
     target_snapshot = (
-        deepcopy(target_version.snapshot)
+        canonicalize_story_bible_branch_payload(
+            resolution.base_sections,
+            deepcopy(target_version.snapshot),
+        )
         if isinstance(target_version.snapshot, dict)
         else {}
     )

@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { FormEvent, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   formatAiTaste,
@@ -18,26 +18,100 @@ import { clearAuthSession, loadAuthSession } from "@/lib/auth";
 import type {
   DashboardOverview,
   DashboardProjectQualityTrend,
+  DashboardProjectSummary,
+  DashboardRecentTask,
   Project,
   User,
 } from "@/types/api";
 
+function buildStoryRoomHref(
+  projectId: string,
+  options?: {
+    stage?: "outline" | "draft" | "final" | "knowledge";
+    chapterNumber?: number | null;
+    tool?: "review" | null;
+  },
+): string {
+  const params = new URLSearchParams();
+  if (options?.stage) {
+    params.set("stage", options.stage);
+  }
+  if (typeof options?.chapterNumber === "number" && Number.isFinite(options.chapterNumber)) {
+    params.set("chapter", String(options.chapterNumber));
+  }
+  if (options?.tool) {
+    params.set("tool", options.tool);
+  }
+  const query = params.toString();
+  return `/dashboard/projects/${projectId}/story-room${query ? `?${query}` : ""}`;
+}
+
+function buildCollaboratorsHref(projectId: string): string {
+  return `/dashboard/projects/${projectId}/collaborators`;
+}
+
+type ProjectPrimaryAction = {
+  label: string;
+  href: string;
+  status: string;
+};
+
+function buildProjectPrimaryAction(project: DashboardProjectSummary): ProjectPrimaryAction {
+  if (project.chapter_count > 0) {
+    return {
+      label: "继续写作",
+      href: buildStoryRoomHref(project.project_id, {
+        stage: "draft",
+      }),
+      status: project.review_ready_chapters > 0 ? "下一步：继续写正文或收口" : "下一步：继续写正文",
+    };
+  }
+
+  if (project.has_novel_blueprint) {
+    return {
+      label: "开始第一章",
+      href: buildStoryRoomHref(project.project_id, {
+        stage: "draft",
+      }),
+      status: "下一步：按章纲开始正文",
+    };
+  }
+
+  return {
+    label: "先定三级大纲",
+    href: buildStoryRoomHref(project.project_id, {
+      stage: "outline",
+    }),
+    status: project.has_bootstrap_profile
+      ? "下一步：先把三级大纲定下来"
+      : "下一步：先补基础信息，再把三级大纲定下来",
+  };
+}
+
 function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
+  const primaryRiskChapter =
+    trend.chapter_points.find((point) =>
+      trend.risk_chapter_numbers.includes(point.chapter_number),
+    ) ?? trend.weakest_chapter;
+  const weakestChapter =
+    trend.weakest_chapter &&
+    trend.weakest_chapter.chapter_number !== primaryRiskChapter?.chapter_number
+      ? trend.weakest_chapter
+      : null;
+
   return (
     <article className="rounded-3xl border border-black/10 bg-white/80 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.05)]">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h3 className="text-lg font-semibold">{trend.title}</h3>
-          <p className="mt-2 text-sm text-black/60">
-            最近更新 {formatDateTime(trend.updated_at)}
-          </p>
-          <p className="mt-1 text-sm text-black/50">
-            已评估 {trend.evaluated_chapter_count}/{trend.chapter_count} 章
-          </p>
-          <p className="mt-1 text-sm text-black/50">
-            当前身份：{trend.access_role}
-            {trend.owner_email ? ` · ${trend.owner_email}` : ""}
-          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+              更新 {formatDateTime(trend.updated_at)}
+            </span>
+            <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+              已评估 {trend.evaluated_chapter_count}/{trend.chapter_count} 章
+            </span>
+          </div>
         </div>
         <span
           className={`rounded-full border px-3 py-1 text-xs ${trendDirectionClassName(trend.trend_direction)}`}
@@ -73,6 +147,9 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
         <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
           协作者 {trend.collaborator_count}
         </span>
+        <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+          {trend.access_role}
+        </span>
         {trend.chapter_points.map((point) => (
           <span
             key={point.chapter_id}
@@ -83,46 +160,68 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
         ))}
       </div>
 
-      {trend.risk_chapter_numbers.length > 0 ? (
-        <p className="mt-4 text-sm leading-7 text-amber-700">
-          重点回看章节：{trend.risk_chapter_numbers.map((value) => `Ch${value}`).join(" / ")}
-        </p>
-      ) : (
-        <p className="mt-4 text-sm leading-7 text-emerald-700">
-          最近趋势窗口内没有高风险章节。
-        </p>
-      )}
+      <div className="mt-4">
+        {trend.risk_chapter_numbers.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {trend.chapter_points
+              .filter((point) => trend.risk_chapter_numbers.includes(point.chapter_number))
+              .slice(0, 3)
+              .map((point) => (
+                <Link
+                  key={point.chapter_id}
+                  className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs text-amber-700 transition hover:bg-amber-100"
+                  href={buildStoryRoomHref(trend.project_id, {
+                    stage: "draft",
+                    chapterNumber: point.chapter_number,
+                    tool: "review",
+                  })}
+                >
+                  回看 Ch{point.chapter_number}
+                </Link>
+              ))}
+          </div>
+        ) : (
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs text-emerald-700">
+            最近没有高风险章节
+          </span>
+        )}
+      </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
         <Link
           className="rounded-2xl border border-black/10 bg-[#f6f0e6] px-3 py-2 text-sm font-medium"
-          href={`/dashboard/projects/${trend.project_id}/story-room`}
+          href={buildStoryRoomHref(trend.project_id)}
         >
           进入故事工作台
         </Link>
+        {primaryRiskChapter ? (
+          <Link
+            className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 transition hover:bg-amber-100"
+            href={buildStoryRoomHref(trend.project_id, {
+              stage: "draft",
+              chapterNumber: primaryRiskChapter.chapter_number,
+              tool: "review",
+            })}
+          >
+            回看 Ch{primaryRiskChapter.chapter_number}
+          </Link>
+        ) : null}
+        {weakestChapter ? (
+          <Link
+            className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm font-medium transition hover:bg-[#f6f0e6]"
+            href={buildStoryRoomHref(trend.project_id, {
+              stage: "draft",
+              chapterNumber: weakestChapter.chapter_number,
+              tool: "review",
+            })}
+          >
+            看最低分 Ch{weakestChapter.chapter_number}
+          </Link>
+        ) : null}
       </div>
     </article>
   );
 }
-
-const preferenceValueLabels: Record<string, string> = {
-  precise: "精确克制",
-  lyrical: "抒情流动",
-  sharp: "冷峻锋利",
-  close_third: "贴身第三人称",
-  omniscient: "多点俯瞰",
-  first_person: "第一人称",
-  fast: "快推进",
-  balanced: "平衡",
-  slow_burn: "慢燃积压",
-  dialogue_forward: "对话驱动",
-  narration_heavy: "叙述主导",
-  restrained: "克制蓄压",
-  high_tension: "高压逼近",
-  minimal: "稀疏点染",
-  focused: "重点锚点",
-  immersive: "沉浸细节",
-};
 
 const recentTaskTypeLabels: Record<string, string> = {
   chapter_generation: "续写下一章",
@@ -149,6 +248,40 @@ function formatRecentTaskStatus(status: string): string {
   return recentTaskStatusLabels[status] ?? status;
 }
 
+function buildRecentTaskHref(task: DashboardRecentTask): string | null {
+  if (!task.project_id) {
+    return null;
+  }
+
+  if (task.task_type.startsWith("entity_generation.")) {
+    return buildStoryRoomHref(task.project_id, {
+      stage: "knowledge",
+    });
+  }
+
+  return buildStoryRoomHref(task.project_id, {
+    stage: "draft",
+    chapterNumber: task.chapter_number,
+    tool:
+      task.task_type === "chapter_generation" && task.chapter_number !== null
+        ? "review"
+        : null,
+  });
+}
+
+function buildRecentTaskActionLabel(task: DashboardRecentTask): string {
+  if (task.task_type.startsWith("entity_generation.")) {
+    return "去设定区";
+  }
+  if (task.chapter_number !== null) {
+    return `处理 Ch${task.chapter_number}`;
+  }
+  if (task.task_type === "chapter_generation") {
+    return "去正文区";
+  }
+  return "继续处理";
+}
+
 function normalizePositiveNumber(value: number, fallback: number): number {
   if (!Number.isFinite(value) || value <= 0) {
     return fallback;
@@ -156,12 +289,16 @@ function normalizePositiveNumber(value: number, fallback: number): number {
   return Math.round(value);
 }
 
-export default function DashboardPage() {
+function DashboardPageShell() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const createSectionRef = useRef<HTMLElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [title, setTitle] = useState("");
   const [genre, setGenre] = useState("");
+  const [tone, setTone] = useState("");
   const [targetTotalWords, setTargetTotalWords] = useState(1_000_000);
   const [targetChapterWords, setTargetChapterWords] = useState(3_000);
   const [error, setError] = useState<string | null>(null);
@@ -215,6 +352,7 @@ export default function DashboardPage() {
         body: JSON.stringify({
           title,
           genre: genre || null,
+          tone: tone || null,
           status: "draft",
         }),
       });
@@ -222,6 +360,7 @@ export default function DashboardPage() {
         method: "PUT",
         body: JSON.stringify({
           genre: genre || null,
+          tone: tone || null,
           target_total_words: normalizedTotalWords,
           target_chapter_words: normalizedChapterWords,
           planned_chapter_count: plannedChapterCount,
@@ -229,9 +368,10 @@ export default function DashboardPage() {
       });
       setTitle("");
       setGenre("");
+      setTone("");
       setTargetTotalWords(1_000_000);
       setTargetChapterWords(3_000);
-      router.push(`/dashboard/projects/${createdProject.id}/story-room`);
+      router.push(`/dashboard/projects/${createdProject.id}/story-room?entry=new-book&stage=outline`);
       router.refresh();
     } catch (requestError) {
       setError(
@@ -312,17 +452,69 @@ export default function DashboardPage() {
     }
   }
 
+  const projectSummaries = overview?.project_summaries ?? [];
+  const qualityTrends = overview?.project_quality_trends ?? [];
+  const recentTasks = overview?.recent_tasks ?? [];
+  const recentProjectHighlights = projectSummaries.slice(0, 3);
+  const projectTitleMap = useMemo(
+    () =>
+      Object.fromEntries(
+        (overview?.project_summaries ?? []).map((project) => [project.project_id, project.title]),
+      ),
+    [overview?.project_summaries],
+  );
+  const priorityReviewItems = useMemo(
+    () =>
+      (overview?.project_quality_trends ?? [])
+        .flatMap((trend) =>
+          trend.chapter_points
+            .filter((point) => trend.risk_chapter_numbers.includes(point.chapter_number))
+            .map((point) => ({
+              projectId: trend.project_id,
+              projectTitle: trend.title,
+              chapterNumber: point.chapter_number,
+              overallScore: point.overall_score,
+            })),
+        )
+        .sort((left, right) => {
+          const leftScore = typeof left.overallScore === "number" ? left.overallScore : 99;
+          const rightScore = typeof right.overallScore === "number" ? right.overallScore : 99;
+          return leftScore - rightScore;
+        })
+        .slice(0, 6),
+    [overview?.project_quality_trends],
+  );
+  const isFirstBookFlow = searchParams.get("intent") === "new" || projectSummaries.length === 0;
+  const plannedChapterCount = Math.max(
+    10,
+    Math.ceil(
+      normalizePositiveNumber(targetTotalWords, 1_000_000) /
+        normalizePositiveNumber(targetChapterWords, 3_000),
+    ),
+  );
+
+  useEffect(() => {
+    if (!currentUser || !isFirstBookFlow) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      createSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      titleInputRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [currentUser, isFirstBookFlow]);
+
   if (!currentUser) {
     return (
       <main className="flex min-h-screen items-center justify-center px-6 py-12">
         <div className="max-w-xl rounded-3xl border border-black/10 bg-white/75 p-8 text-center shadow-[0_18px_60px_rgba(16,20,23,0.08)] backdrop-blur">
-          <p className="text-sm uppercase tracking-[0.24em] text-copper">
-            项目页
-          </p>
+          <p className="text-sm uppercase tracking-[0.24em] text-copper">书架</p>
           <h1 className="mt-3 text-3xl font-semibold">尚未登录</h1>
-          <p className="mt-4 text-sm leading-7 text-black/65">
-            登录后就能进入项目页，继续写正文、看终稿对比和自动沉淀设定。
-          </p>
           <div className="mt-6 flex justify-center gap-3">
             <Link
               className="rounded-2xl bg-ink px-4 py-3 text-sm font-medium text-paper"
@@ -342,45 +534,41 @@ export default function DashboardPage() {
     );
   }
 
-  const projectSummaries = overview?.project_summaries ?? [];
-  const qualityTrends = overview?.project_quality_trends ?? [];
-  const recentTasks = overview?.recent_tasks ?? [];
-  const preferenceProfile = overview?.preference_profile ?? null;
-  const recentProjectHighlights = projectSummaries.slice(0, 3);
-  const plannedChapterCount = Math.max(
-    10,
-    Math.ceil(
-      normalizePositiveNumber(targetTotalWords, 1_000_000) /
-        normalizePositiveNumber(targetChapterWords, 3_000),
-    ),
-  );
-
   return (
     <main className="min-h-screen px-6 py-10">
       <div className="mx-auto flex max-w-7xl flex-col gap-8">
-        <section className="rounded-[36px] border border-black/10 bg-white/75 p-8 shadow-[0_18px_60px_rgba(16,20,23,0.08)] backdrop-blur">
-          <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+        <section
+          ref={createSectionRef}
+          className="rounded-[36px] border border-black/10 bg-white/75 p-8 shadow-[0_18px_60px_rgba(16,20,23,0.08)] backdrop-blur"
+        >
+          <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
             <div className="flex flex-col justify-between">
               <div>
-                <p className="text-sm uppercase tracking-[0.24em] text-copper">项目页</p>
-                <h1 className="mt-3 text-4xl font-semibold">先建一本书，再开始第一步</h1>
-                <p className="mt-3 max-w-3xl text-sm leading-7 text-black/65">
-                  当前账号：{currentUser.email}。这页只保留两件事：创建新书，或者继续最近在写的书。
+                <p className="text-sm uppercase tracking-[0.24em] text-copper">创建新书</p>
+                <h1 className="mt-3 text-4xl font-semibold">
+                  {isFirstBookFlow ? "先创建第一本书" : "创建下一本书"}
+                </h1>
+                <p className="mt-4 max-w-xl text-sm leading-7 text-black/62">
+                  设好书名、体量和题材，就直接去定三级大纲。
                 </p>
                 <div className="mt-6 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
+                    {currentUser.email}
+                  </span>
                   <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
                     书名
                   </span>
                   <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                    体量
+                    总字数
                   </span>
                   <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                    类别
-                  </span>
-                  <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                    创建后进入大纲页
+                    三级大纲
                   </span>
                 </div>
+              </div>
+
+              <div className="mt-6 rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4 text-sm text-black/62">
+                创建完成后，直接进入这本书的三级大纲。
               </div>
             </div>
 
@@ -391,9 +579,8 @@ export default function DashboardPage() {
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.18em] text-copper">新建项目</p>
-                  <h2 className="mt-2 text-2xl font-semibold">创建新书</h2>
-                  <p className="mt-2 text-sm leading-7 text-black/60">先定书名、体量和类别。</p>
+                  <p className="text-xs uppercase tracking-[0.18em] text-copper">新书信息</p>
+                  <h2 className="mt-2 text-2xl font-semibold">填完就去定大纲</h2>
                 </div>
                 <button
                   className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium"
@@ -408,6 +595,7 @@ export default function DashboardPage() {
                 <label className="flex flex-col gap-2 text-sm">
                   书名
                   <input
+                    ref={titleInputRef}
                     className="rounded-2xl border border-black/10 bg-white px-4 py-3 outline-none transition focus:border-copper"
                     value={title}
                     onChange={(event) => setTitle(event.target.value)}
@@ -446,18 +634,30 @@ export default function DashboardPage() {
                   </label>
                 </div>
 
-                <label className="flex flex-col gap-2 text-sm">
-                  小说类别
-                  <input
-                    className="rounded-2xl border border-black/10 bg-white px-4 py-3 outline-none transition focus:border-copper"
-                    value={genre}
-                    onChange={(event) => setGenre(event.target.value)}
-                    placeholder="科幻 / 悬疑 / 奇幻..."
-                  />
-                </label>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="flex flex-col gap-2 text-sm">
+                    小说类别
+                    <input
+                      className="rounded-2xl border border-black/10 bg-white px-4 py-3 outline-none transition focus:border-copper"
+                      value={genre}
+                      onChange={(event) => setGenre(event.target.value)}
+                      placeholder="科幻 / 悬疑 / 奇幻..."
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-2 text-sm">
+                    气质
+                    <input
+                      className="rounded-2xl border border-black/10 bg-white px-4 py-3 outline-none transition focus:border-copper"
+                      value={tone}
+                      onChange={(event) => setTone(event.target.value)}
+                      placeholder="热血 / 冷峻 / 轻快..."
+                    />
+                  </label>
+                </div>
 
                 <div className="rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-black/62">
-                  预计约 {plannedChapterCount} 章。创建后直接进入“输入想法 / 上传大纲”的页面。
+                  预计约 {plannedChapterCount} 章
                 </div>
               </div>
 
@@ -466,7 +666,7 @@ export default function DashboardPage() {
                 type="submit"
                 disabled={creating}
               >
-                {creating ? "创建中..." : "确认并进入第一步"}
+                {creating ? "创建中..." : "创建新书并去定大纲"}
               </button>
             </form>
           </div>
@@ -490,9 +690,6 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between gap-4">
             <div>
               <h2 className="text-xl font-semibold">继续写这几本</h2>
-              <p className="mt-2 text-sm leading-7 text-black/65">
-                如果你不是来新建项目，直接从这里回到最近在写的书会更快。
-              </p>
             </div>
             <button
               className="rounded-2xl border border-black/10 bg-white px-4 py-2 text-sm"
@@ -508,61 +705,73 @@ export default function DashboardPage() {
           ) : null}
 
           {!loading && recentProjectHighlights.length === 0 ? (
-            <p className="mt-6 text-sm leading-7 text-black/60">
-              你现在还没有项目，先在上面创建一本书就能开始。
-            </p>
+            <p className="mt-6 text-sm text-black/60">创建第一本书后，这里会显示最近项目。</p>
           ) : null}
 
           <div className="mt-6 grid gap-4 xl:grid-cols-3">
-            {recentProjectHighlights.map((project) => (
-              <article
-                key={`highlight-${project.project_id}`}
-                className="rounded-3xl border border-black/10 bg-[#fbfaf5] p-5"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-lg font-semibold">{project.title}</h3>
-                    <p className="mt-2 text-sm text-black/62">
-                      {project.genre ?? "未设置题材"}
-                      {" · "}
-                      {project.status}
-                    </p>
-                    <p className="mt-2 text-sm text-black/50">
-                      最近更新 {formatDateTime(project.updated_at)}
-                    </p>
-                  </div>
-                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
-                    章节 {project.chapter_count}
-                  </span>
-                </div>
-
-                <div className="mt-4 flex flex-wrap gap-2 text-xs text-black/55">
-                  <span className="rounded-full border border-black/10 bg-white px-3 py-1">
-                    体量 {project.word_count} 字
-                  </span>
-                  <span className="rounded-full border border-black/10 bg-white px-3 py-1">
-                    可收口 {project.review_ready_chapters} 章
-                  </span>
-                </div>
-
-                <Link
-                  className="mt-5 inline-flex rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium transition hover:bg-[#f6f0e6]"
-                  href={`/dashboard/projects/${project.project_id}/story-room`}
+            {recentProjectHighlights.map((project) => {
+              const primaryAction = buildProjectPrimaryAction(project);
+              return (
+                <article
+                  key={`highlight-${project.project_id}`}
+                  className="rounded-3xl border border-black/10 bg-[#fbfaf5] p-5"
                 >
-                  继续写这本书
-                </Link>
-                {project.access_role === "owner" ? (
-                  <button
-                    className="mt-3 inline-flex rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
-                    type="button"
-                    onClick={() => void handleDeleteProject(project.project_id, project.title)}
-                    disabled={deletingProjectId === project.project_id}
-                  >
-                    {deletingProjectId === project.project_id ? "删除中..." : "删除这本书"}
-                  </button>
-                ) : null}
-              </article>
-            ))}
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold">{project.title}</h3>
+                      <p className="mt-2 text-sm text-black/62">
+                        {project.genre ?? "未设置题材"}
+                        {" · "}
+                        {project.status}
+                      </p>
+                      <p className="mt-2 text-sm text-black/50">
+                        最近更新 {formatDateTime(project.updated_at)}
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
+                      章节 {project.chapter_count}
+                    </span>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2 text-xs text-black/55">
+                    <span className="rounded-full border border-black/10 bg-white px-3 py-1">
+                      {primaryAction.status}
+                    </span>
+                    <span className="rounded-full border border-black/10 bg-white px-3 py-1">
+                      体量 {project.word_count} 字
+                    </span>
+                    <span className="rounded-full border border-black/10 bg-white px-3 py-1">
+                      协作 {project.collaborator_count} 人
+                    </span>
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap gap-3">
+                    <Link
+                      className="inline-flex rounded-2xl border border-black/10 bg-[#f6f0e6] px-4 py-3 text-sm font-medium transition hover:bg-[#efe4d4]"
+                      href={primaryAction.href}
+                    >
+                      {primaryAction.label}
+                    </Link>
+                    <Link
+                      className="inline-flex rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm font-medium transition hover:bg-[#f6f0e6]"
+                      href={buildCollaboratorsHref(project.project_id)}
+                    >
+                      协作成员
+                    </Link>
+                  </div>
+                  {project.access_role === "owner" ? (
+                    <button
+                      className="mt-3 inline-flex rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      type="button"
+                      onClick={() => void handleDeleteProject(project.project_id, project.title)}
+                      disabled={deletingProjectId === project.project_id}
+                    >
+                      {deletingProjectId === project.project_id ? "删除中..." : "删除这本书"}
+                    </button>
+                  ) : null}
+                </article>
+              );
+            })}
           </div>
         </section>
 
@@ -570,152 +779,35 @@ export default function DashboardPage() {
           <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-4">
             <div>
               <p className="text-xs uppercase tracking-[0.18em] text-copper">进阶看板</p>
-              <h2 className="mt-2 text-xl font-semibold">走势、任务和项目矩阵都收在这里</h2>
-              <p className="mt-2 text-sm leading-7 text-black/60">
-                平时直接创建项目或继续写最近的书就够了。只有你想看整体进度时，再展开这块。
-              </p>
+              <h2 className="mt-2 text-xl font-semibold">更多状态</h2>
             </div>
             <span className="rounded-full border border-black/10 bg-white px-4 py-2 text-sm text-black/65">
-              点此展开
+              展开
             </span>
           </summary>
 
           <div className="mt-6 space-y-6">
-            <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+            <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
                 <p className="text-sm text-black/55">项目数</p>
                 <p className="mt-3 text-3xl font-semibold">{overview?.total_projects ?? 0}</p>
               </article>
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">章节数</p>
-                <p className="mt-3 text-3xl font-semibold">{overview?.total_chapters ?? 0}</p>
+                <p className="text-sm text-black/55">总字数</p>
+                <p className="mt-3 text-3xl font-semibold">{overview?.total_words ?? 0}</p>
               </article>
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">总词数</p>
-                <p className="mt-3 text-3xl font-semibold">{overview?.total_words ?? 0}</p>
+                <p className="text-sm text-black/55">待收口</p>
+                <p className="mt-3 text-3xl font-semibold">{overview?.review_ready_chapters ?? 0}</p>
               </article>
               <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
                 <p className="text-sm text-black/55">活跃任务</p>
                 <p className="mt-3 text-3xl font-semibold">{overview?.active_task_count ?? 0}</p>
               </article>
-              <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">待收口章节</p>
-                <p className="mt-3 text-3xl font-semibold">{overview?.review_ready_chapters ?? 0}</p>
-              </article>
-              <article className="rounded-3xl border border-black/10 bg-white/70 p-5 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                <p className="text-sm text-black/55">平均机械感</p>
-                <p className="mt-3 text-3xl font-semibold">
-                  {formatAiTaste(overview?.average_ai_taste_score ?? null)}
-                </p>
-              </article>
-            </section>
-
-            <section className="rounded-3xl border border-black/10 bg-white/75 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <h2 className="text-xl font-semibold">最近写作走势</h2>
-                  <p className="mt-2 text-sm leading-7 text-black/65">
-                    这里按章节顺序展示最近的写作走势，方便你快速判断哪本书在抬升、哪本书需要回头补修。
-                  </p>
-                </div>
-                <button
-                  className="rounded-2xl border border-black/10 bg-white px-4 py-2 text-sm"
-                  type="button"
-                  onClick={() => void fetchOverview()}
-                >
-                  刷新趋势
-                </button>
-              </div>
-
-              {loading ? (
-                <p className="mt-6 text-sm text-black/60">加载趋势视图中...</p>
-              ) : null}
-
-              {!loading && qualityTrends.length === 0 ? (
-                <p className="mt-6 text-sm leading-7 text-black/60">
-                  还没有可展示的趋势。先创建章节并完成一次评估或生成，项目评分轨迹才会形成。
-                </p>
-              ) : null}
-
-              <div className="mt-6 grid gap-4 xl:grid-cols-2">
-                {qualityTrends.map((trend) => (
-                  <QualityTrendCard key={trend.project_id} trend={trend} />
-                ))}
-              </div>
             </section>
 
             <section className="grid gap-6 xl:grid-cols-[360px_1fr]">
               <div className="grid gap-6">
-                <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <h2 className="text-xl font-semibold">系统记住的写法</h2>
-                      <p className="mt-2 text-sm leading-7 text-black/65">
-                        这里显示系统已经学到的写作倾向。它会自动影响后续起稿和优化，你不用再单独切出去配置。
-                      </p>
-                    </div>
-                  </div>
-
-                  {!preferenceProfile ? (
-                    <p className="mt-4 text-sm text-black/60">
-                      正在整理你的写作习惯...
-                    </p>
-                  ) : (
-                    <>
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs text-emerald-700">
-                          完成度 {(preferenceProfile.completion_score * 100).toFixed(0)}%
-                        </span>
-                        {preferenceProfile.active_template ? (
-                          <span className="rounded-full border border-copper/20 bg-[#f6ede3] px-3 py-1 text-xs text-copper">
-                            风格底稿 {preferenceProfile.active_template.name}
-                          </span>
-                        ) : null}
-                        <span className="rounded-full border border-copper/20 bg-[#f6ede3] px-3 py-1 text-xs text-copper">
-                          已观察 {preferenceProfile.learning_snapshot.observation_count} 次
-                        </span>
-                        <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/65">
-                          文风 {preferenceValueLabels[preferenceProfile.prose_style] ?? preferenceProfile.prose_style}
-                        </span>
-                        <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/65">
-                          视角 {preferenceValueLabels[preferenceProfile.narrative_mode] ?? preferenceProfile.narrative_mode}
-                        </span>
-                        <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/65">
-                          节奏 {preferenceValueLabels[preferenceProfile.pacing_preference] ?? preferenceProfile.pacing_preference}
-                        </span>
-                      </div>
-
-                      {preferenceProfile.favored_elements.length > 0 ? (
-                        <p className="mt-4 text-sm leading-7 text-black/70">
-                          偏爱元素：{preferenceProfile.favored_elements.join(" / ")}
-                        </p>
-                      ) : null}
-
-                      {preferenceProfile.learning_snapshot.summary ? (
-                        <p className="mt-3 text-sm leading-7 text-black/70">
-                          当前判断：{preferenceProfile.learning_snapshot.summary}
-                        </p>
-                      ) : null}
-
-                      {preferenceProfile.active_template ? (
-                        <p className="mt-3 text-sm leading-7 text-black/70">
-                          当前风格底稿：{preferenceProfile.active_template.name} / {preferenceProfile.active_template.tagline}
-                        </p>
-                      ) : null}
-
-                      {preferenceProfile.custom_style_notes ? (
-                        <p className="mt-3 text-sm leading-7 text-black/70">
-                          备注：{preferenceProfile.custom_style_notes}
-                        </p>
-                      ) : (
-                        <p className="mt-3 text-sm leading-7 text-black/55">
-                          还没有额外风格备注，系统会先按当前已观察到的写法来收束文风。
-                        </p>
-                      )}
-                    </>
-                  )}
-                </section>
-
                 <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
                   <div className="flex items-center justify-between gap-3">
                     <h2 className="text-xl font-semibold">最近任务</h2>
@@ -733,173 +825,218 @@ export default function DashboardPage() {
                   ) : null}
 
                   {!loading && recentTasks.length === 0 ? (
-                    <p className="mt-4 text-sm leading-7 text-black/60">
-                      暂时没有任务记录。创建章节并发起生成后，这里会显示最近的运行状态。
-                    </p>
+                    <p className="mt-4 text-sm text-black/60">暂时没有任务记录。</p>
                   ) : null}
 
                   <div className="mt-4 grid gap-3">
-                    {recentTasks.map((task) => (
+                    {recentTasks.map((task) => {
+                      const taskHref = buildRecentTaskHref(task);
+                      const projectTitle =
+                        task.project_id ? projectTitleMap[task.project_id] ?? "当前项目" : null;
+
+                      return (
+                        <article
+                          key={task.task_id}
+                          className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-xs uppercase tracking-[0.16em] text-copper">
+                                {formatRecentTaskType(task.task_type)}
+                              </p>
+                              {projectTitle ? (
+                                <p className="mt-2 text-sm font-medium text-black/78">
+                                  {projectTitle}
+                                  {task.chapter_number !== null ? ` · Ch${task.chapter_number}` : ""}
+                                </p>
+                              ) : null}
+                              <p className="mt-2 text-sm text-black/75">
+                                {task.message ?? "暂无说明"}
+                              </p>
+                            </div>
+                            <div className="text-right text-xs text-black/50">
+                              <p>{formatRecentTaskStatus(task.status)}</p>
+                              <p className="mt-1">{task.progress}%</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <span className="text-xs text-black/45">
+                              更新于 {formatDateTime(task.updated_at)}
+                            </span>
+                            {taskHref ? (
+                              <Link
+                                className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs font-medium text-black/72 transition hover:bg-[#f6f0e6]"
+                                href={taskHref}
+                              >
+                                {buildRecentTaskActionLabel(task)}
+                              </Link>
+                            ) : null}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="text-xl font-semibold">优先回看</h2>
+                    <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
+                      {priorityReviewItems.length} 条
+                    </span>
+                  </div>
+
+                  {loading ? (
+                    <p className="mt-4 text-sm text-black/60">整理需要回看的章节...</p>
+                  ) : null}
+
+                  {!loading && priorityReviewItems.length === 0 ? (
+                    <p className="mt-4 text-sm text-black/60">最近没有需要回看的章节。</p>
+                  ) : null}
+
+                  <div className="mt-4 grid gap-3">
+                    {priorityReviewItems.map((item) => (
                       <article
-                        key={task.task_id}
+                        key={`${item.projectId}:${item.chapterNumber}`}
                         className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-4"
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                              {formatRecentTaskType(task.task_type)}
+                            <p className="text-sm font-medium text-black/82">
+                              {item.projectTitle}
+                              {" · "}
+                              Ch{item.chapterNumber}
                             </p>
-                            <p className="mt-2 text-sm leading-7 text-black/75">
-                              {task.message ?? "No task message"}
+                            <p className="mt-2 text-xs text-black/50">
+                              当前评分 {formatScore(item.overallScore)}
                             </p>
                           </div>
-                          <div className="text-right text-xs text-black/50">
-                            <p>{formatRecentTaskStatus(task.status)}</p>
-                            <p className="mt-1">{task.progress}%</p>
-                          </div>
+                          <Link
+                            className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-100"
+                            href={buildStoryRoomHref(item.projectId, {
+                              stage: "draft",
+                              chapterNumber: item.chapterNumber,
+                              tool: "review",
+                            })}
+                          >
+                            去处理
+                          </Link>
                         </div>
-                        <p className="mt-3 text-xs text-black/45">
-                          更新于 {formatDateTime(task.updated_at)}
-                        </p>
                       </article>
                     ))}
                   </div>
                 </section>
               </div>
 
-              <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
+              <section className="rounded-3xl border border-black/10 bg-white/75 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
                 <div className="flex items-center justify-between gap-4">
                   <div>
-                    <h2 className="text-xl font-semibold">项目矩阵</h2>
-                    <p className="mt-2 text-sm leading-7 text-black/65">
-                      项目卡片现在不仅显示基础信息，还显示章节状态、质量均值、风险章节和活跃任务数量。
-                    </p>
+                    <h2 className="text-xl font-semibold">最近写作走势</h2>
                   </div>
                   <button
                     className="rounded-2xl border border-black/10 bg-white px-4 py-2 text-sm"
                     type="button"
                     onClick={() => void fetchOverview()}
                   >
-                    刷新
+                    刷新走势
                   </button>
                 </div>
 
                 {loading ? (
-                  <p className="mt-6 text-sm text-black/60">加载项目概览中...</p>
+                  <p className="mt-6 text-sm text-black/60">加载趋势视图中...</p>
                 ) : null}
 
-                {!loading && projectSummaries.length === 0 ? (
-                  <p className="mt-6 text-sm leading-7 text-black/60">
-                    还没有项目。先创建一个小说项目，工作台会自动开始汇总它的状态。
-                  </p>
+                {!loading && qualityTrends.length === 0 ? (
+                  <p className="mt-6 text-sm text-black/60">还没有趋势数据。</p>
                 ) : null}
 
-                <div className="mt-6 grid gap-4">
-                  {projectSummaries.map((project) => (
+                <div className="mt-6 grid gap-4 xl:grid-cols-2">
+                  {qualityTrends.map((trend) => (
+                    <QualityTrendCard key={trend.project_id} trend={trend} />
+                  ))}
+                </div>
+              </section>
+            </section>
+
+            <section className="rounded-3xl border border-black/10 bg-white/70 p-6 shadow-[0_18px_50px_rgba(16,20,23,0.06)]">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold">全部项目</h2>
+                </div>
+                <button
+                  className="rounded-2xl border border-black/10 bg-white px-4 py-2 text-sm"
+                  type="button"
+                  onClick={() => void fetchOverview()}
+                >
+                  刷新
+                </button>
+              </div>
+
+              {loading ? (
+                <p className="mt-6 text-sm text-black/60">加载项目概览中...</p>
+              ) : null}
+
+              {!loading && projectSummaries.length === 0 ? (
+                <p className="mt-6 text-sm text-black/60">还没有项目。</p>
+              ) : null}
+
+              <div className="mt-6 grid gap-4">
+                {projectSummaries.map((project) => {
+                  const primaryAction = buildProjectPrimaryAction(project);
+                  return (
                     <article
                       key={project.project_id}
                       className="rounded-2xl border border-black/10 bg-white/80 p-5"
                     >
-                      <div className="flex items-start justify-between gap-4">
+                      <div className="flex flex-wrap items-start justify-between gap-4">
                         <div>
                           <h3 className="text-lg font-semibold">{project.title}</h3>
-                          <p className="mt-2 text-sm text-black/65">
-                            类型：{project.genre ?? "未设置"}
-                          </p>
-                          <p className="mt-1 text-sm text-black/65">
-                            状态：{project.status}
-                          </p>
-                          <p className="mt-1 text-sm text-black/45">
-                            更新：{formatDateTime(project.updated_at)}
-                          </p>
-                          <p className="mt-1 text-sm text-black/45">
-                            主理人：{project.owner_email ?? "当前账号"}
+                          <p className="mt-2 text-sm text-black/62">
+                            {project.genre ?? "未设置题材"}
+                            {" · "}
+                            更新 {formatDateTime(project.updated_at)}
                           </p>
                         </div>
-                        <div className="flex flex-wrap justify-end gap-2">
-                          <span className="rounded-full bg-paper px-3 py-1 text-xs uppercase tracking-[0.18em] text-copper">
-                            章节 {project.chapter_count}
-                          </span>
-                          <span
-                            className={`rounded-full border px-3 py-1 text-xs ${trendDirectionClassName(project.trend_direction)}`}
-                          >
-                            {trendDirectionLabel(project.trend_direction)}
-                          </span>
-                          <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
-                            {project.access_role}
-                          </span>
-                          <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
-                            待收口 {project.review_ready_chapters}
-                          </span>
-                          <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
-                            待回看 {project.risk_chapter_count}
-                          </span>
-                        </div>
+                        <span
+                          className={`rounded-full border px-3 py-1 text-xs ${trendDirectionClassName(project.trend_direction)}`}
+                        >
+                          {trendDirectionLabel(project.trend_direction)}
+                        </span>
                       </div>
 
-                      <div className="mt-4 grid gap-3 md:grid-cols-5">
-                        <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
-                          <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                            词数
-                          </p>
-                          <p className="mt-2 text-sm text-black/70">{project.word_count}</p>
-                        </div>
-                        <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
-                          <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                            终稿
-                          </p>
-                          <p className="mt-2 text-sm text-black/70">{project.final_chapters}</p>
-                        </div>
-                        <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
-                          <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                            活跃任务
-                          </p>
-                          <p className="mt-2 text-sm text-black/70">{project.active_task_count}</p>
-                        </div>
-                        <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
-                          <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                            平均评分
-                          </p>
-                          <p className="mt-2 text-sm text-black/70">
-                            {formatScore(project.average_overall_score)}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3">
-                          <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                            平均机械感
-                          </p>
-                          <p className="mt-2 text-sm text-black/70">
-                            {formatAiTaste(project.average_ai_taste_score)}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3 md:col-span-5">
-                          <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                            协作信息
-                          </p>
-                          <p className="mt-2 text-sm text-black/70">
-                            当前角色 {project.access_role}
-                            {" · "}
-                            协作者 {project.collaborator_count}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl border border-black/10 bg-[#fbfaf5] p-3 md:col-span-5">
-                          <p className="text-xs uppercase tracking-[0.16em] text-copper">
-                            最近趋势
-                          </p>
-                          <p className="mt-2 text-sm text-black/70">
-                            {trendDirectionLabel(project.trend_direction)}
-                            {" · "}
-                            评分变化 {formatSignedDelta(project.score_delta)}
-                          </p>
-                        </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                          {primaryAction.status}
+                        </span>
+                        <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                          章节 {project.chapter_count}
+                        </span>
+                        <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                          待收口 {project.review_ready_chapters}
+                        </span>
+                        <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                          协作 {project.collaborator_count} 人
+                        </span>
+                        <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                          终稿 {project.final_chapters}
+                        </span>
+                        <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                          评分 {formatScore(project.average_overall_score)}
+                        </span>
                       </div>
 
                       <div className="mt-4 flex flex-wrap gap-2">
                         <Link
                           className="rounded-2xl border border-black/10 bg-[#f6f0e6] px-3 py-2 text-sm font-medium"
-                          href={`/dashboard/projects/${project.project_id}/story-room`}
+                          href={primaryAction.href}
                         >
-                          进入故事工作台
+                          {primaryAction.label}
+                        </Link>
+                        <Link
+                          className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm font-medium transition hover:bg-[#f6f0e6]"
+                          href={buildCollaboratorsHref(project.project_id)}
+                        >
+                          协作成员
                         </Link>
                         <button
                           className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
@@ -907,7 +1044,7 @@ export default function DashboardPage() {
                           onClick={() => void handleExportProject(project.project_id, "md")}
                           disabled={exportingKey === `${project.project_id}:md`}
                         >
-                          {exportingKey === `${project.project_id}:md` ? "导出中..." : "导出项目 MD"}
+                          {exportingKey === `${project.project_id}:md` ? "导出中..." : "导出 MD"}
                         </button>
                         <button
                           className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
@@ -915,7 +1052,7 @@ export default function DashboardPage() {
                           onClick={() => void handleExportProject(project.project_id, "txt")}
                           disabled={exportingKey === `${project.project_id}:txt`}
                         >
-                          {exportingKey === `${project.project_id}:txt` ? "导出中..." : "导出项目 TXT"}
+                          {exportingKey === `${project.project_id}:txt` ? "导出中..." : "导出 TXT"}
                         </button>
                         {project.access_role === "owner" ? (
                           <button
@@ -929,13 +1066,29 @@ export default function DashboardPage() {
                         ) : null}
                       </div>
                     </article>
-                  ))}
-                </div>
-              </section>
+                  );
+                })}
+              </div>
             </section>
           </div>
         </details>
       </div>
     </main>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen px-6 py-10">
+          <div className="mx-auto max-w-7xl rounded-[36px] border border-black/10 bg-white/75 p-10 text-sm text-black/55">
+            正在装载你的项目工作台...
+          </div>
+        </main>
+      }
+    >
+      <DashboardPageShell />
+    </Suspense>
   );
 }

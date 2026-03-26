@@ -63,6 +63,7 @@ async def get_dashboard_overview(
 
         recent_tasks_result = await session.execute(
             select(TaskRun)
+            .options(selectinload(TaskRun.chapter))
             .where(TaskRun.project_id.in_(project_ids))
             .order_by(TaskRun.updated_at.desc())
             .limit(6)
@@ -189,6 +190,8 @@ def build_dashboard_overview_payload(
                 "access_role": getattr(project, "access_role", "owner"),
                 "owner_email": getattr(getattr(project, "user", None), "email", None),
                 "collaborator_count": len(getattr(project, "collaborators", []) or []),
+                "has_bootstrap_profile": bool(getattr(project, "bootstrap_profile", None)),
+                "has_novel_blueprint": bool(getattr(project, "novel_blueprint", None)),
                 "updated_at": getattr(project, "updated_at"),
                 "chapter_count": len(chapters),
                 "word_count": project_words,
@@ -232,6 +235,7 @@ def build_dashboard_overview_payload(
                 "message": getattr(task, "message", None),
                 "project_id": getattr(task, "project_id", None),
                 "chapter_id": getattr(task, "chapter_id", None),
+                "chapter_number": getattr(getattr(task, "chapter", None), "chapter_number", None),
                 "updated_at": getattr(task, "updated_at"),
             }
             for task in recent_tasks

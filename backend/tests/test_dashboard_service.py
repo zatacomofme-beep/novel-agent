@@ -39,6 +39,8 @@ class DashboardServiceTests(unittest.TestCase):
                     title="雾港",
                     genre="悬疑",
                     status="writing",
+                    bootstrap_profile={"genre": "悬疑"},
+                    novel_blueprint={"premise": "海雾谋杀"},
                     updated_at=datetime.now(timezone.utc),
                     chapters=[chapter_one, chapter_two],
                 )
@@ -55,7 +57,19 @@ class DashboardServiceTests(unittest.TestCase):
                     updated_at=datetime.now(timezone.utc),
                 )
             ],
-            recent_tasks=[],
+            recent_tasks=[
+                SimpleNamespace(
+                    task_id="task-2",
+                    task_type="chapter_generation",
+                    status="succeeded",
+                    progress=100,
+                    message="Chapter ready",
+                    project_id=project_id,
+                    chapter_id=chapter_two.id,
+                    chapter=chapter_two,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            ],
             preference_profile=SimpleNamespace(
                 id=uuid4(),
                 user_id=uuid4(),
@@ -87,6 +101,8 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertAlmostEqual(overview["project_summaries"][0]["score_delta"], -0.14, places=2)
         self.assertEqual(overview["project_summaries"][0]["access_role"], "owner")
         self.assertEqual(overview["project_summaries"][0]["collaborator_count"], 0)
+        self.assertTrue(overview["project_summaries"][0]["has_bootstrap_profile"])
+        self.assertTrue(overview["project_summaries"][0]["has_novel_blueprint"])
         self.assertEqual(len(overview["project_quality_trends"]), 1)
         self.assertEqual(
             overview["project_quality_trends"][0]["chapter_points"][0]["chapter_number"],
@@ -103,6 +119,7 @@ class DashboardServiceTests(unittest.TestCase):
             overview["project_quality_trends"][0]["status_breakdown"]["review"],
             1,
         )
+        self.assertEqual(overview["recent_tasks"][0]["chapter_number"], 2)
 
     def test_build_project_quality_trend_payload_reports_direction_and_risks(self) -> None:
         payload = build_project_quality_trend_payload(

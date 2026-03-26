@@ -107,6 +107,7 @@ async def list_entities(
     project_id: UUID,
     user_id: UUID,
     entity_type: str,
+    branch_id: UUID | None = None,
 ) -> list[Any]:
     await get_story_engine_project(
         session,
@@ -116,6 +117,15 @@ async def list_entities(
     )
     registry = _get_registry(entity_type)
     statement = select(registry.model).where(registry.model.project_id == project_id)
+    if _is_branch_scoped_entity(entity_type):
+        resolved_branch_id = await _resolve_effective_branch_id(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            branch_id=branch_id,
+            permission=PROJECT_PERMISSION_READ,
+        )
+        statement = statement.where(registry.model.branch_id == resolved_branch_id)
     order_by = registry.order_by
     if isinstance(order_by, tuple):
         statement = statement.order_by(*order_by)
@@ -172,14 +182,29 @@ async def create_entity(
         permission=PROJECT_PERMISSION_EDIT,
     )
     registry = _get_registry(entity_type)
+    normalized_payload = _normalize_create_payload(entity_type, payload)
+    if _is_branch_scoped_entity(entity_type):
+        normalized_payload["branch_id"] = await _resolve_effective_branch_id(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            branch_id=normalized_payload.get("branch_id"),
+            permission=PROJECT_PERMISSION_EDIT,
+        )
     await _guardian_validate_before_write(
         session,
         project_id=project_id,
         entity_type=entity_type,
-        payload=payload,
+        payload=normalized_payload,
         current_entity=None,
     )
-    normalized_payload = _normalize_create_payload(entity_type, payload)
+    await _validate_branch_scoped_payload(
+        session,
+        project_id=project_id,
+        entity_type=entity_type,
+        payload=normalized_payload,
+        current_entity=None,
+    )
     entity = registry.model(project_id=project_id, **normalized_payload)
     session.add(entity)
     await session.flush()
@@ -221,6 +246,13 @@ async def update_entity(
         permission=PROJECT_PERMISSION_EDIT,
     )
     await _guardian_validate_before_write(
+        session,
+        project_id=project_id,
+        entity_type=entity_type,
+        payload=payload,
+        current_entity=entity,
+    )
+    await _validate_branch_scoped_payload(
         session,
         project_id=project_id,
         entity_type=entity_type,
@@ -421,6 +453,7 @@ async def build_workspace(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: UUID | None = None,
 ) -> dict[str, Any]:
     project = await get_story_engine_project(
         session,
@@ -463,17 +496,20 @@ async def build_workspace(
         project_id=project_id,
         user_id=user_id,
         entity_type="outlines",
+        branch_id=branch_id,
     )
     chapter_summaries = await list_entities(
         session,
         project_id=project_id,
         user_id=user_id,
         entity_type="chapter_summaries",
+        branch_id=branch_id,
     )
     story_bible = await _build_workspace_story_bible(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
     )
     return {
         "project": {
@@ -535,6 +571,7 @@ async def _build_workspace_story_bible(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: UUID | None = None,
 ) -> dict[str, Any] | None:
     # workspace 需要直接带上当前默认主线的可见设定，前台才能真正只认一套入口。
     project = await get_owned_project(
@@ -548,15 +585,21 @@ async def _build_workspace_story_bible(
         list(project.branches),
         key=lambda item: (0 if item.is_default else 1, item.created_at),
     )
-    default_branch = next((item for item in branches if item.is_default), None)
-    if default_branch is None and branches:
-        default_branch = branches[0]
-    if default_branch is None:
+    target_branch = (
+        next((item for item in branches if item.id == branch_id), None)
+        if branch_id is not None
+        else None
+    )
+    if target_branch is None:
+        target_branch = next((item for item in branches if item.is_default), None)
+    if target_branch is None and branches:
+        target_branch = branches[0]
+    if target_branch is None:
         return None
     story_bible = await build_story_bible_payload(
         session,
         project,
-        branch_id=default_branch.id,
+        branch_id=target_branch.id,
     )
     return story_bible.model_dump(mode="json")
 
@@ -673,6 +716,11 @@ async def _sync_entity_vector(project_id: UUID, entity_type: str, entity: Any) -
             metadata={
                 "label": _entity_label(entity_type, entity),
                 "version": getattr(entity, "version", 1),
+                "branch_id": (
+                    str(getattr(entity, "branch_id"))
+                    if getattr(entity, "branch_id", None) is not None
+                    else None
+                ),
             },
         )
     except Exception:
@@ -700,6 +748,91 @@ def _get_registry(entity_type: str) -> StoryEntityRegistry:
             status_code=400,
         )
     return registry
+
+
+def _is_branch_scoped_entity(entity_type: str) -> bool:
+    return entity_type in {"outlines", "chapter_summaries"}
+
+
+async def _resolve_effective_branch_id(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    user_id: UUID,
+    branch_id: UUID | None,
+    permission: str,
+) -> UUID:
+    project = await get_owned_project(
+        session,
+        project_id,
+        user_id,
+        with_relations=True,
+        permission=permission,
+    )
+    branches = sorted(
+        list(project.branches),
+        key=lambda item: (0 if item.is_default else 1, item.created_at),
+    )
+    if not branches:
+        raise AppError(
+            code="story_engine.branch_scope_missing",
+            message="当前项目还没有可用分线，暂时不能保存这类内容。",
+            status_code=409,
+        )
+    if branch_id is not None:
+        matched_branch = next((item for item in branches if item.id == branch_id), None)
+        if matched_branch is None:
+            raise AppError(
+                code="story_engine.branch_scope_not_found",
+                message="当前分线不存在或已经被删除，请刷新后重试。",
+                status_code=404,
+            )
+        return matched_branch.id
+    default_branch = next((item for item in branches if item.is_default), None)
+    return (default_branch or branches[0]).id
+
+
+async def _validate_branch_scoped_payload(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    entity_type: str,
+    payload: dict[str, Any],
+    current_entity: Any | None,
+) -> None:
+    if entity_type != "outlines":
+        return
+
+    parent_id = payload.get("parent_id")
+    if parent_id is None:
+        return
+
+    branch_id = payload.get("branch_id") or getattr(current_entity, "branch_id", None)
+    if branch_id is None:
+        raise AppError(
+            code="story_engine.branch_scope_required",
+            message="当前大纲缺少分线范围，暂时不能建立父子节点关系。",
+            status_code=422,
+        )
+
+    statement = select(StoryOutline).where(
+        StoryOutline.project_id == project_id,
+        StoryOutline.outline_id == parent_id,
+    )
+    result = await session.execute(statement)
+    parent_outline = result.scalar_one_or_none()
+    if parent_outline is None:
+        raise AppError(
+            code="story_engine.outline_parent_not_found",
+            message="父级大纲不存在，请刷新后重试。",
+            status_code=404,
+        )
+    if parent_outline.branch_id != branch_id:
+        raise AppError(
+            code="story_engine.outline_cross_branch_parent",
+            message="不能把当前分线的大纲节点挂到另一条分线下面。",
+            status_code=422,
+        )
 
 
 def _normalize_create_payload(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -790,6 +923,7 @@ def _entity_to_searchable_text(entity_type: str, entity: Any) -> str:
     if entity_type == "outlines":
         return "\n".join(
             [
+                f"分线：{entity.branch_id}",
                 f"大纲层级：{entity.level}",
                 f"标题：{entity.title}",
                 f"内容：{entity.content}",
@@ -800,6 +934,7 @@ def _entity_to_searchable_text(entity_type: str, entity: Any) -> str:
     if entity_type == "chapter_summaries":
         return "\n".join(
             [
+                f"分线：{entity.branch_id}",
                 f"章节：{entity.chapter_number}",
                 f"总结：{entity.content}",
                 f"核心推进：{entity.core_progress}",
@@ -886,6 +1021,7 @@ def _serialize_entity(entity_type: str, entity: Any) -> dict[str, Any]:
         return {
             "outline_id": str(entity.outline_id),
             "project_id": str(entity.project_id),
+            "branch_id": str(entity.branch_id),
             "parent_id": str(entity.parent_id) if entity.parent_id is not None else None,
             "level": entity.level,
             "title": entity.title,
@@ -902,6 +1038,7 @@ def _serialize_entity(entity_type: str, entity: Any) -> dict[str, Any]:
         return {
             "summary_id": str(entity.summary_id),
             "project_id": str(entity.project_id),
+            "branch_id": str(entity.branch_id),
             "chapter_number": entity.chapter_number,
             "content": entity.content,
             "core_progress": entity.core_progress,

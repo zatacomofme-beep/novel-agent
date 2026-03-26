@@ -15,13 +15,7 @@ from schemas.project import (
     LocationGenerationRequest,
     PlotThreadGenerationRequest,
 )
-from services.entity_generation_service import (
-    generate_characters,
-    generate_factions,
-    generate_items,
-    generate_locations,
-    generate_plot_threads,
-)
+from services.entity_generation_service import run_entity_generation_pipeline
 from services.task_service import (
     create_task_event,
     create_task_run,
@@ -39,7 +33,6 @@ class EntityGenerationConfig:
     task_type: str
     result_key: str
     request_model: Type[BaseModel]
-    generator_name: str
     display_label: str
 
 
@@ -49,7 +42,6 @@ ENTITY_GENERATION_CONFIGS: dict[str, EntityGenerationConfig] = {
         task_type="entity_generation.characters",
         result_key="characters",
         request_model=CharacterGenerationRequest,
-        generator_name="generate_characters",
         display_label="人物候选",
     ),
     "supporting": EntityGenerationConfig(
@@ -57,7 +49,6 @@ ENTITY_GENERATION_CONFIGS: dict[str, EntityGenerationConfig] = {
         task_type="entity_generation.supporting",
         result_key="characters",
         request_model=CharacterGenerationRequest,
-        generator_name="generate_characters",
         display_label="配角候选",
     ),
     "items": EntityGenerationConfig(
@@ -65,7 +56,6 @@ ENTITY_GENERATION_CONFIGS: dict[str, EntityGenerationConfig] = {
         task_type="entity_generation.items",
         result_key="items",
         request_model=ItemGenerationRequest,
-        generator_name="generate_items",
         display_label="物品候选",
     ),
     "locations": EntityGenerationConfig(
@@ -73,7 +63,6 @@ ENTITY_GENERATION_CONFIGS: dict[str, EntityGenerationConfig] = {
         task_type="entity_generation.locations",
         result_key="locations",
         request_model=LocationGenerationRequest,
-        generator_name="generate_locations",
         display_label="地点候选",
     ),
     "factions": EntityGenerationConfig(
@@ -81,7 +70,6 @@ ENTITY_GENERATION_CONFIGS: dict[str, EntityGenerationConfig] = {
         task_type="entity_generation.factions",
         result_key="factions",
         request_model=FactionGenerationRequest,
-        generator_name="generate_factions",
         display_label="势力候选",
     ),
     "plot_threads": EntityGenerationConfig(
@@ -89,7 +77,6 @@ ENTITY_GENERATION_CONFIGS: dict[str, EntityGenerationConfig] = {
         task_type="entity_generation.plot_threads",
         result_key="plot_threads",
         request_model=PlotThreadGenerationRequest,
-        generator_name="generate_plot_threads",
         display_label="剧情线候选",
     ),
 }
@@ -102,6 +89,7 @@ async def enqueue_entity_generation_task(
     payload: dict[str, Any],
 ) -> TaskState:
     config = _get_entity_generation_config(generation_type)
+    requested_count = payload.get("count") if isinstance(payload, dict) else None
     task_state = TaskState(
         task_id=str(uuid4()),
         task_type=config.task_type,
@@ -113,6 +101,10 @@ async def enqueue_entity_generation_task(
             "user_id": user_id,
             "generation_type": generation_type,
             "request_payload": payload,
+            "workflow": _build_entity_generation_workflow_payload(
+                generation_type=generation_type,
+                display_label=config.display_label,
+            ),
         },
     )
     task_state_store.set(task_state)
@@ -131,7 +123,8 @@ async def enqueue_entity_generation_task(
             payload={
                 "phase": "enqueue",
                 "generation_type": generation_type,
-                "request_payload": payload,
+                "requested_count": requested_count,
+                "workflow_key": "entity_generation",
             },
             project_id=UUID(project_id),
             user_id=UUID(user_id),
@@ -227,21 +220,7 @@ async def process_entity_generation_task(
         event_payload={
             "phase": "bootstrap",
             "generation_type": generation_type,
-        },
-    )
-    state = mark_task_progress(
-        task_id,
-        progress=25,
-        message="已整理当前项目的设定上下文。",
-    )
-    await persist_task_state(
-        state,
-        project_id=project_id,
-        user_id=user_id,
-        event_type="context_loaded",
-        event_payload={
-            "phase": "context",
-            "generation_type": generation_type,
+            "workflow_key": "entity_generation",
         },
     )
 
@@ -267,9 +246,32 @@ async def process_entity_generation_task(
                 "phase": "payload_validation",
                 "generation_type": generation_type,
                 "error_type": exc.__class__.__name__,
+                "workflow_key": "entity_generation",
             },
         )
         return state
+
+    requested_count = getattr(request_payload, "count", None)
+    state = mark_task_progress(
+        task_id,
+        progress=25,
+        message="已整理当前项目的设定上下文。",
+        result_patch={
+            "requested_count": requested_count,
+        },
+    )
+    await persist_task_state(
+        state,
+        project_id=project_id,
+        user_id=user_id,
+        event_type="context_loaded",
+        event_payload={
+            "phase": "context",
+            "generation_type": generation_type,
+            "requested_count": requested_count,
+            "workflow_key": "entity_generation",
+        },
+    )
 
     state = mark_task_progress(
         task_id,
@@ -284,17 +286,19 @@ async def process_entity_generation_task(
         event_payload={
             "phase": "generation",
             "generation_type": generation_type,
+            "requested_count": requested_count,
+            "workflow_key": "entity_generation",
         },
     )
 
     async with AsyncSessionLocal() as session:
         try:
-            generator = _resolve_generator(config)
-            response_model = await generator(
+            pipeline_result = await run_entity_generation_pipeline(
                 session,
-                UUID(project_id),
-                UUID(user_id),
-                request_payload,
+                project_id=UUID(project_id),
+                user_id=UUID(user_id),
+                generation_type=generation_type,
+                payload=request_payload,
             )
         except Exception as exc:  # pragma: no cover - 运行时仍需要保留失败分支
             state = mark_task_failed(
@@ -314,11 +318,12 @@ async def process_entity_generation_task(
                     "phase": "generation",
                     "generation_type": generation_type,
                     "error_type": exc.__class__.__name__,
+                    "workflow_key": "entity_generation",
                 },
             )
             return state
 
-    response_payload = response_model.model_dump(mode="json")
+    response_payload = pipeline_result.response.model_dump(mode="json")
     candidates = list(response_payload.get(config.result_key) or [])
     result = {
         "project_id": project_id,
@@ -328,7 +333,33 @@ async def process_entity_generation_task(
         config.result_key: candidates,
         "candidate_count": len(candidates),
         "entity_preview": _collect_entity_preview(candidates),
+        "workflow": _build_entity_generation_workflow_payload(
+            generation_type=generation_type,
+            display_label=config.display_label,
+        ),
+        "generation_trace": pipeline_result.trace,
+        "requested_count": requested_count,
     }
+
+    state = mark_task_progress(
+        task_id,
+        progress=72,
+        message="已完成这一轮候选生成，正在整理可采纳结果。",
+        result_patch={
+            "generation_trace": pipeline_result.trace,
+        },
+    )
+    await persist_task_state(
+        state,
+        project_id=project_id,
+        user_id=user_id,
+        event_type="generation_completed",
+        event_payload=_build_generation_trace_event_payload(
+            generation_type=generation_type,
+            requested_count=requested_count,
+            trace=pipeline_result.trace,
+        ),
+    )
 
     state = mark_task_progress(
         task_id,
@@ -391,6 +422,7 @@ async def dispatch_entity_generation_task(
                 "generation_type": generation_type,
                 "dispatch_strategy": "celery",
                 "celery_task_id": task_id,
+                "workflow_key": "entity_generation",
             },
         )
         return state
@@ -413,6 +445,7 @@ async def dispatch_entity_generation_task(
                 "generation_type": generation_type,
                 "dispatch_strategy": "local_async_fallback",
                 "dispatch_error": exc.__class__.__name__,
+                "workflow_key": "entity_generation",
             },
         )
         asyncio.create_task(
@@ -449,10 +482,6 @@ def _get_entity_generation_config(generation_type: str) -> EntityGenerationConfi
     if config is None:
         raise KeyError(f"Unsupported entity generation type: {generation_type}")
     return config
-
-
-def _resolve_generator(config: EntityGenerationConfig) -> Any:
-    return globals()[config.generator_name]
 
 
 def _require_task(task_id: str) -> TaskState:
@@ -505,10 +534,58 @@ async def persist_task_state(
 
 
 def _build_result_event_payload(result: dict[str, Any]) -> dict[str, Any]:
+    trace = result.get("generation_trace") if isinstance(result.get("generation_trace"), dict) else {}
     return {
+        "workflow_key": "entity_generation",
         "generation_type": result.get("generation_type"),
+        "requested_count": result.get("requested_count"),
         "candidate_count": result.get("candidate_count"),
         "entity_preview": result.get("entity_preview"),
+        "response_source": trace.get("response_source"),
+        "used_fallback": trace.get("used_fallback"),
+        "failover_triggered": trace.get("failover_triggered"),
+    }
+
+
+def _build_generation_trace_event_payload(
+    *,
+    generation_type: str,
+    requested_count: Any,
+    trace: dict[str, Any],
+) -> dict[str, Any]:
+    context_snapshot = trace.get("context_snapshot")
+    return {
+        "workflow_key": "entity_generation",
+        "phase": "generation_completed",
+        "generation_type": generation_type,
+        "requested_count": requested_count,
+        "selected_role": trace.get("selected_role"),
+        "used_fallback": trace.get("used_fallback"),
+        "failover_triggered": trace.get("failover_triggered"),
+        "response_source": trace.get("response_source"),
+        "raw_candidate_count": trace.get("raw_candidate_count"),
+        "returned_count": trace.get("returned_count"),
+        "scope_kind": context_snapshot.get("scope_kind") if isinstance(context_snapshot, dict) else None,
+        "branch_title": context_snapshot.get("branch_title") if isinstance(context_snapshot, dict) else None,
+    }
+
+
+def _build_entity_generation_workflow_payload(
+    *,
+    generation_type: str,
+    display_label: str,
+) -> dict[str, Any]:
+    return {
+        "key": "entity_generation",
+        "generation_type": generation_type,
+        "label": f"补全{display_label}",
+        "steps": [
+            "读取当前设定",
+            "选择补全方案",
+            "生成候选",
+            "整理结果",
+            "等待采纳",
+        ],
     }
 
 

@@ -17,7 +17,7 @@ from models.story_engine import (
     StoryTimelineMapEvent,
     StoryWorldRule,
 )
-from services.project_service import PROJECT_PERMISSION_EDIT, get_owned_project
+from services.project_service import PROJECT_PERMISSION_EDIT
 from services.story_engine_kb_service import create_entity, get_entity, update_entity
 from services.story_engine_unified_knowledge_service import save_story_knowledge
 
@@ -108,6 +108,7 @@ async def resolve_chapter_summary_kb_suggestion(
             session,
             project_id=project_id,
             user_id=user_id,
+            branch_id=chapter_summary.branch_id,
             suggestion=current_suggestion,
         )
         resolved_suggestion.update(
@@ -231,6 +232,7 @@ async def _apply_pending_kb_suggestion(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: UUID,
     suggestion: dict[str, Any],
 ) -> dict[str, Any]:
     section_key = _resolve_section_key(suggestion.get("entity_type"))
@@ -305,6 +307,7 @@ async def _apply_pending_kb_suggestion(
             project_id=project_id,
             user_id=user_id,
             section_key=section_key,
+            branch_id=branch_id,
             suggestion=suggestion,
         )
         return {
@@ -612,13 +615,9 @@ async def _upsert_story_bible_section(
     project_id: UUID,
     user_id: UUID,
     section_key: str,
+    branch_id: UUID,
     suggestion: dict[str, Any],
 ) -> tuple[str, str]:
-    default_branch_id = await _resolve_default_branch_id(
-        session,
-        project_id=project_id,
-        user_id=user_id,
-    )
     item = _build_story_bible_payload(section_key, suggestion)
     await save_story_knowledge(
         session,
@@ -626,39 +625,13 @@ async def _upsert_story_bible_section(
         user_id=user_id,
         section_key=section_key,
         item=item,
-        branch_id=default_branch_id,
+        branch_id=branch_id,
     )
     if section_key == "locations":
         return f"name:{item['name']}", str(item["name"])
     if section_key == "plot_threads":
         return f"title:{item['title']}", str(item["title"])
     return f"key:{item['key']}", str(item["name"])
-
-
-async def _resolve_default_branch_id(
-    session: AsyncSession,
-    *,
-    project_id: UUID,
-    user_id: UUID,
-) -> UUID:
-    project = await get_owned_project(
-        session,
-        project_id,
-        user_id,
-        with_relations=True,
-        permission=PROJECT_PERMISSION_EDIT,
-    )
-    branches = sorted(
-        list(project.branches),
-        key=lambda item: (0 if item.is_default else 1, item.created_at),
-    )
-    if not branches:
-        raise AppError(
-            code="story_engine.default_branch_missing",
-            message="当前项目还没有主线分支，暂时不能自动写回主设定。",
-            status_code=409,
-        )
-    return branches[0].id
 
 
 def _build_story_bible_payload(section_key: str, suggestion: dict[str, Any]) -> dict[str, Any]:

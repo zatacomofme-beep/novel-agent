@@ -160,10 +160,7 @@ export function StyleControlPanel({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-copper">声音设置</p>
-          <h2 className="mt-2 text-2xl font-semibold">本章样文和整本书手感，都放这里</h2>
-          <p className="mt-3 max-w-3xl text-sm leading-7 text-black/62">
-            上面正文区只负责写，这里才是统一的声音入口。你可以给这一章补一小段样文，也可以把整本书的长期手感稳下来。
-          </p>
+          <h2 className="mt-2 text-2xl font-semibold">本章样文 + 整本书手感</h2>
         </div>
         {preferenceProfile ? (
           <div className="flex flex-wrap gap-2 text-xs">
@@ -184,7 +181,7 @@ export function StyleControlPanel({
 
       {loading ? (
         <div className="mt-6 rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5 text-sm text-black/55">
-          正在整理你的文风手感...
+          正在整理手感...
         </div>
       ) : null}
 
@@ -192,12 +189,9 @@ export function StyleControlPanel({
         <div className="space-y-6">
           <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
             <p className="text-sm font-semibold">这一章的声音参考</p>
-            <p className="mt-2 text-sm leading-7 text-black/60">
-              可选。贴一小段你自己的文字，起稿和续写时会优先贴近这段句子节奏、气口和停顿感。
-            </p>
             <textarea
               className="mt-4 min-h-[180px] w-full rounded-[22px] border border-black/10 bg-white px-4 py-3 text-sm leading-7 outline-none"
-              placeholder="贴一小段你自己的正文即可。没有也能写，但有的话会更贴近你的手感。"
+              placeholder="贴一小段你自己的正文。"
               value={chapterSample}
               onChange={(event) => onChapterSampleChange(event.target.value)}
             />
@@ -212,7 +206,7 @@ export function StyleControlPanel({
           </section>
 
           <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
-            <p className="text-sm font-semibold">整本书当前声音</p>
+            <p className="text-sm font-semibold">整本书当前手感</p>
             {preferenceProfile ? (
               <>
                 <div className="mt-4 flex flex-wrap gap-2">
@@ -237,14 +231,10 @@ export function StyleControlPanel({
                 </div>
 
                 {preferenceProfile.learning_snapshot.summary ? (
-                  <p className="mt-4 text-sm leading-7 text-black/68">
-                    当前判断：{preferenceProfile.learning_snapshot.summary}
-                  </p>
-                ) : (
-                  <p className="mt-4 text-sm leading-7 text-black/55">
-                    目前还在积累样本，系统会先按你手动设定的手感来收束。
-                  </p>
-                )}
+                  <div className="mt-4 rounded-[22px] border border-black/10 bg-white px-4 py-3 text-sm text-black/68">
+                    {preferenceProfile.learning_snapshot.summary}
+                  </div>
+                ) : null}
 
                 {preferenceProfile.learning_snapshot.stable_preferences.length > 0 ? (
                   <div className="mt-4 flex flex-wrap gap-2">
@@ -257,7 +247,20 @@ export function StyleControlPanel({
                         >
                           {signal.field} · {formatFieldValue(signal.value)}
                         </span>
-                      ))}
+                        ))}
+                  </div>
+                ) : null}
+
+                {preferenceProfile.favored_elements.length > 0 ? (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {preferenceProfile.favored_elements.slice(0, 6).map((item) => (
+                      <span
+                        key={item}
+                        className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60"
+                      >
+                        {item}
+                      </span>
+                    ))}
                   </div>
                 ) : null}
               </>
@@ -299,7 +302,7 @@ export function StyleControlPanel({
                           </span>
                         ) : null}
                       </div>
-                      <p className="mt-2 text-sm leading-7 text-black/62">{template.tagline}</p>
+                      <p className="mt-2 text-sm text-black/62">{template.tagline}</p>
                     </div>
                     <button
                       className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-2 text-xs font-semibold text-black/68 transition hover:bg-[#f6f0e6] disabled:cursor-not-allowed disabled:opacity-50"
@@ -310,7 +313,6 @@ export function StyleControlPanel({
                       {isRunning(`style:apply:${template.key}`) ? "套用中..." : "套用这套手感"}
                     </button>
                   </div>
-                  <p className="mt-3 text-sm leading-7 text-black/58">{template.description}</p>
                   <div className="mt-3 flex flex-wrap gap-2 text-xs text-black/55">
                     <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1">
                       文风：{formatFieldValue(template.prose_style)}
@@ -329,10 +331,7 @@ export function StyleControlPanel({
         </div>
 
         <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
-          <p className="text-sm font-semibold">手动微调整本书的长期手感</p>
-          <p className="mt-3 text-sm leading-7 text-black/60">
-            这里改的是整本书的长期偏好。保存之后，后面的起稿、续写和优化都会优先照着这套手感走。
-          </p>
+          <p className="text-sm font-semibold">长期手感</p>
 
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             <label className="block">

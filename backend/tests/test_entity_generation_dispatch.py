@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
 from types import SimpleNamespace
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from schemas.project import CharacterGenerationResponse, GeneratedCharacter
+from services.entity_generation_service import EntityGenerationPipelineResult
 from tasks.entity_generation import dispatch_entity_generation_task, hydrate_task_state
 from tasks.schemas import TaskState
 from tasks.state_store import task_state_store
@@ -139,16 +140,33 @@ class EntityGenerationDispatchTests(unittest.IsolatedAsyncioTestCase):
             "tasks.entity_generation.persist_task_state",
             AsyncMock(),
         ), patch(
-            "tasks.entity_generation.generate_characters",
+            "tasks.entity_generation.run_entity_generation_pipeline",
             AsyncMock(
-                return_value=CharacterGenerationResponse(
-                    characters=[
-                        GeneratedCharacter(
-                            name="沈遥",
-                            role="supporting",
-                            personality="冷静克制",
-                        )
-                    ]
+                return_value=EntityGenerationPipelineResult(
+                    generation_type="characters",
+                    result_key="characters",
+                    response=CharacterGenerationResponse(
+                        characters=[
+                            GeneratedCharacter(
+                                name="沈遥",
+                                role="supporting",
+                                personality="冷静克制",
+                            )
+                        ]
+                    ),
+                    trace={
+                        "generation_type": "characters",
+                        "selected_role": "guardian",
+                        "selected_model": "gpt-5.4",
+                        "selected_provider": "openai-compatible",
+                        "response_source": "model_response",
+                        "used_fallback": False,
+                        "failover_triggered": False,
+                        "context_snapshot": {
+                            "scope_kind": "branch",
+                            "branch_title": "主线",
+                        },
+                    },
                 )
             ),
         ):
@@ -162,3 +180,4 @@ class EntityGenerationDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "succeeded")
         self.assertEqual(state.result["candidate_count"], 1)
         self.assertEqual(state.result["entity_preview"], ["沈遥"])
+        self.assertEqual(state.result["generation_trace"]["selected_role"], "guardian")

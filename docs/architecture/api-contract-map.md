@@ -217,13 +217,14 @@ Meaning:
 
 ## 4. Known Contract Gaps
 
-### Gap 1: Public Story Bible section semantics are aligned, but storage is still compatibility-backed
+### Gap 1: Public Story Bible section semantics are aligned, and storage has entered native-first mode
 
 Examples:
 - items page now saves into native `items`
 - factions page now saves into native `factions`
 - Bible full replace and branch item patch/delete also expose `items` / `factions` as first-class public sections
-- but backend persistence still reconstructs them into special `world_settings` wrapper rows for compatibility
+- backend runtime now prefers native `project_items / project_factions` and canonical branch payloads
+- legacy `world_settings` wrapper rows are only kept as历史兼容读取/自动迁移来源，不再是主存储语义
 
 Primary sources:
 - `frontend/app/dashboard/projects/[projectId]/bible/page.tsx`
@@ -234,9 +235,9 @@ Primary sources:
 
 Meaning:
 - the frontend/backend contract is now semantically aligned
-- the remaining debt is mostly in storage/domain purity, not API shape
+- the remaining debt is no longer “存储是不是原生”，而是后续 Story Bible 溯源、引用关系和更细粒度观测
 
-### Gap 2: Entity generation is now lightweight synchronous generation, not task-based agent workflow
+### Gap 2: Entity generation has entered the project task/event chain
 
 Routes like:
 - `/generations/characters`
@@ -246,17 +247,18 @@ Routes like:
 - `/generations/plot-threads`
 
 now route through `entity_generation_service`, which:
-- prefers remote model generation through `ModelGateway`
+- prefers remote model generation through project-level model routing
 - falls back to local heuristic generation when no provider is available or output is invalid
-- returns structured candidates synchronously in the request/response cycle
+- records task state, task events, failover traces and candidate previews for the dispatch path
 
 Meaning:
 - these pages are no longer static scaffolds
-- but they are still not wired into the chapter task/event system or multi-agent collaboration loop
+- the writer-facing main path now uses dispatch + task/event updates instead of only synchronous request/response
 
 Primary sources:
 - `backend/api/v1/projects.py`
 - `backend/services/entity_generation_service.py`
+- `backend/tasks/entity_generation.py`
 
 ### Gap 3: story-room 已接入正式章节主链，但没有承载完整审校面板
 

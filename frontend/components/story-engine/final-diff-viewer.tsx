@@ -70,6 +70,14 @@ function splitParagraphs(text: string): string[] {
     .filter(Boolean);
 }
 
+function countChangedRows(
+  rows: Array<{
+    changed: boolean;
+  }>,
+): number {
+  return rows.filter((row) => row.changed).length;
+}
+
 export function FinalDiffViewer({
   result,
   hasDraftText,
@@ -83,34 +91,33 @@ export function FinalDiffViewer({
   if (!result) {
     const chapterLabel = chapterTitle.trim() ? `《${chapterTitle.trim()}》` : "这一章";
     const heading = !hasDraftText
-      ? "先在第二步写出正文，这里才会出现对比稿"
+      ? "先写正文"
       : !hasSavedChapter
-        ? "这章已经写出来了，再存一次正文就能进入整章优化"
-        : `下一步是把${chapterLabel}送去整章优化`;
-    const description = !hasDraftText
-      ? "第三步只负责看结果，不负责起稿。先按三级大纲写出正文，再回来收口。"
-      : !hasSavedChapter
-        ? "你已经在编辑区里写出了内容，但系统还没把它记成正式章节。先保存正文，再回到这里会更顺。"
-        : "回正文区点一次“优化爽点”，这里就会直接出现原稿和优化稿的对比、100-300 字总结，以及待确认设定更新。";
+        ? "先保存正文"
+        : `检查${chapterLabel}`;
 
     return (
       <section className="rounded-[36px] border border-dashed border-black/10 bg-white/74 p-8">
         <p className="text-xs uppercase tracking-[0.24em] text-copper">第三步</p>
         <h2 className="mt-2 text-2xl font-semibold">{heading}</h2>
-        <p className="mt-3 max-w-3xl text-sm leading-7 text-black/58">{description}</p>
-
-        <div className="mt-6 grid gap-4 md:grid-cols-3">
-          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-copper">会看到什么</p>
-            <p className="mt-3 text-sm leading-7 text-black/62">原稿和优化稿逐段对比，高亮真正改过的地方。</p>
+        <div className="mt-6 grid gap-3 md:grid-cols-3">
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] px-4 py-4">
+            <p className="text-sm font-semibold">保存正文</p>
+            <p className="mt-2 text-xs leading-6 text-black/55">
+              先把这一章存进项目，再进入收口。
+            </p>
           </article>
-          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-copper">会顺手产出</p>
-            <p className="mt-3 text-sm leading-7 text-black/62">本章 100-300 字总结，方便你快速回看整章推进。</p>
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] px-4 py-4">
+            <p className="text-sm font-semibold">一键检查</p>
+            <p className="mt-2 text-xs leading-6 text-black/55">
+              系统会自动比对设定、逻辑和节奏。
+            </p>
           </article>
-          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-copper">会自动整理</p>
-            <p className="mt-3 text-sm leading-7 text-black/62">这一章新增的人物、伏笔和状态变化，都会整理成待确认设定。</p>
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] px-4 py-4">
+            <p className="text-sm font-semibold">看改动</p>
+            <p className="mt-2 text-xs leading-6 text-black/55">
+              只需要看对比结果，再决定是否确认。
+            </p>
           </article>
         </div>
 
@@ -122,9 +129,6 @@ export function FinalDiffViewer({
           >
             {hasDraftText ? "回正文区继续" : "回正文区开始写"}
           </button>
-          <span className="text-sm leading-7 text-black/50">
-            完成这一步后，这里就会自动变成终稿对比视图。
-          </span>
         </div>
       </section>
     );
@@ -139,21 +143,23 @@ export function FinalDiffViewer({
     after: after[index] ?? "",
     changed: (before[index] ?? "") !== (after[index] ?? ""),
   }));
+  const changedRowCount = countChangedRows(rows);
+  const pendingKnowledgeCount = result.kb_update_list.filter(
+    (item) => (item.status ?? "pending") === "pending",
+  ).length;
+  const revisionHighlights = result.revision_notes.slice(0, 3);
 
   return (
     <section className="space-y-6">
       <div className="rounded-[36px] border border-black/10 bg-white/82 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)]">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-copper">终稿对比</p>
-            <h2 className="mt-2 text-2xl font-semibold">看得到改了哪里，也看得到为什么改</h2>
-            <p className="mt-3 max-w-3xl text-sm leading-7 text-black/62">
-              左边是你刚写完的原稿，右边是收敛后的可发版本。真正改动过的段落会被高亮。
-            </p>
+            <p className="text-xs uppercase tracking-[0.24em] text-copper">第三步</p>
+            <h2 className="mt-2 text-2xl font-semibold">收口结果</h2>
           </div>
           <div className="flex flex-wrap gap-2">
             <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-2 text-xs text-black/62">
-              已收口 {result.consensus_rounds} 轮
+              收口 {result.consensus_rounds} 轮
             </span>
             <span
               className={`rounded-full border px-3 py-2 text-xs ${
@@ -162,9 +168,9 @@ export function FinalDiffViewer({
                   : "border-amber-200 bg-amber-50 text-amber-700"
               }`}
             >
-              {result.ready_for_publish ? "可继续交稿" : `仍有 ${result.remaining_issue_count} 个问题`}
+              {result.ready_for_publish ? "可以继续确认" : `还有 ${result.remaining_issue_count} 个问题`}
             </span>
-            {result.revision_notes.map((note) => (
+            {revisionHighlights.map((note) => (
               <span
                 key={note}
                 className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-2 text-xs text-black/62"
@@ -172,6 +178,11 @@ export function FinalDiffViewer({
                 {note}
               </span>
             ))}
+            {result.revision_notes.length > revisionHighlights.length ? (
+              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-2 text-xs text-black/62">
+                还有 {result.revision_notes.length - revisionHighlights.length} 条
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -180,6 +191,23 @@ export function FinalDiffViewer({
             {result.quality_summary}
           </div>
         ) : null}
+
+        <div className="mt-6 grid gap-4 md:grid-cols-3">
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
+            <p className="text-xs uppercase tracking-[0.16em] text-copper">当前结果</p>
+            <p className="mt-2 text-2xl font-semibold">
+              {result.ready_for_publish ? "可以确认" : "还需确认"}
+            </p>
+          </article>
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
+            <p className="text-xs uppercase tracking-[0.16em] text-copper">修改段数</p>
+            <p className="mt-2 text-2xl font-semibold">{changedRowCount} 段</p>
+          </article>
+          <article className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
+            <p className="text-xs uppercase tracking-[0.16em] text-copper">待记设定</p>
+            <p className="mt-2 text-2xl font-semibold">{pendingKnowledgeCount} 条</p>
+          </article>
+        </div>
 
         <div className="mt-6 grid gap-4 xl:grid-cols-2">
           <section className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
@@ -220,21 +248,17 @@ export function FinalDiffViewer({
         </div>
       </div>
 
-      <StoryDeliberationPanel
-        title="这一章为什么会这样改"
-        description="默认不打扰你，展开后可以按轮次看这一章是怎么被挑刺、怎么收口、最后为什么这么改。"
-        rounds={result.deliberation_rounds}
-        emptyText="这次终稿结果还没有可展开的推演纪要。"
-      />
-
       <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
         <section className="rounded-[30px] border border-black/10 bg-white/85 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
           <div className="flex items-center justify-between gap-3">
-            <h3 className="text-lg font-semibold">本章 100-300 字总结</h3>
+            <h3 className="text-lg font-semibold">会带去下一章的章节总结</h3>
             <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
               约 {summaryLength} 字
             </span>
           </div>
+          <p className="mt-3 text-sm leading-7 text-black/52">
+            确认保存后，下一章会优先读取这份总结，而不是只硬塞上一章原文。
+          </p>
           <p className="mt-3 text-sm leading-7 text-black/62">{result.chapter_summary.content}</p>
           <div className="mt-4 space-y-2">
             {result.chapter_summary.core_progress.map((item) => (
@@ -249,7 +273,10 @@ export function FinalDiffViewer({
         </section>
 
         <section className="rounded-[30px] border border-black/10 bg-white/85 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <h3 className="text-lg font-semibold">设定更新清单</h3>
+          <h3 className="text-lg font-semibold">会回写进设定圣经的变动</h3>
+          <p className="mt-3 text-sm leading-7 text-black/52">
+            已确认的设定会直接进入后续章节上下文，待处理的建议可以在这里决定要不要记下。
+          </p>
           <div className="mt-4 space-y-3">
             {result.kb_update_list.length > 0 ? (
               result.kb_update_list.map((item, index) => {
@@ -307,6 +334,12 @@ export function FinalDiffViewer({
           </div>
         </section>
       </div>
+
+      <StoryDeliberationPanel
+        title="这章怎么改的"
+        rounds={result.deliberation_rounds}
+        emptyText="这次终稿结果还没有可展开的推演纪要。"
+      />
     </section>
   );
 }

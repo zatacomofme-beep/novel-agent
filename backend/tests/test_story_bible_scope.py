@@ -9,6 +9,7 @@ from core.errors import AppError
 from memory.story_bible import load_story_bible_context
 from services.project_service import (
     StoryBibleResolution,
+    canonicalize_story_bible_branch_payload,
     _persist_branch_story_bible_sections,
     build_story_bible_branch_delta_payload,
     build_public_story_bible_sections,
@@ -435,6 +436,136 @@ class StoryBibleScopeTests(unittest.TestCase):
         self.assertEqual(public_sections["world_settings"][0]["key"], "rule-1")
         self.assertEqual(public_sections["items"][0]["key"], "item:mirror")
         self.assertEqual(public_sections["factions"][0]["key"], "faction:tide")
+
+    def test_build_public_story_bible_sections_prefers_native_rows_over_legacy_wrappers(self) -> None:
+        sections = {
+            "characters": [],
+            "world_settings": [
+                {
+                    "key": "item:mirror",
+                    "title": "回潮镜片",
+                    "data": {
+                        "entity_type": "item",
+                        "item_type": "artifact",
+                        "owner": "林澈",
+                        "items": [
+                            {
+                                "name": "回潮镜片",
+                                "type": "artifact",
+                                "owner": "林澈",
+                            }
+                        ],
+                    },
+                    "version": 1,
+                },
+                {
+                    "key": "faction:tide",
+                    "title": "潮汐会",
+                    "data": {
+                        "entity_type": "faction",
+                        "name": "潮汐会",
+                        "faction_type": "cult",
+                        "leader": "钟守人",
+                    },
+                    "version": 1,
+                },
+            ],
+            "items": [
+                {
+                    "key": "item:mirror",
+                    "name": "回潮镜片",
+                    "type": "artifact",
+                    "owner": "沈岚",
+                    "effects": ["折光"],
+                    "forbidden_holders": [],
+                    "version": 3,
+                }
+            ],
+            "factions": [
+                {
+                    "key": "faction:tide",
+                    "name": "潮汐会",
+                    "type": "cult",
+                    "leader": "沈岚",
+                    "members": [],
+                    "resources": [],
+                    "version": 2,
+                }
+            ],
+            "locations": [],
+            "plot_threads": [],
+            "foreshadowing": [],
+            "timeline_events": [],
+        }
+
+        public_sections = build_public_story_bible_sections(sections)
+
+        self.assertEqual(public_sections["items"][0]["owner"], "沈岚")
+        self.assertEqual(public_sections["items"][0]["version"], 3)
+        self.assertEqual(public_sections["factions"][0]["leader"], "沈岚")
+        self.assertEqual(public_sections["factions"][0]["version"], 2)
+
+    def test_canonicalize_story_bible_branch_payload_rewrites_legacy_wrapper_sections(self) -> None:
+        base_sections = {
+            "characters": [],
+            "world_settings": [
+                {
+                    "key": "rule-1",
+                    "title": "潮汐法则",
+                    "data": {"cost": "memory"},
+                    "version": 1,
+                }
+            ],
+            "items": [],
+            "factions": [],
+            "locations": [],
+            "plot_threads": [],
+            "foreshadowing": [],
+            "timeline_events": [],
+        }
+        legacy_payload = {
+            "world_settings": combine_public_story_bible_world_settings(
+                base_sections["world_settings"],
+                items=[
+                    {
+                        "key": "item:mirror",
+                        "name": "回潮镜片",
+                        "type": "artifact",
+                        "owner": "林澈",
+                        "effects": ["折光"],
+                        "forbidden_holders": [],
+                        "version": 2,
+                    }
+                ],
+                factions=[
+                    {
+                        "key": "faction:tide",
+                        "name": "潮汐会",
+                        "type": "cult",
+                        "leader": "钟守人",
+                        "members": [],
+                        "resources": [],
+                        "version": 1,
+                    }
+                ],
+            )
+        }
+
+        canonical_payload = canonicalize_story_bible_branch_payload(
+            base_sections,
+            legacy_payload,
+        )
+        merged_sections = merge_story_bible_sections(
+            base_sections,
+            branch_story_bible_payload=canonical_payload,
+        )
+
+        self.assertNotIn("world_settings", canonical_payload)
+        self.assertIn("items", canonical_payload)
+        self.assertIn("factions", canonical_payload)
+        self.assertEqual(merged_sections["world_settings"][0]["key"], "rule-1")
+        self.assertEqual(merged_sections["items"][0]["key"], "item:mirror")
+        self.assertEqual(merged_sections["factions"][0]["key"], "faction:tide")
 
     def test_serialize_project_story_bible_sections_keeps_native_items_and_factions_separate(self) -> None:
         project = make_project()

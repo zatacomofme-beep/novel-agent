@@ -17,6 +17,7 @@ from services.entity_generation_service import (
     generate_factions,
     generate_items,
     generate_plot_threads,
+    run_entity_generation_pipeline,
 )
 
 
@@ -124,6 +125,70 @@ def make_story_bible() -> StoryBibleContext:
 
 
 class EntityGenerationServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_entity_generation_pipeline_records_failover_trace(self) -> None:
+        story_bible = make_story_bible()
+
+        first_result = SimpleNamespace(
+            content='{"characters":[{"name":"角色一","role":"supporting"}]}',
+            provider="local-fallback",
+            model="heuristic-v1",
+            used_fallback=True,
+            metadata={
+                "selected_provider": "openai-compatible",
+                "remote_error": {
+                    "error_type": "rate_limit",
+                    "message": "quota reached",
+                    "status_code": 429,
+                },
+            },
+        )
+        second_result = SimpleNamespace(
+            content='{"characters":[{"name":"沈遥","role":"supporting","personality":"冷静克制"}]}',
+            provider="openai-compatible",
+            model="claude-opus-4-6",
+            used_fallback=False,
+            metadata={
+                "selected_provider": "openai-compatible",
+            },
+        )
+
+        with patch(
+            "services.entity_generation_service.load_story_bible_context",
+            AsyncMock(return_value=story_bible),
+        ), patch(
+            "services.entity_generation_service._resolve_entity_generation_model_routing",
+            AsyncMock(
+                return_value={
+                    "guardian": {"model": "gpt-5.4", "reasoning_effort": "high"},
+                    "outline": {"model": "claude-opus-4-6", "reasoning_effort": "high"},
+                    "style_guardian": {
+                        "model": "gemini-3.1-pro-preview",
+                        "reasoning_effort": "medium",
+                    },
+                }
+            ),
+        ), patch(
+            "services.entity_generation_service.model_gateway.generate_text",
+            AsyncMock(side_effect=[first_result, second_result]),
+        ):
+            pipeline = await run_entity_generation_pipeline(
+                SimpleNamespace(),
+                project_id=story_bible.project_id,
+                user_id=uuid4(),
+                generation_type="characters",
+                payload=CharacterGenerationRequest(
+                    character_type="supporting",
+                    count=1,
+                    genre="悬疑奇幻",
+                    tone="压抑克制",
+                ),
+            )
+
+        self.assertEqual(pipeline.response.characters[0].name, "沈遥")
+        self.assertTrue(pipeline.trace["failover_triggered"])
+        self.assertEqual(pipeline.trace["selected_role"], "outline")
+        self.assertEqual(len(pipeline.trace["failover_attempts"]), 1)
+
     async def test_generate_characters_falls_back_to_contextual_candidates(self) -> None:
         story_bible = make_story_bible()
 

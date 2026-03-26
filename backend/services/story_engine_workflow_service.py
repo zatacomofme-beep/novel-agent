@@ -73,6 +73,7 @@ class OutlineStressState(TypedDict, total=False):
     session: AsyncSession
     project_id: UUID
     user_id: UUID
+    branch_id: Optional[UUID]
     idea: str
     source_material: Optional[str]
     source_material_name: Optional[str]
@@ -97,6 +98,7 @@ class RealtimeGuardState(TypedDict, total=False):
     session: AsyncSession
     project_id: UUID
     user_id: UUID
+    branch_id: Optional[UUID]
     chapter_number: int
     chapter_title: Optional[str]
     outline_id: Optional[UUID]
@@ -118,6 +120,7 @@ class FinalVerifyState(TypedDict, total=False):
     session: AsyncSession
     project_id: UUID
     user_id: UUID
+    branch_id: Optional[UUID]
     chapter_number: int
     chapter_title: Optional[str]
     draft_text: str
@@ -138,6 +141,7 @@ async def run_outline_stress_test(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID],
     idea: Optional[str],
     source_material: Optional[str],
     source_material_name: Optional[str],
@@ -151,6 +155,7 @@ async def run_outline_stress_test(
         "session": session,
         "project_id": project_id,
         "user_id": user_id,
+        "branch_id": branch_id,
         "idea": (idea or "").strip(),
         "source_material": (source_material or "").strip() or None,
         "source_material_name": (source_material_name or "").strip() or None,
@@ -173,6 +178,7 @@ async def run_outline_stress_test(
         session=session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
         outline_draft=result["outline_draft"],
         initial_kb=result["initial_kb"],
     )
@@ -221,6 +227,7 @@ async def run_realtime_guard(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID] = None,
     chapter_number: int,
     chapter_title: Optional[str],
     outline_id: Optional[UUID],
@@ -242,6 +249,7 @@ async def run_realtime_guard(
         "session": session,
         "project_id": project_id,
         "user_id": user_id,
+        "branch_id": branch_id,
         "chapter_number": chapter_number,
         "chapter_title": chapter_title,
         "outline_id": outline_id,
@@ -273,6 +281,7 @@ async def run_story_knowledge_guard(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID] = None,
     section_key: str,
     operation: str,
     candidate_item: dict[str, Any],
@@ -283,6 +292,7 @@ async def run_story_knowledge_guard(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
     )
     current_item = _find_story_knowledge_item_in_workspace(
         workspace=workspace,
@@ -357,6 +367,7 @@ async def run_story_bulk_import_guard(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID] = None,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
@@ -364,6 +375,7 @@ async def run_story_bulk_import_guard(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
     )
     fallback_issues = _build_story_bulk_import_guard_fallback_issues(
         workspace=workspace,
@@ -1536,6 +1548,7 @@ async def run_chapter_stream_generate(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID] = None,
     chapter_number: int,
     chapter_title: Optional[str],
     outline_id: Optional[UUID],
@@ -1556,6 +1569,7 @@ async def run_chapter_stream_generate(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
     )
     model_routing = resolve_story_engine_model_routing(project)
     outline_text = await _resolve_stream_outline_text(
@@ -1709,6 +1723,7 @@ async def run_chapter_stream_generate(
             session,
             project_id=project_id,
             user_id=user_id,
+            branch_id=branch_id,
             chapter_number=chapter_number,
             chapter_title=chapter_title,
             outline_id=outline_id,
@@ -1843,6 +1858,7 @@ async def run_chapter_stream_generate(
             session,
             project_id=project_id,
             user_id=user_id,
+            branch_id=branch_id,
             chapter_number=chapter_number,
             chapter_title=chapter_title,
             outline_id=outline_id,
@@ -1884,6 +1900,7 @@ async def run_final_optimize(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID] = None,
     chapter_number: int,
     chapter_title: Optional[str],
     draft_text: str,
@@ -1895,6 +1912,7 @@ async def run_final_optimize(
         session=session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
         chapter_number=chapter_number,
         chapter_title=chapter_title,
         draft_text=draft_text,
@@ -1911,6 +1929,7 @@ async def run_final_optimize(
         session=session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
         chapter_number=chapter_number,
         payload=result["anchor_payload"]["chapter_summary"],
     )
@@ -1945,11 +1964,13 @@ async def load_story_engine_workspace(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID] = None,
 ) -> dict[str, Any]:
     return await build_workspace(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
     )
 
 
@@ -2013,6 +2034,7 @@ async def _run_final_verify_until_converged(
     session: AsyncSession,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID],
     chapter_number: int,
     chapter_title: Optional[str],
     draft_text: str,
@@ -2031,6 +2053,7 @@ async def _run_final_verify_until_converged(
             "session": session,
             "project_id": project_id,
             "user_id": user_id,
+            "branch_id": branch_id,
             "chapter_number": chapter_number,
             "chapter_title": chapter_title,
             "draft_text": current_draft,
@@ -2653,6 +2676,7 @@ async def _realtime_guardian_node(state: RealtimeGuardState) -> dict[str, Any]:
             state["session"],
             project_id=state["project_id"],
             user_id=state["user_id"],
+            branch_id=state.get("branch_id"),
         )
     text = state.get("latest_paragraph") or state["draft_text"]
     alerts: list[dict[str, Any]] = []
@@ -2743,6 +2767,7 @@ async def _realtime_commercial_node(state: RealtimeGuardState) -> dict[str, Any]
             state["session"],
             project_id=state["project_id"],
             user_id=state["user_id"],
+            branch_id=state.get("branch_id"),
         )
     fallback_repair_options = [
         "先保留本段冲突，但补一段代价说明，让爽点成立。",
@@ -2806,6 +2831,7 @@ async def _realtime_arbitrator_node(state: RealtimeGuardState) -> dict[str, Any]
             state["session"],
             project_id=state["project_id"],
             user_id=state["user_id"],
+            branch_id=state.get("branch_id"),
         )
     arbitration = await generate_story_realtime_arbitration(
         chapter_number=state["chapter_number"],
@@ -2866,6 +2892,7 @@ async def _final_guardian_node(state: FinalVerifyState) -> dict[str, Any]:
         state["session"],
         project_id=state["project_id"],
         user_id=state["user_id"],
+        branch_id=state.get("branch_id"),
     )
     issues: list[dict[str, Any]] = []
     draft = state["draft_text"]
@@ -2932,6 +2959,7 @@ async def _final_logic_node(state: FinalVerifyState) -> dict[str, Any]:
         state["session"],
         project_id=state["project_id"],
         user_id=state["user_id"],
+        branch_id=state.get("branch_id"),
     )
     fallback_report = build_agent_report(
         "logic_debunker",
@@ -2984,6 +3012,7 @@ async def _final_commercial_node(state: FinalVerifyState) -> dict[str, Any]:
         state["session"],
         project_id=state["project_id"],
         user_id=state["user_id"],
+        branch_id=state.get("branch_id"),
     )
     fallback_report = build_agent_report(
         "commercial",
@@ -3029,6 +3058,7 @@ async def _final_style_node(state: FinalVerifyState) -> dict[str, Any]:
         state["session"],
         project_id=state["project_id"],
         user_id=state["user_id"],
+        branch_id=state.get("branch_id"),
     )
     fallback_report = build_agent_report(
         "style_guardian",
@@ -3065,6 +3095,7 @@ async def _final_anchor_node(state: FinalVerifyState) -> dict[str, Any]:
         state["session"],
         project_id=state["project_id"],
         user_id=state["user_id"],
+        branch_id=state.get("branch_id"),
     )
     fallback_payload = {
         "chapter_summary": {
@@ -3213,10 +3244,23 @@ async def _persist_outline_stress_result(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID],
     outline_draft: dict[str, list[dict[str, Any]]],
     initial_kb: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    await session.execute(delete(StoryOutline).where(StoryOutline.project_id == project_id))
+    if branch_id is None:
+        raise AppError(
+            code="story_engine.branch_scope_required",
+            message="当前分线范围缺失，暂时不能写入这套大纲。",
+            status_code=422,
+        )
+
+    await session.execute(
+        delete(StoryOutline).where(
+            StoryOutline.project_id == project_id,
+            StoryOutline.branch_id == branch_id,
+        )
+    )
     await session.commit()
 
     created_level_1: list[Any] = []
@@ -3229,7 +3273,7 @@ async def _persist_outline_stress_result(
             project_id=project_id,
             user_id=user_id,
             entity_type="outlines",
-            payload=item,
+            payload={**item, "branch_id": branch_id},
             source_workflow="outline_stress_test",
         )
         created_level_1.append(created)
@@ -3242,7 +3286,7 @@ async def _persist_outline_stress_result(
             project_id=project_id,
             user_id=user_id,
             entity_type="outlines",
-            payload=payload,
+            payload={**payload, "branch_id": branch_id},
             source_workflow="outline_stress_test",
         )
         created_level_2.append(created)
@@ -3255,7 +3299,7 @@ async def _persist_outline_stress_result(
             project_id=project_id,
             user_id=user_id,
             entity_type="outlines",
-            payload=payload,
+            payload={**payload, "branch_id": branch_id},
             source_workflow="outline_stress_test",
         )
         created_level_3.append(created)
@@ -3272,11 +3316,13 @@ async def _persist_outline_stress_result(
         project_id=project_id,
         user_id=user_id,
         entity_type="outlines",
+        branch_id=branch_id,
     )
     workspace = await build_workspace(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
     )
     return {
         "outlines": outlines,
@@ -3322,11 +3368,19 @@ async def _upsert_chapter_summary(
     *,
     project_id: UUID,
     user_id: UUID,
+    branch_id: Optional[UUID],
     chapter_number: int,
     payload: dict[str, Any],
 ) -> Any:
+    if branch_id is None:
+        raise AppError(
+            code="story_engine.branch_scope_required",
+            message="当前分线范围缺失，暂时不能保存章节总结。",
+            status_code=422,
+        )
     statement = select(StoryChapterSummary).where(
         StoryChapterSummary.project_id == project_id,
+        StoryChapterSummary.branch_id == branch_id,
         StoryChapterSummary.chapter_number == chapter_number,
     )
     result = await session.execute(statement)
@@ -3337,7 +3391,7 @@ async def _upsert_chapter_summary(
             project_id=project_id,
             user_id=user_id,
             entity_type="chapter_summaries",
-            payload={"chapter_number": chapter_number, **payload},
+            payload={"chapter_number": chapter_number, "branch_id": branch_id, **payload},
             source_workflow="final_verify",
         )
     return await update_entity(

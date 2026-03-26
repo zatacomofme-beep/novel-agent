@@ -17,7 +17,7 @@
 
 仍需关注：
 
-- 底层持久化仍然通过 `world_settings` wrapper 做兼容映射，不是最终领域表结构
+- 旧项目与旧版本记录里仍可能出现 `world_settings` wrapper，但运行时已改成原生优先，并会在读取时自动迁移/规范化
 
 ### 2. pending count 路由已补齐
 
@@ -52,19 +52,19 @@
 - `backend/schemas/base.py` 重新提供 `EmptyResponse` / `PaginatedResponse`
 - `backend/schemas/__init__.py` 改为 lazy export，避免 eager import 触发循环依赖
 
-### 6. 实体生成接口不再返回静态占位值
+### 6. 实体生成接口已并入项目任务链
 
 已修复：
 
-- `/generations/characters`、`/items`、`/locations`、`/factions`、`/plot-threads`
-  已接入 `entity_generation_service`
-- 服务层优先走 `ModelGateway` 远程生成
-- 远程模型不可用或输出非法 JSON 时，自动回退到本地启发式生成
+- `/generations/*/dispatch` 现在会统一进入项目任务链，并回写 `task_runs` / `task_events`
+- `entity_generation_service` 已接入项目级模型路由，按职责候选链自动选择模型
+- 远程模型不可用或输出非法 JSON 时，会记录 failover / fallback 轨迹，而不是直接静默退回
+- `story-room` 设定区已经能显示这条补全任务的阶段进度，而不只是一个最终结果
 
 补充：
 
-- 当前是同步请求/响应式生成，不属于章节那条 task/event/agent 编排链
-- 但已经不是 `角色1`、`物品1` 这类 scaffold 返回
+- 同步 `/generations/*` 路由仍然保留兼容能力
+- 但写手主路径已经收口到 dispatch + task/event 的统一链路
 
 ### 7. story-room 已接入正式章节主链
 
@@ -93,21 +93,32 @@
 
 - 模型路由现在明确被定义为后台管理员能力，而不是写手前台能力
 
+### 9. `items / factions` 底层领域模型已完成第一版原生化
+
+已修复：
+
+- 项目级 `Story Bible` 读取时会自动把 legacy `world_settings` wrapper 迁移到原生 `project_items / project_factions`
+- `build_public_story_bible_sections()` 已调整为 native-first，同名条目不会再被 legacy wrapper 反向覆盖
+- 分支快照会在读取时 canonical 化为原生 section delta，不再继续把 `item / faction` 混在 `world_settings`
+- 回滚版本时也会先做 canonical 化，避免旧 snapshot 恢复后重新污染主存储语义
+
+补充：
+
+- 兼容读取仍然保留，主要用于历史数据、导出和旧测试夹具，不再是主链写入策略
+
 ## 仍待处理
 
-### P1: 领域建模仍然不够纯
+### P1: Story Bible 的溯源与引用关系还不够强
 
 现象：
 
-- `items`、`factions` 在公开 API 上已经是原生 section
-- 但底层仍通过 `world_settings` 中的特殊 wrapper 行来持久化
-- 这意味着 API 语义已经干净，数据库/领域模型仍保留兼容层
+- 当前 `items / factions` 的主存储语义已经原生化
+- 但正文引用、设定引用、分支差异来源、章节总结回写来源还没有形成统一的溯源关系层
 
 影响：
 
-- 当前前后端联调已经顺畅
-- 但数据库查询、迁移设计、后续 canon 编译优化仍然要背着兼容层做适配
-- 如果后续要拆出真正的 `items` / `factions` 存储模型，还需要一次存储层迁移
+- 当前前后端联调已经顺畅，领域存储也已经基本干净
+- 但后续如果要做“正文引用某条设定时可回跳来源”“为什么这一条设定在分支里变了”这类能力，现有数据还不够可追踪
 
 相关代码：
 
@@ -137,12 +148,10 @@
 
 ## 建议修复顺序
 
-1. 先决定 `items` / `factions` 是否继续从兼容存储升级到底层原生领域模型
-2. 再决定实体生成是否要继续升级成 task/event/agent 化链路
-3. 最后再决定旧章节编辑器哪些能力继续保留，哪些迁入 `story-room`
+1. 先继续做 Story Bible 关联与溯源增强
+2. 再决定旧章节编辑器哪些能力继续保留，哪些迁入 `story-room`
 
 ## 为什么这个顺序最合理
 
-- 第一项现在不再是 API 契约问题，而是要不要继续推进到底层存储/领域模型纯化
-- 第二项关系到 entity generation 是保持轻量同步服务，还是并入正式 Agent 工作流
-- 第三项虽然不直接改业务功能，但已经开始影响测试、导入和开发体验
+- 第一项现在不再是 API 契约或存储纯化问题，而是要把设定关系与来源链补齐
+- 第二项虽然不直接改业务功能，但已经开始影响测试、导入和开发体验

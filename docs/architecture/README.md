@@ -9,11 +9,12 @@
 
 ## 建议阅读顺序
 
-1. `domain-model.md`
-2. `chapter-lifecycle.md`
-3. `agent-collaboration.md`
-4. `api-contract-map.md`
-5. `alignment-backlog.md`
+1. `implementation-task-table.md`
+2. `domain-model.md`
+3. `chapter-lifecycle.md`
+4. `agent-collaboration.md`
+5. `api-contract-map.md`
+6. `alignment-backlog.md`
 
 ## 一张总图
 
@@ -111,10 +112,18 @@
 - 哪些偏差属于“语义和实现不一致”
 - 如果要开始收口，修复顺序应该是什么
 
+### `implementation-task-table.md`
+
+重点回答：
+
+- 当前哪些任务已经完成
+- 哪些任务正在做、接下来按什么顺序做
+- 每项任务对应哪些关键文件和验收标准
+
 ## 当前最值得优先关注的偏差
 
-- `items` / `factions` 已经是公开 API 和前端工作区里的原生 section，但底层仍通过兼容映射落到 `world_settings`，还不是最终领域建模。
-- 实体生成接口虽然已接入轻量生成服务，但还没有并入 task/event/agent 工作流。
+- `items` / `factions` 的主存储语义已经原生化，当前剩余重点转到 Story Bible 的关联、溯源和引用关系增强。
+- 实体生成已经并入项目级 task/event 主链，接下来更值得盯的是设定如何更稳定地被正文、版本和分支复用。
 - `story-room` 已经接入正式章节主链，但完整 review/comment/checkpoint 操作仍主要保留在专用章节编辑器中。
 
 ## 推荐用法

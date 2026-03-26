@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { StoryDeliberationPanel } from "@/components/story-engine/story-deliberation-panel";
 import type { OutlineStressTestResponse, StoryEngineIssue, StoryOutline } from "@/types/api";
@@ -201,6 +201,7 @@ export function OutlineWorkbench({
   const [editingOutlineId, setEditingOutlineId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [editingContent, setEditingContent] = useState("");
+  const resultSectionRef = useRef<HTMLElement | null>(null);
 
   const displayOutlines = useMemo(
     () =>
@@ -225,6 +226,19 @@ export function OutlineWorkbench({
 
   const hasOutlineResult = displayOutlines.length > 0;
   const canGenerate = idea.trim().length > 0 || sourceMaterial.trim().length > 0;
+
+  useEffect(() => {
+    if (!result) {
+      return;
+    }
+    const frameId = window.requestAnimationFrame(() => {
+      resultSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [result]);
 
   async function handleUploadFile(file: File | null) {
     if (!file) {
@@ -264,7 +278,7 @@ export function OutlineWorkbench({
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-xs uppercase tracking-[0.24em] text-copper">第一步</p>
-              <h2 className="mt-2 text-2xl font-semibold">输入想法，或者上传已有大纲</h2>
+              <h2 className="mt-2 text-2xl font-semibold">先输入想法或贴入已有大纲</h2>
             </div>
             {hasOutlineResult ? (
               <button
@@ -312,7 +326,7 @@ export function OutlineWorkbench({
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold">上传已有大纲</p>
-                <p className="mt-2 text-sm text-black/58">支持 `.txt` / `.md`，也可以直接把大纲原文贴到下面。</p>
+                <p className="mt-2 text-sm text-black/58">支持 `.txt` / `.md`</p>
               </div>
               <label className="inline-flex cursor-pointer rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72">
                 选择文件
@@ -327,7 +341,7 @@ export function OutlineWorkbench({
 
             <textarea
               className="mt-4 min-h-[180px] w-full rounded-[22px] border border-black/10 bg-white px-4 py-3 text-sm leading-7 outline-none"
-              placeholder="如果你已经写好了粗大纲，直接贴进来。系统会先解读原文，再整理成三级大纲。"
+              placeholder="把已有大纲原文贴进来。"
               value={sourceMaterial}
               onChange={(event) => onSourceMaterialChange(event.target.value)}
             />
@@ -352,7 +366,7 @@ export function OutlineWorkbench({
         </section>
 
         <section className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_20px_50px_rgba(16,20,23,0.05)]">
-          <p className="text-sm font-semibold">体量设定</p>
+          <p className="text-sm font-semibold">再定这本书的体量</p>
 
           <div className="mt-5 grid gap-4">
             <label className="block">
@@ -407,21 +421,25 @@ export function OutlineWorkbench({
 
           <div className="mt-5 flex flex-wrap gap-2">
             <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-              生成后可继续修改二级、三级大纲
+              二级、三级可改
             </span>
             <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-              一级主线默认锁定
+              一级主线锁定
             </span>
           </div>
         </section>
       </div>
 
       {hasOutlineResult ? (
-        <section className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_20px_50px_rgba(16,20,23,0.05)]">
+        <section
+          ref={resultSectionRef}
+          className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_20px_50px_rgba(16,20,23,0.05)]"
+        >
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <p className="text-xs uppercase tracking-[0.24em] text-copper">生成结果</p>
+              <p className="text-xs uppercase tracking-[0.24em] text-copper">第二步</p>
               <h2 className="mt-2 text-2xl font-semibold">三级大纲已经出来了</h2>
+              <p className="mt-2 text-sm text-black/58">下面顺手把明显问题也查了一遍。</p>
             </div>
             <button
               className="rounded-full bg-[#566246] px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
@@ -497,7 +515,7 @@ export function OutlineWorkbench({
         <>
           <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
             <section className="rounded-[28px] border border-black/10 bg-white/85 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <h3 className="text-lg font-semibold">这轮需要注意的问题</h3>
+              <h3 className="text-lg font-semibold">顺手查到的问题</h3>
               <div className="mt-4 space-y-3">
                 {result.risk_report.length > 0 ? (
                   result.risk_report.map((issue) => (
@@ -515,7 +533,7 @@ export function OutlineWorkbench({
             </section>
 
             <section className="rounded-[28px] border border-black/10 bg-white/85 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <h3 className="text-lg font-semibold">建议怎么补</h3>
+              <h3 className="text-lg font-semibold">优先补这几处</h3>
               <div className="mt-4 space-y-3">
                 {result.optimization_plan.length > 0 ? (
                   result.optimization_plan.map((item) => (
@@ -537,7 +555,6 @@ export function OutlineWorkbench({
 
           <StoryDeliberationPanel
             title="这次大纲怎么收口的"
-            description="默认收起。需要时再展开看这一轮为什么这样定。"
             rounds={result.deliberation_rounds}
             emptyText="这次大纲结果还没有可展示的推演纪要。"
           />

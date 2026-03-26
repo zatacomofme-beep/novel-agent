@@ -21,7 +21,7 @@ from services.story_engine_kb_service import (
     get_story_engine_project,
     list_entities,
 )
-from services.project_service import PROJECT_PERMISSION_EDIT
+from services.project_service import PROJECT_PERMISSION_EDIT, get_owned_project
 from services.story_engine_settings_service import (
     build_story_engine_settings_for_preset,
     get_story_engine_model_preset_label,
@@ -251,9 +251,16 @@ async def bulk_import_story_payload(
     user_id: UUID,
     payload: StoryBulkImportPayload,
     replace_existing_sections: list[str],
+    branch_id: UUID | None = None,
     model_preset_key: str | None = None,
 ) -> dict[str, Any]:
     await get_story_engine_project(session, project_id, user_id)
+    resolved_branch_id = await _resolve_import_branch_id(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        branch_id=branch_id,
+    )
     normalized_replace_sections = [item for item in replace_existing_sections if item in IMPORTABLE_SECTIONS]
     existing_entities_by_section: dict[str, list[Any]] = {}
 
@@ -262,6 +269,7 @@ async def bulk_import_story_payload(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=resolved_branch_id,
         payload=payload.model_dump(mode="json"),
     )
     _raise_when_bulk_import_guard_blocks(preflight_result)
@@ -275,6 +283,7 @@ async def bulk_import_story_payload(
             project_id=project_id,
             user_id=user_id,
             entity_type=section,
+            branch_id=resolved_branch_id if section in {"outlines", "chapter_summaries"} else None,
         )
         if section == "outlines" and any(
             getattr(entity, "locked", False) for entity in existing_entities_by_section[section]
@@ -450,6 +459,7 @@ async def bulk_import_story_payload(
                 parent_outline = await _find_outline_by_title(
                     session,
                     project_id=project_id,
+                    branch_id=resolved_branch_id,
                     title=item.parent_title,
                 )
                 if parent_outline is not None:
@@ -463,12 +473,17 @@ async def bulk_import_story_payload(
             existing = await _find_outline(
                 session,
                 project_id=project_id,
+                branch_id=resolved_branch_id,
                 title=item.title,
                 level=item.level,
             )
             target_outline = existing
             if item.level == "level_1" and target_outline is None:
-                target_outline = await _find_any_level_1_outline(session, project_id=project_id)
+                target_outline = await _find_any_level_1_outline(
+                    session,
+                    project_id=project_id,
+                    branch_id=resolved_branch_id,
+                )
             if target_outline is None:
                 mutation_result = await save_story_knowledge(
                     session,
@@ -476,6 +491,7 @@ async def bulk_import_story_payload(
                     user_id=user_id,
                     section_key="outlines",
                     item=outline_payload,
+                    branch_id=resolved_branch_id,
                     source_workflow="bulk_import",
                     guard_operation="导入",
                     skip_guard=True,
@@ -489,6 +505,7 @@ async def bulk_import_story_payload(
                 created = await _find_outline(
                     session,
                     project_id=project_id,
+                    branch_id=resolved_branch_id,
                     title=item.title,
                     level=item.level,
                 )
@@ -513,6 +530,7 @@ async def bulk_import_story_payload(
                         section_key="outlines",
                         item=outline_payload,
                         entity_id=str(target_outline.outline_id),
+                        branch_id=resolved_branch_id,
                         source_workflow="bulk_import",
                         guard_operation="导入",
                         skip_guard=True,
@@ -526,6 +544,7 @@ async def bulk_import_story_payload(
                     created = await _find_outline(
                         session,
                         project_id=project_id,
+                        branch_id=resolved_branch_id,
                         title=item.title,
                         level=item.level,
                     ) or target_outline
@@ -540,6 +559,7 @@ async def bulk_import_story_payload(
         existing = await _find_chapter_summary(
             session,
             project_id=project_id,
+            branch_id=resolved_branch_id,
             chapter_number=item.chapter_number,
         )
         mutation_result = await save_story_knowledge(
@@ -549,6 +569,7 @@ async def bulk_import_story_payload(
             section_key="chapter_summaries",
             item=item_payload,
             entity_id=str(existing.summary_id) if existing is not None else None,
+            branch_id=resolved_branch_id,
             source_workflow="bulk_import",
             guard_operation="导入",
             skip_guard=True,
@@ -574,6 +595,7 @@ async def bulk_import_story_payload(
                 user_id=user_id,
                 section_key=section,
                 entity_id=str(getattr(entity, SECTION_ID_FIELD_MAP[section])),
+                branch_id=resolved_branch_id if section in {"outlines", "chapter_summaries"} else None,
                 source_workflow="bulk_import",
             )
 
@@ -764,11 +786,13 @@ async def _find_outline(
     session: AsyncSession,
     *,
     project_id: UUID,
+    branch_id: UUID,
     title: str,
     level: str,
 ) -> StoryOutline | None:
     statement = select(StoryOutline).where(
         StoryOutline.project_id == project_id,
+        StoryOutline.branch_id == branch_id,
         StoryOutline.title == title,
         StoryOutline.level == level,
     )
@@ -780,9 +804,11 @@ async def _find_any_level_1_outline(
     session: AsyncSession,
     *,
     project_id: UUID,
+    branch_id: UUID,
 ) -> StoryOutline | None:
     statement = select(StoryOutline).where(
         StoryOutline.project_id == project_id,
+        StoryOutline.branch_id == branch_id,
         StoryOutline.level == "level_1",
     )
     result = await session.execute(statement)
@@ -793,10 +819,12 @@ async def _find_outline_by_title(
     session: AsyncSession,
     *,
     project_id: UUID,
+    branch_id: UUID,
     title: str,
 ) -> StoryOutline | None:
     statement = select(StoryOutline).where(
         StoryOutline.project_id == project_id,
+        StoryOutline.branch_id == branch_id,
         StoryOutline.title == title,
     )
     result = await session.execute(statement)
@@ -807,11 +835,50 @@ async def _find_chapter_summary(
     session: AsyncSession,
     *,
     project_id: UUID,
+    branch_id: UUID,
     chapter_number: int,
 ) -> StoryChapterSummary | None:
     statement = select(StoryChapterSummary).where(
         StoryChapterSummary.project_id == project_id,
+        StoryChapterSummary.branch_id == branch_id,
         StoryChapterSummary.chapter_number == chapter_number,
     )
     result = await session.execute(statement)
     return result.scalar_one_or_none()
+
+
+async def _resolve_import_branch_id(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    user_id: UUID,
+    branch_id: UUID | None,
+) -> UUID:
+    project = await get_owned_project(
+        session,
+        project_id,
+        user_id,
+        with_relations=True,
+        permission=PROJECT_PERMISSION_EDIT,
+    )
+    branches = sorted(
+        list(project.branches),
+        key=lambda item: (0 if item.is_default else 1, item.created_at),
+    )
+    if not branches:
+        raise AppError(
+            code="story_engine.branch_scope_missing",
+            message="当前项目还没有可用分线，暂时不能导入这套设定。",
+            status_code=409,
+        )
+    if branch_id is not None:
+        matched_branch = next((item for item in branches if item.id == branch_id), None)
+        if matched_branch is None:
+            raise AppError(
+                code="story_engine.branch_scope_not_found",
+                message="当前分线不存在或已经被删除，请刷新后重试。",
+                status_code=404,
+            )
+        return matched_branch.id
+    default_branch = next((item for item in branches if item.is_default), None)
+    return (default_branch or branches[0]).id

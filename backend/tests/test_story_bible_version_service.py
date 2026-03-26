@@ -32,8 +32,20 @@ class StoryBibleVersionServiceTests(unittest.IsolatedAsyncioTestCase):
         descendant_branch_id = uuid4()
         user_id = uuid4()
         target_version_id = uuid4()
-        current_snapshot = {"characters": [{"id": "hero-2", "name": "沈岚"}]}
-        target_snapshot = {"characters": [{"id": "hero-1", "name": "林澈"}]}
+        current_snapshot = {
+            "characters": {
+                "mode": "patch",
+                "order": ["id:hero-2"],
+                "upserts": [{"id": "hero-2", "name": "沈岚"}],
+            }
+        }
+        target_snapshot = {
+            "characters": {
+                "mode": "patch",
+                "order": ["id:hero-1"],
+                "upserts": [{"id": "hero-1", "name": "林澈"}],
+            }
+        }
         branch = SimpleNamespace(id=branch_id, title="主线", source_branch_id=None)
         descendant_branch = SimpleNamespace(
             id=descendant_branch_id,
@@ -58,6 +70,23 @@ class StoryBibleVersionServiceTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "services.story_bible_version_service.get_project_branch_story_bible",
                 new=AsyncMock(return_value=branch_story_bible),
+            ),
+            patch(
+                "services.story_bible_version_service.resolve_story_bible_resolution",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        base_sections={
+                            "characters": [],
+                            "world_settings": [],
+                            "items": [],
+                            "factions": [],
+                            "locations": [],
+                            "plot_threads": [],
+                            "foreshadowing": [],
+                            "timeline_events": [],
+                        }
+                    )
+                ),
             ),
             patch(
                 "services.story_bible_version_service.create_story_bible_version",
@@ -116,7 +145,13 @@ class StoryBibleVersionServiceTests(unittest.IsolatedAsyncioTestCase):
             snapshot={},
         )
         branch_story_bible = SimpleNamespace(
-            payload={"world_settings": [{"key": "rule-1", "title": "代价"}]}
+            payload={
+                "world_settings": {
+                    "mode": "patch",
+                    "order": ["key:rule-1"],
+                    "upserts": [{"key": "rule-1", "title": "代价", "data": {}}],
+                }
+            }
         )
         session = AsyncMock()
         session.execute.return_value = _ScalarResult(target_version)
@@ -125,6 +160,23 @@ class StoryBibleVersionServiceTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "services.story_bible_version_service.get_project_branch_story_bible",
                 new=AsyncMock(return_value=branch_story_bible),
+            ),
+            patch(
+                "services.story_bible_version_service.resolve_story_bible_resolution",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        base_sections={
+                            "characters": [],
+                            "world_settings": [],
+                            "items": [],
+                            "factions": [],
+                            "locations": [],
+                            "plot_threads": [],
+                            "foreshadowing": [],
+                            "timeline_events": [],
+                        }
+                    )
+                ),
             ),
             patch(
                 "services.story_bible_version_service.create_story_bible_version",

@@ -1,14 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { FinalPublishPanel } from "@/components/story-engine/final-publish-panel";
 import { DraftStudio } from "@/components/story-engine/draft-studio";
 import { FinalDiffViewer } from "@/components/story-engine/final-diff-viewer";
 import { ChapterReviewPanel } from "@/components/story-engine/chapter-review-panel";
+import type { DraftEditorHandle } from "@/components/story-engine/draft-editor-handle";
 import { StyleControlPanel } from "@/components/story-engine/style-control-panel";
+import { StoryScopeSwitcher } from "@/components/story-engine/story-scope-switcher";
 import {
   KnowledgeBaseBoard,
   type KnowledgeSuggestionKind,
@@ -17,6 +19,18 @@ import {
 import { OutlineWorkbench } from "@/components/story-engine/outline-workbench";
 import { apiFetchWithAuth, apiStreamWithAuth } from "@/lib/api";
 import { buildUserFriendlyError } from "@/lib/errors";
+import {
+  analyzeStoryRoomLocalDraftRecovery,
+  buildStoryRoomLocalDraftKey,
+  listStoryRoomLocalDrafts,
+  readStoryRoomLocalDraft,
+  removeStoryRoomLocalDraft,
+  summarizeStoryRoomLocalDraft,
+  type StoryRoomLocalDraftRecoveryState,
+  type StoryRoomLocalDraftSnapshot,
+  type StoryRoomLocalDraftSummary,
+  writeStoryRoomLocalDraft,
+} from "@/lib/story-room-local-draft";
 import type {
   Chapter,
   ChapterReviewWorkspace,
@@ -28,6 +42,7 @@ import type {
   ProjectBootstrapState,
   ProjectStructure,
   ProjectEntityGenerationDispatch,
+  ProjectNextChapterCandidate,
   RealtimeGuardResponse,
   RollbackResponse,
   StoryBible,
@@ -38,6 +53,7 @@ import type {
   StoryBulkImportResponse,
   StoryEngineWorkspace,
   StoryGeneratedCandidateAcceptResponse,
+  StoryChapterSummary,
   StoryKnowledgeSuggestion,
   StoryKnowledgeSuggestionResolveResponse,
   StoryKnowledgeMutationResponse,
@@ -45,6 +61,7 @@ import type {
   StorySearchResult,
   StoryOutline,
   StyleTemplate,
+  TaskEvent,
   TaskState,
   UserPreferenceProfile,
 } from "@/types/api";
@@ -68,6 +85,34 @@ type StreamContinueOptions = {
 };
 
 type StoryRoomStageKey = "outline" | "draft" | "final" | "knowledge";
+
+type DraftStudioRecoverableDraft = StoryRoomLocalDraftSummary & {
+  scopeLabel: string;
+  isCurrent: boolean;
+};
+
+function parseStoryRoomStage(value: string | null): StoryRoomStageKey | null {
+  if (
+    value === "outline" ||
+    value === "draft" ||
+    value === "final" ||
+    value === "knowledge"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function parseStoryRoomChapterNumber(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.trunc(parsed);
+}
 
 const IMPORT_SECTION_LABELS: Record<string, string> = {
   characters: "人物",
@@ -481,11 +526,23 @@ function sortChapters(chapters: Chapter[]): Chapter[] {
   });
 }
 
-function isChapterInDefaultScope(chapter: Chapter, structure: ProjectStructure | null): boolean {
-  if (structure?.default_branch_id && chapter.branch_id !== structure.default_branch_id) {
+function findCreatedStructureItemId<T extends { id: string }>(
+  previousItems: T[],
+  nextItems: T[],
+): string | null {
+  const previousIds = new Set(previousItems.map((item) => item.id));
+  return nextItems.find((item) => !previousIds.has(item.id))?.id ?? null;
+}
+
+function isChapterInScope(
+  chapter: Chapter,
+  branchId: string | null,
+  volumeId: string | null,
+): boolean {
+  if (branchId && chapter.branch_id !== branchId) {
     return false;
   }
-  if (structure?.default_volume_id && chapter.volume_id !== structure.default_volume_id) {
+  if (volumeId && chapter.volume_id !== volumeId) {
     return false;
   }
   return true;
@@ -510,27 +567,248 @@ function buildChapterOutlinePayload(outline: StoryOutline | null): Record<string
 
 function buildRecentChapterTexts(
   chapters: Chapter[],
-  structure: ProjectStructure | null,
+  chapterSummaries: StoryChapterSummary[],
   chapterNumber: number,
 ): string[] {
-  return chapters
-    .filter(
-      (chapter) =>
-        chapter.chapter_number < chapterNumber &&
-        isChapterInDefaultScope(chapter, structure) &&
-        chapter.content.trim().length > 0,
+  const normalizeInlineText = (value: string): string => value.replace(/\s+/g, " ").trim();
+  const truncateInlineText = (value: string, maxLength: number): string => {
+    const normalized = normalizeInlineText(value);
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+  };
+  const buildSuggestionLabel = (item: StoryKnowledgeSuggestion): string =>
+    String(
+      item.applied_entity_label ??
+        item.name ??
+        item.title ??
+        item.content ??
+        item.entity_type ??
+        "设定变动",
+    ).trim();
+
+  const chapterMap = new Map(chapters.map((chapter) => [chapter.chapter_number, chapter]));
+  const summaryMap = new Map(chapterSummaries.map((summary) => [summary.chapter_number, summary]));
+  const recentChapterNumbers = Array.from(
+    new Set([
+      ...chapters.map((chapter) => chapter.chapter_number),
+      ...chapterSummaries.map((summary) => summary.chapter_number),
+    ]),
+  )
+    .filter((value) => value < chapterNumber)
+    .sort((left, right) => right - left)
+    .slice(0, 2);
+
+  return recentChapterNumbers
+    .map((value) => {
+      const summary = summaryMap.get(value);
+      if (summary) {
+        const progress = summary.core_progress
+          .map((item) => normalizeInlineText(item))
+          .filter(Boolean)
+          .slice(0, 2);
+        const appliedKnowledge = summary.kb_update_suggestions
+          .filter((item) => item.status === "applied")
+          .map((item) => buildSuggestionLabel(item))
+          .filter(Boolean)
+          .slice(0, 2);
+        const segments = [`第${summary.chapter_number}章总结：${summary.content}`];
+        if (progress.length > 0) {
+          segments.push(`推进：${progress.join("；")}`);
+        }
+        if (appliedKnowledge.length > 0) {
+          segments.push(`已确认设定：${appliedKnowledge.join("；")}`);
+        }
+        return truncateInlineText(segments.join(" "), 260);
+      }
+
+      const chapter = chapterMap.get(value);
+      if (!chapter || chapter.content.trim().length === 0) {
+        return "";
+      }
+      return truncateInlineText(`第${chapter.chapter_number}章正文：${chapter.content}`, 260);
+    })
+    .filter(Boolean);
+}
+
+function buildCurrentChapterCarryoverPreview(
+  summary: StoryChapterSummary | null,
+): string[] {
+  if (!summary) {
+    return [];
+  }
+
+  const normalizeInlineText = (value: string): string => value.replace(/\s+/g, " ").trim();
+  const truncateInlineText = (value: string, maxLength: number): string => {
+    const normalized = normalizeInlineText(value);
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+  };
+  const appliedKnowledge = summary.kb_update_suggestions
+    .filter((item) => item.status === "applied")
+    .map((item) =>
+      String(
+        item.applied_entity_label ??
+          item.name ??
+          item.title ??
+          item.content ??
+          item.entity_type ??
+          "设定变动",
+      ).trim(),
     )
-    .sort((left, right) => right.chapter_number - left.chapter_number)
-    .slice(0, 2)
-    .map((chapter) => chapter.content);
+    .filter(Boolean)
+    .slice(0, 3);
+
+  const preview: string[] = [];
+  if (summary.content.trim()) {
+    preview.push(truncateInlineText(summary.content, 180));
+  }
+  if (summary.core_progress.length > 0) {
+    preview.push(
+      truncateInlineText(`核心推进：${summary.core_progress.slice(0, 2).join("；")}`, 180),
+    );
+  }
+  if (appliedKnowledge.length > 0) {
+    preview.push(truncateInlineText(`已确认设定：${appliedKnowledge.join("；")}`, 180));
+  }
+  return preview.slice(0, 3);
+}
+
+function normalizeKnowledgeLookupText(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "");
+}
+
+function resolveKnowledgeTabForEntityType(entityType: string): KnowledgeTabKey | null {
+  if (
+    entityType === "characters" ||
+    entityType === "foreshadows" ||
+    entityType === "items" ||
+    entityType === "locations" ||
+    entityType === "factions" ||
+    entityType === "plot_threads" ||
+    entityType === "world_rules" ||
+    entityType === "timeline_events"
+  ) {
+    return entityType;
+  }
+  return null;
+}
+
+function resolveKnowledgeItemLabel(tab: KnowledgeTabKey, item: Record<string, unknown>): string {
+  if (tab === "characters" || tab === "items" || tab === "locations" || tab === "factions") {
+    return String(item.name ?? "").trim();
+  }
+  if (tab === "plot_threads") {
+    return String(item.title ?? "").trim();
+  }
+  if (tab === "world_rules") {
+    return String(item.rule_name ?? "").trim();
+  }
+  if (tab === "timeline_events") {
+    return String(item.core_event ?? "").trim();
+  }
+  return String(item.content ?? "").trim();
+}
+
+function resolveNextChapterCandidate(params: {
+  bootstrapCandidate: ProjectNextChapterCandidate | null;
+  currentChapterId: string | null;
+  currentChapterNumber: number;
+  branchId: string | null;
+  branchTitle: string | null;
+  volumeId: string | null;
+  volumeTitle: string | null;
+  scopeChapters: Chapter[];
+  level3Outlines: StoryOutline[];
+}): ProjectNextChapterCandidate | null {
+  const {
+    bootstrapCandidate,
+    currentChapterId,
+    currentChapterNumber,
+    branchId,
+    branchTitle,
+    volumeId,
+    volumeTitle,
+    scopeChapters,
+    level3Outlines,
+  } = params;
+
+  if (
+    bootstrapCandidate &&
+    (bootstrapCandidate.chapter_id !== currentChapterId ||
+      bootstrapCandidate.chapter_number !== currentChapterNumber)
+  ) {
+    return bootstrapCandidate;
+  }
+
+  const sortedScopeChapters = [...scopeChapters].sort(
+    (left, right) => left.chapter_number - right.chapter_number,
+  );
+  const nextSavedChapter =
+    sortedScopeChapters.find((chapter) => chapter.chapter_number > currentChapterNumber) ?? null;
+  if (nextSavedChapter) {
+    return {
+      chapter_id: nextSavedChapter.id,
+      chapter_number: nextSavedChapter.chapter_number,
+      title: nextSavedChapter.title,
+      branch_id: nextSavedChapter.branch_id,
+      branch_title: branchTitle,
+      volume_id: nextSavedChapter.volume_id,
+      volume_title: volumeTitle,
+      generation_mode: "existing_draft",
+      based_on_blueprint: Boolean(nextSavedChapter.outline),
+      has_existing_content: nextSavedChapter.content.trim().length > 0,
+    };
+  }
+
+  const nextOutline =
+    level3Outlines.find((outline) => outline.node_order > currentChapterNumber) ?? null;
+  if (nextOutline) {
+    return {
+      chapter_id: null,
+      chapter_number: nextOutline.node_order,
+      title: nextOutline.title,
+      branch_id: branchId,
+      branch_title: branchTitle,
+      volume_id: volumeId,
+      volume_title: volumeTitle,
+      generation_mode: "blueprint_seed",
+      based_on_blueprint: true,
+      has_existing_content: false,
+    };
+  }
+
+  return {
+    chapter_id: null,
+    chapter_number: currentChapterNumber + 1,
+    title: null,
+    branch_id: branchId,
+    branch_title: branchTitle,
+    volume_id: volumeId,
+    volume_title: volumeTitle,
+    generation_mode: "dynamic_continuation",
+    based_on_blueprint: false,
+    has_existing_content: false,
+  };
 }
 
 export default function StoryRoomPage() {
   const params = useParams<ProjectRouteParams>();
+  const searchParams = useSearchParams();
   const projectId = params.projectId;
+  const entryMode = searchParams.get("entry");
+  const isNewBookEntry = entryMode === "new-book";
+  const requestedStage = parseStoryRoomStage(searchParams.get("stage"));
+  const requestedChapterNumber = parseStoryRoomChapterNumber(searchParams.get("chapter"));
+  const requestedTool = searchParams.get("tool");
   const hydratedChapterKeyRef = useRef<string | null>(null);
+  const queryHydratedRef = useRef<string | null>(null);
   const bootstrapHydratedRef = useRef(false);
-  const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<DraftEditorHandle | null>(null);
+  const reviewPanelRef = useRef<HTMLElement | null>(null);
 
   const [workspace, setWorkspace] = useState<StoryEngineWorkspace | null>(null);
   const [bootstrapState, setBootstrapState] = useState<ProjectBootstrapState | null>(null);
@@ -548,6 +826,8 @@ export default function StoryRoomPage() {
   const [loadingStyleControl, setLoadingStyleControl] = useState(false);
   const [styleActionKey, setStyleActionKey] = useState<string | null>(null);
   const [projectStructure, setProjectStructure] = useState<ProjectStructure | null>(null);
+  const [selectedBranchId, setSelectedBranchId] = useState<string | null>(null);
+  const [selectedVolumeId, setSelectedVolumeId] = useState<string | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -581,8 +861,18 @@ export default function StoryRoomPage() {
   const [resolvingSuggestionId, setResolvingSuggestionId] = useState<string | null>(null);
   const [savingDraft, setSavingDraft] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [localDraftSavedAt, setLocalDraftSavedAt] = useState<string | null>(null);
+  const [localDraftRecoveredAt, setLocalDraftRecoveredAt] = useState<string | null>(null);
+  const [pendingLocalDraftRecoveryState, setPendingLocalDraftRecoveryState] =
+    useState<StoryRoomLocalDraftRecoveryState | null>(null);
+  const [pendingLocalDraftSnapshot, setPendingLocalDraftSnapshot] =
+    useState<StoryRoomLocalDraftSnapshot | null>(null);
+  const [recoverableLocalDrafts, setRecoverableLocalDrafts] = useState<
+    StoryRoomLocalDraftSummary[]
+  >([]);
   const [exportingFormat, setExportingFormat] = useState<"md" | "txt" | null>(null);
-  const [finalizingChapter, setFinalizingChapter] = useState(false);
+  const [finalizingAction, setFinalizingAction] = useState<"save" | "continue" | null>(null);
   const [reviewWorkspace, setReviewWorkspace] = useState<ChapterReviewWorkspace | null>(null);
   const [chapterVersions, setChapterVersions] = useState<ChapterVersion[]>([]);
   const [loadingChapterReview, setLoadingChapterReview] = useState(false);
@@ -601,11 +891,14 @@ export default function StoryRoomPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<StorySearchResult[]>([]);
   const [entityTaskState, setEntityTaskState] = useState<TaskState | null>(null);
+  const [entityTaskEvents, setEntityTaskEvents] = useState<TaskEvent[]>([]);
   const [dispatchingEntityKind, setDispatchingEntityKind] =
     useState<KnowledgeSuggestionKind | null>(null);
   const [acceptingCandidateIndex, setAcceptingCandidateIndex] = useState<number | null>(null);
   const [activeStage, setActiveStage] = useState<StoryRoomStageKey | null>(null);
   const [pendingStageScroll, setPendingStageScroll] = useState<StoryRoomStageKey | null>(null);
+  const [pendingReviewPanelFocus, setPendingReviewPanelFocus] = useState(false);
+  const [scopeActionKey, setScopeActionKey] = useState<string | null>(null);
 
   const outlineList = useMemo(
     () =>
@@ -619,10 +912,34 @@ export default function StoryRoomPage() {
     [stressResult, workspace?.outlines],
   );
 
+  const selectedBranch = useMemo(
+    () =>
+      projectStructure?.branches.find((item) => item.id === selectedBranchId) ??
+      null,
+    [projectStructure?.branches, selectedBranchId],
+  );
+
+  const selectedVolume = useMemo(
+    () =>
+      projectStructure?.volumes.find((item) => item.id === selectedVolumeId) ??
+      null,
+    [projectStructure?.volumes, selectedVolumeId],
+  );
+
+  const scopeChapters = useMemo(
+    () =>
+      chapters.filter((chapter) =>
+        isChapterInScope(chapter, selectedBranchId, selectedVolumeId),
+      ),
+    [chapters, selectedBranchId, selectedVolumeId],
+  );
+
   const activeChapter = useMemo(() => {
-    const matches = chapters.filter((chapter) => chapter.chapter_number === chapterNumber);
-    return matches.find((chapter) => isChapterInDefaultScope(chapter, projectStructure)) ?? matches[0] ?? null;
-  }, [chapterNumber, chapters, projectStructure]);
+    return (
+      scopeChapters.find((chapter) => chapter.chapter_number === chapterNumber) ??
+      null
+    );
+  }, [chapterNumber, scopeChapters]);
 
   const level3OutlineList = useMemo(
     () =>
@@ -637,42 +954,21 @@ export default function StoryRoomPage() {
     [chapterNumber, outlineList],
   );
 
-  const defaultVolumeTitle = useMemo(() => {
-    if (!projectStructure?.default_volume_id) {
-      return "默认卷";
-    }
-    return (
-      projectStructure.volumes.find((item) => item.id === projectStructure.default_volume_id)?.title ??
-      "默认卷"
-    );
-  }, [projectStructure]);
-
-  const defaultBranchTitle = useMemo(() => {
-    if (!projectStructure?.default_branch_id) {
-      return "默认主线";
-    }
-    return (
-      projectStructure.branches.find((item) => item.id === projectStructure.default_branch_id)?.title ??
-      "默认主线"
-    );
-  }, [projectStructure]);
+  const selectedVolumeTitle = selectedVolume?.title ?? "默认卷";
+  const selectedBranchTitle = selectedBranch?.title ?? "默认主线";
 
   const savedChapterCount = useMemo(
-    () => chapters.filter((chapter) => isChapterInDefaultScope(chapter, projectStructure)).length,
-    [chapters, projectStructure],
+    () => scopeChapters.length,
+    [scopeChapters],
   );
 
   const recentChapterTexts = useMemo(() => {
-    const chapterContents = buildRecentChapterTexts(chapters, projectStructure, chapterNumber);
-    if (chapterContents.length > 0) {
-      return chapterContents;
-    }
-    return (workspace?.chapter_summaries ?? [])
-      .filter((item) => item.chapter_number < chapterNumber)
-      .sort((left, right) => right.chapter_number - left.chapter_number)
-      .slice(0, 2)
-      .map((item) => item.content);
-  }, [chapterNumber, chapters, projectStructure, workspace?.chapter_summaries]);
+    return buildRecentChapterTexts(
+      scopeChapters,
+      workspace?.chapter_summaries ?? [],
+      chapterNumber,
+    );
+  }, [chapterNumber, scopeChapters, workspace?.chapter_summaries]);
 
   const persistedChapterSummary = useMemo(
     () =>
@@ -712,6 +1008,58 @@ export default function StoryRoomPage() {
     }
     return finalResult.final_draft.trim().length > 0 && finalResult.final_draft !== draftText;
   }, [draftText, finalResult]);
+  const currentChapterCarryoverPreview = useMemo(
+    () => buildCurrentChapterCarryoverPreview(finalResult?.chapter_summary ?? persistedChapterSummary),
+    [finalResult?.chapter_summary, persistedChapterSummary],
+  );
+  const knowledgeLookupEntries = useMemo(() => {
+    const registerEntries = (
+      tab: KnowledgeTabKey,
+      items: unknown[],
+    ): Array<{
+      tab: KnowledgeTabKey;
+      itemId: string;
+      label: string;
+      normalizedLabel: string;
+    }> =>
+      items.flatMap((rawItem) => {
+          if (!rawItem || typeof rawItem !== "object") {
+            return [];
+          }
+          const item = rawItem as Record<string, unknown>;
+          const label = resolveKnowledgeItemLabel(tab, item);
+          const itemId = resolveKnowledgeEntityId(tab, item);
+          if (!label || !itemId) {
+            return [];
+          }
+          return [{
+            tab,
+            itemId,
+            label,
+            normalizedLabel: normalizeKnowledgeLookupText(label),
+          }];
+        });
+
+    return [
+      ...registerEntries("characters", workspace?.characters ?? []),
+      ...registerEntries("foreshadows", workspace?.foreshadows ?? []),
+      ...registerEntries("items", workspace?.items ?? []),
+      ...registerEntries("locations", storyBible?.locations ?? []),
+      ...registerEntries("factions", storyBible?.factions ?? []),
+      ...registerEntries("plot_threads", storyBible?.plot_threads ?? []),
+      ...registerEntries("world_rules", workspace?.world_rules ?? []),
+      ...registerEntries("timeline_events", workspace?.timeline_events ?? []),
+    ];
+  }, [
+    storyBible?.factions,
+    storyBible?.locations,
+    storyBible?.plot_threads,
+    workspace?.characters,
+    workspace?.foreshadows,
+    workspace?.items,
+    workspace?.timeline_events,
+    workspace?.world_rules,
+  ]);
 
   const effectiveTargetChapterCount = useMemo(() => {
     const normalizedTotal = normalizePositiveNumber(String(targetTotalWords), 1_000_000);
@@ -744,67 +1092,115 @@ export default function StoryRoomPage() {
         : "draft";
 
   const activeStageValue = activeStage ?? recommendedStage;
+  const isDraftFocusMode = activeStageValue === "draft";
+  const finalizingChapter = finalizingAction !== null;
   const stageCards: Array<{
     key: StoryRoomStageKey;
-    kicker: string;
     title: string;
-    description: string;
     status: string;
   }> = [
     {
       key: "outline",
-      kicker: "第一步",
-      title: "定故事",
-      description: "把故事核心设定压成三级大纲和锁死主线。",
-      status: hasOutlineBlueprint ? `${level3OutlineList.length} 条章纲` : "待先生成",
+      title: "大纲",
+      status: hasOutlineBlueprint ? `${level3OutlineList.length} 条章纲` : "待生成",
     },
     {
       key: "draft",
-      kicker: "第二步",
-      title: "写正文",
-      description: "先对准当前章节细纲，再一键开始出正文。",
-      status: draftText.trim().length > 0 ? `第 ${chapterNumber} 章进行中` : "待开始",
+      title: "正文",
+      status: draftText.trim().length > 0 ? `第 ${chapterNumber} 章` : "待起稿",
     },
     {
       key: "final",
-      kicker: "第三步",
-      title: "看优化",
-      description: "把初稿收口成终稿，对比修改点和发布状态。",
-      status: hasOptimizationResult ? "已有终稿包" : "待生成",
+      title: "终稿",
+      status: hasOptimizationResult ? "结果已出" : "待收口",
     },
     {
       key: "knowledge",
-      kicker: "第四步",
-      title: "管设定",
-      description: "人物、伏笔、物品和时间线都在这里沉淀和修订。",
+      title: "设定",
       status:
         storyBiblePendingChanges.length > 0
-          ? `待确认 ${storyBiblePendingChanges.length} 条`
-          : `${knowledgeItemCount} 条设定`,
+          ? `${storyBiblePendingChanges.length} 条待确认`
+          : `${knowledgeItemCount} 条`,
     },
   ];
   const recommendedStageCard =
     stageCards.find((item) => item.key === recommendedStage) ?? stageCards[0];
-  const recommendedStageActionLabelMap: Record<StoryRoomStageKey, string> = {
-    outline: "先生成大纲",
-    draft: "开始写正文",
-    final: "去看优化稿",
-    knowledge: "处理设定",
+  const primaryStageActionLabelMap: Record<StoryRoomStageKey, string> = {
+    outline: "先定三级大纲",
+    draft: hasDraftStarted ? "继续写作" : "开始第一章",
+    final: "去终稿收口",
+    knowledge: "查看设定",
   };
   const recommendedStageSummaryMap: Record<StoryRoomStageKey, string> = {
-    outline: "先把故事核心、题材气质和体量压成可写的三级大纲。",
-    draft: currentOutline
-      ? `第 ${chapterNumber} 章已经挂到三级大纲上，可以直接开始出正文。`
-      : "先从三级大纲里选一章，再开始出正文。",
-    final: "正文起出来后，就来这里看优化稿和修改依据。",
+    outline: hasOutlineBlueprint ? "三级大纲已经在这里，可以继续调整。" : "先把三级大纲定下来，再开始第一章。",
+    draft: hasDraftStarted ? "这一章可以继续往下写。" : "章纲已经有了，直接开始第一章。",
+    final: hasOptimizationResult ? "终稿结果已经出来了，可以确认保存并进入下一章。" : "正文完成后，就来这里做终稿收口。",
     knowledge:
       storyBiblePendingChanges.length > 0
-        ? `这轮有 ${storyBiblePendingChanges.length} 条设定待确认。`
-        : "写完后回这里收设定，平时不用一直盯着。",
+        ? "这一轮有新的设定建议，确认后会回写到设定里。"
+        : "人物、物品、伏笔和规则都在这里。",
   };
 
-  const scopeLabel = `${defaultBranchTitle} · ${defaultVolumeTitle}`;
-  const storyBibleBranchId = storyBible?.scope.branch_id ?? projectStructure?.default_branch_id ?? null;
+  const scopeLabel = `${selectedBranchTitle} · ${selectedVolumeTitle}`;
+  const storyBibleBranchId =
+    storyBible?.scope.branch_id ?? selectedBranchId ?? projectStructure?.default_branch_id ?? null;
+  const currentLocalDraftKey = useMemo(() => {
+    if (!projectStructure) {
+      return null;
+    }
+    return buildStoryRoomLocalDraftKey({
+      projectId,
+      branchId: selectedBranchId,
+      volumeId: selectedVolumeId,
+      chapterNumber,
+    });
+  }, [
+    chapterNumber,
+    projectId,
+    projectStructure,
+    selectedBranchId,
+    selectedVolumeId,
+  ]);
+
+  const recoverableDraftCards = useMemo<DraftStudioRecoverableDraft[]>(() => {
+    return recoverableLocalDrafts.map((draft) => {
+      const branchTitle =
+        projectStructure?.branches.find((item) => item.id === draft.branchId)?.title ??
+        "默认主线";
+      const volumeTitle =
+        projectStructure?.volumes.find((item) => item.id === draft.volumeId)?.title ??
+        "默认卷";
+      return {
+        ...draft,
+        scopeLabel: `${branchTitle} · ${volumeTitle}`,
+        isCurrent: draft.storageKey === currentLocalDraftKey,
+      };
+    });
+  }, [currentLocalDraftKey, projectStructure?.branches, projectStructure?.volumes, recoverableLocalDrafts]);
+
+  const nextChapterCandidate = useMemo(() => {
+    return resolveNextChapterCandidate({
+      bootstrapCandidate: bootstrapState?.next_chapter ?? null,
+      currentChapterId: activeChapter?.id ?? null,
+      currentChapterNumber: chapterNumber,
+      branchId: selectedBranchId,
+      branchTitle: selectedBranchTitle,
+      volumeId: selectedVolumeId,
+      volumeTitle: selectedVolumeTitle,
+      scopeChapters,
+      level3Outlines: level3OutlineList,
+    });
+  }, [
+    activeChapter?.id,
+    bootstrapState?.next_chapter,
+    chapterNumber,
+    level3OutlineList,
+    scopeChapters,
+    selectedBranchId,
+    selectedBranchTitle,
+    selectedVolumeId,
+    selectedVolumeTitle,
+  ]);
 
   const openStage = useCallback((stage: StoryRoomStageKey, options?: { scroll?: boolean }) => {
     setActiveStage(stage);
@@ -814,13 +1210,434 @@ export default function StoryRoomPage() {
     setPendingStageScroll(stage);
   }, []);
 
+  const openReviewTool = useCallback(() => {
+    setActiveStage("draft");
+    setPendingStageScroll("draft");
+    setPendingReviewPanelFocus(true);
+  }, []);
+
+  const loadRecoverableLocalDrafts = useCallback(async () => {
+    const drafts = await listStoryRoomLocalDrafts(projectId);
+    setRecoverableLocalDrafts(drafts);
+  }, [projectId]);
+
+  const upsertRecoverableLocalDraft = useCallback(
+    (storageKey: string, snapshot: StoryRoomLocalDraftSnapshot) => {
+      const nextSummary = summarizeStoryRoomLocalDraft(storageKey, snapshot);
+      if (
+        nextSummary.chapterTitle.trim().length === 0 &&
+        nextSummary.charCount === 0
+      ) {
+        setRecoverableLocalDrafts((current) =>
+          current.filter((item) => item.storageKey !== storageKey),
+        );
+        return;
+      }
+
+      setRecoverableLocalDrafts((current) => {
+        const next = current.filter((item) => item.storageKey !== storageKey);
+        next.unshift(nextSummary);
+        next.sort((left, right) => {
+          return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+        });
+        return next;
+      });
+    },
+    [],
+  );
+
+  const removeRecoverableLocalDraft = useCallback((storageKey: string) => {
+    setRecoverableLocalDrafts((current) =>
+      current.filter((item) => item.storageKey !== storageKey),
+    );
+  }, []);
+
+  const confirmLeaveDirtyDraft = useCallback(
+    (nextLabel: string): boolean => {
+      if (!draftDirty) {
+        return true;
+      }
+      return window.confirm(
+        `当前这一章还有未保存改动，切到${nextLabel}会先离开现在的正文。确认继续吗？`,
+      );
+    },
+    [draftDirty],
+  );
+
+  const openNextChapterDraft = useCallback(
+    (
+      candidate: ProjectNextChapterCandidate | null,
+      options: {
+        afterFinalize?: boolean;
+      } = {},
+    ) => {
+      const { afterFinalize = false } = options;
+      if (!candidate) {
+        setError("下一章还没准备好，先回正文区继续整理。");
+        return;
+      }
+
+      const targetLabel = candidate.title?.trim()
+        ? `第 ${candidate.chapter_number} 章《${candidate.title.trim()}》`
+        : `第 ${candidate.chapter_number} 章`;
+      if (!afterFinalize && !confirmLeaveDirtyDraft(targetLabel)) {
+        return;
+      }
+
+      setSelectedBranchId(candidate.branch_id);
+      setSelectedVolumeId(candidate.volume_id);
+      setChapterNumber(candidate.chapter_number);
+      setChapterTitle(candidate.title ?? "");
+      setDraftText("");
+      setDraftDirty(false);
+      setGuardResult(null);
+      setPausedStreamState(null);
+      setActiveRepairInstruction(null);
+      setFinalResult(null);
+      setStreamStatus(null);
+      setPendingLocalDraftSnapshot(null);
+      setPendingLocalDraftRecoveryState(null);
+      setLocalDraftRecoveredAt(null);
+      openStage("draft");
+
+      if (candidate.has_existing_content) {
+        setSuccess(`${targetLabel} 已经打开，上一章总结和已确认设定也会一起带过去。`);
+        return;
+      }
+
+      if (candidate.generation_mode === "blueprint_seed") {
+        setSuccess(`${targetLabel} 已就位，章纲、上一章总结和已确认设定都会一起带过去。`);
+        return;
+      }
+
+      setSuccess(`${targetLabel} 已准备好，上一章总结和已确认设定也会继续带到这一章。`);
+    },
+    [confirmLeaveDirtyDraft, openStage],
+  );
+
+  const openDraftFromOutline = useCallback(() => {
+    const targetOutline = currentOutline ?? level3OutlineList[0] ?? null;
+    if (
+      targetOutline &&
+      targetOutline.node_order !== chapterNumber &&
+      !confirmLeaveDirtyDraft(`第 ${targetOutline.node_order} 章`)
+    ) {
+      return;
+    }
+    if (targetOutline) {
+      setChapterNumber(targetOutline.node_order);
+      setChapterTitle((current) =>
+        current.trim().length > 0 ? current : targetOutline.title,
+      );
+    }
+    openStage("draft");
+  }, [chapterNumber, confirmLeaveDirtyDraft, currentOutline, level3OutlineList, openStage]);
+
+  const handlePrimaryStageAction = useCallback(() => {
+    if (recommendedStage === "draft" && hasOutlineBlueprint && !hasDraftStarted) {
+      openDraftFromOutline();
+      return;
+    }
+    openStage(recommendedStage);
+  }, [hasDraftStarted, hasOutlineBlueprint, openDraftFromOutline, openStage, recommendedStage]);
+
+  const handleSelectBranchId = useCallback((branchId: string) => {
+    if (branchId === selectedBranchId) {
+      return;
+    }
+    const targetBranch =
+      projectStructure?.branches.find((item) => item.id === branchId)?.title ?? "新分线";
+    if (!confirmLeaveDirtyDraft(targetBranch)) {
+      return;
+    }
+    setSelectedBranchId(branchId);
+  }, [confirmLeaveDirtyDraft, projectStructure?.branches, selectedBranchId]);
+
+  const handleSelectVolumeId = useCallback((volumeId: string) => {
+    if (volumeId === selectedVolumeId) {
+      return;
+    }
+    const targetVolume =
+      projectStructure?.volumes.find((item) => item.id === volumeId)?.title ?? "新卷";
+    if (!confirmLeaveDirtyDraft(targetVolume)) {
+      return;
+    }
+    setSelectedVolumeId(volumeId);
+  }, [confirmLeaveDirtyDraft, projectStructure?.volumes, selectedVolumeId]);
+
+  async function handleCreateBranch(payload: {
+    title: string;
+    description: string | null;
+    sourceBranchId: string | null;
+    copyChapters: boolean;
+    isDefault: boolean;
+  }) {
+    if (scopeActionKey) {
+      return false;
+    }
+
+    setScopeActionKey("scope:branch:create");
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const previousBranches = projectStructure?.branches ?? [];
+      const structure = await apiFetchWithAuth<ProjectStructure>(
+        `/api/v1/projects/${projectId}/branches`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            title: payload.title,
+            description: payload.description,
+            source_branch_id: payload.sourceBranchId,
+            copy_chapters: payload.copyChapters,
+            is_default: payload.isDefault,
+          }),
+        },
+      );
+      const chapterData = await apiFetchWithAuth<Chapter[]>(`/api/v1/projects/${projectId}/chapters`);
+      setProjectStructure(structure);
+      setChapters(sortChapters(chapterData));
+
+      const createdBranchId = findCreatedStructureItemId(previousBranches, structure.branches);
+      if (createdBranchId && !draftDirty) {
+        setSelectedBranchId(createdBranchId);
+      }
+
+      setSuccess(
+        createdBranchId && !draftDirty
+          ? "新分线已经建好，工作台已切过去。"
+          : "新分线已经建好。当前正文有未保存改动，所以还停留在原来的分线。",
+      );
+      return true;
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+      return false;
+    } finally {
+      setScopeActionKey(null);
+    }
+  }
+
+  async function handleUpdateBranch(
+    branchId: string,
+    payload: {
+      title: string;
+      description: string | null;
+      isDefault: boolean;
+    },
+  ) {
+    if (scopeActionKey) {
+      return false;
+    }
+
+    setScopeActionKey(`scope:branch:update:${branchId}`);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const structure = await apiFetchWithAuth<ProjectStructure>(
+        `/api/v1/projects/${projectId}/branches/${branchId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            title: payload.title,
+            description: payload.description,
+            is_default: payload.isDefault,
+          }),
+        },
+      );
+      setProjectStructure(structure);
+      setSuccess("这条分线已经更新。");
+      return true;
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+      return false;
+    } finally {
+      setScopeActionKey(null);
+    }
+  }
+
+  async function handleCreateVolume(payload: {
+    volumeNumber: number | null;
+    title: string;
+    summary: string | null;
+  }) {
+    if (scopeActionKey) {
+      return false;
+    }
+
+    setScopeActionKey("scope:volume:create");
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const previousVolumes = projectStructure?.volumes ?? [];
+      const structure = await apiFetchWithAuth<ProjectStructure>(
+        `/api/v1/projects/${projectId}/volumes`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            volume_number: payload.volumeNumber,
+            title: payload.title,
+            summary: payload.summary,
+          }),
+        },
+      );
+      setProjectStructure(structure);
+
+      const createdVolumeId = findCreatedStructureItemId(previousVolumes, structure.volumes);
+      if (createdVolumeId && !draftDirty) {
+        setSelectedVolumeId(createdVolumeId);
+      }
+
+      setSuccess(
+        createdVolumeId && !draftDirty
+          ? "新卷已经建好，工作台已切过去。"
+          : "新卷已经建好。当前正文有未保存改动，所以还停留在原来的卷。",
+      );
+      return true;
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+      return false;
+    } finally {
+      setScopeActionKey(null);
+    }
+  }
+
+  async function handleUpdateVolume(
+    volumeId: string,
+    payload: {
+      volumeNumber: number | null;
+      title: string;
+      summary: string | null;
+    },
+  ) {
+    if (scopeActionKey) {
+      return false;
+    }
+
+    setScopeActionKey(`scope:volume:update:${volumeId}`);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const structure = await apiFetchWithAuth<ProjectStructure>(
+        `/api/v1/projects/${projectId}/volumes/${volumeId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            volume_number: payload.volumeNumber,
+            title: payload.title,
+            summary: payload.summary,
+          }),
+        },
+      );
+      setProjectStructure(structure);
+      setSuccess("这一卷已经更新。");
+      return true;
+    } catch (requestError) {
+      setError(buildUserFriendlyError(requestError));
+      return false;
+    } finally {
+      setScopeActionKey(null);
+    }
+  }
+
   function handleSelectOutlineId(outlineId: string) {
     const outline = level3OutlineList.find((item) => item.outline_id === outlineId);
     if (!outline) {
       return;
     }
+    if (
+      outline.node_order !== chapterNumber &&
+      !confirmLeaveDirtyDraft(`第 ${outline.node_order} 章`)
+    ) {
+      return;
+    }
     setActiveStage("draft");
     setChapterNumber(outline.node_order);
+  }
+
+  function handleChapterNumberChange(value: number) {
+    const nextChapterNumber = Math.max(1, Math.trunc(value || 1));
+    if (nextChapterNumber === chapterNumber) {
+      return;
+    }
+    if (!confirmLeaveDirtyDraft(`第 ${nextChapterNumber} 章`)) {
+      return;
+    }
+    setChapterNumber(nextChapterNumber);
+  }
+
+  function handleJumpToChapter(targetChapterNumber: number) {
+    handleChapterNumberChange(targetChapterNumber);
+  }
+
+  function handleChapterTitleInput(value: string) {
+    setPendingLocalDraftSnapshot(null);
+    setPendingLocalDraftRecoveryState(null);
+    setLocalDraftRecoveredAt(null);
+    setChapterTitle(value);
+    setDraftDirty(true);
+  }
+
+  function handleDraftTextInput(value: string) {
+    setPendingLocalDraftSnapshot(null);
+    setPendingLocalDraftRecoveryState(null);
+    setLocalDraftRecoveredAt(null);
+    setDraftText(value);
+    setDraftDirty(true);
+  }
+
+  function handleRestoreLocalDraft() {
+    if (!pendingLocalDraftSnapshot) {
+      return;
+    }
+    setChapterTitle(pendingLocalDraftSnapshot.chapterTitle);
+    setDraftText(pendingLocalDraftSnapshot.draftText);
+    setDraftDirty(true);
+    setLocalDraftRecoveredAt(pendingLocalDraftSnapshot.updatedAt);
+    setLocalDraftSavedAt(pendingLocalDraftSnapshot.updatedAt);
+    setPendingLocalDraftSnapshot(null);
+    setPendingLocalDraftRecoveryState(null);
+    setSuccess("已恢复本机暂存的正文。");
+  }
+
+  async function clearCurrentLocalDraft() {
+    if (!currentLocalDraftKey) {
+      return;
+    }
+    await removeStoryRoomLocalDraft(currentLocalDraftKey);
+    removeRecoverableLocalDraft(currentLocalDraftKey);
+    setPendingLocalDraftSnapshot(null);
+    setPendingLocalDraftRecoveryState(null);
+    setLocalDraftSavedAt(null);
+    setLocalDraftRecoveredAt(null);
+  }
+
+  function handleDismissLocalDraft() {
+    void clearCurrentLocalDraft();
+  }
+
+  function handleOpenRecoverableDraft(draft: DraftStudioRecoverableDraft) {
+    const targetLabel = draft.chapterTitle.trim()
+      ? `第 ${draft.chapterNumber} 章《${draft.chapterTitle.trim()}》`
+      : `第 ${draft.chapterNumber} 章`;
+
+    const changingScope =
+      draft.branchId !== selectedBranchId ||
+      draft.volumeId !== selectedVolumeId ||
+      draft.chapterNumber !== chapterNumber;
+    if (changingScope && !confirmLeaveDirtyDraft(targetLabel)) {
+      return;
+    }
+
+    setSelectedBranchId(draft.branchId);
+    setSelectedVolumeId(draft.volumeId);
+    setChapterNumber(draft.chapterNumber);
+    setActiveStage("draft");
+    setPendingStageScroll("draft");
+    setSuccess(`${targetLabel} 的本机暂存已经就位，下面可以直接恢复。`);
   }
 
   const refreshChapterChainState = useCallback(async () => {
@@ -909,17 +1726,47 @@ export default function StoryRoomPage() {
     await reviewPromise;
   }, [loadChapterReviewState, refreshChapterChainState]);
 
-  const loadProjectEntityTaskState = useCallback(async () => {
+  const loadEntityTaskEvents = useCallback(async (
+    taskId: string,
+    showError = false,
+  ) => {
+    try {
+      const eventData = await apiFetchWithAuth<TaskEvent[]>(
+        `/api/v1/tasks/${taskId}/events`,
+      );
+      setEntityTaskEvents(eventData);
+      return eventData;
+    } catch (requestError) {
+      setEntityTaskEvents([]);
+      if (showError) {
+        setError(buildUserFriendlyError(requestError));
+      }
+      return [];
+    }
+  }, []);
+
+  const loadProjectEntityTaskState = useCallback(async (showError = false) => {
     try {
       const taskData = await apiFetchWithAuth<TaskState[]>(
         `/api/v1/projects/${projectId}/tasks?task_type_prefix=entity_generation&limit=8`,
       );
-      setEntityTaskState(selectLatestTask(taskData));
+      const latestTask = selectLatestTask(taskData);
+      setEntityTaskState(latestTask);
+      if (!latestTask) {
+        setEntityTaskEvents([]);
+        return null;
+      }
+      await loadEntityTaskEvents(latestTask.task_id, showError);
+      return latestTask;
     } catch (requestError) {
       setEntityTaskState(null);
-      setError(buildUserFriendlyError(requestError));
+      setEntityTaskEvents([]);
+      if (showError) {
+        setError(buildUserFriendlyError(requestError));
+      }
+      return null;
     }
-  }, [projectId]);
+  }, [loadEntityTaskEvents, projectId]);
 
   const loadStyleControlState = useCallback(async (showSpinner = true) => {
     if (showSpinner) {
@@ -945,15 +1792,42 @@ export default function StoryRoomPage() {
     }
   }, []);
 
-  const loadWorkspace = useCallback(async (showSpinner = true) => {
+  const loadStoryBibleForBranch = useCallback(async (
+    branchId: string | null,
+    showError = false,
+  ) => {
+    if (!branchId) {
+      setStoryBible(null);
+      return null;
+    }
+    try {
+      const data = await apiFetchWithAuth<StoryBible>(
+        `/api/v1/projects/${projectId}/bible?branch_id=${encodeURIComponent(branchId)}`,
+      );
+      setStoryBible(data);
+      return data;
+    } catch (requestError) {
+      setStoryBible(null);
+      if (showError) {
+        setError(buildUserFriendlyError(requestError));
+      }
+      return null;
+    }
+  }, [projectId]);
+
+  const loadWorkspace = useCallback(async (
+    showSpinner = true,
+    branchId: string | null = null,
+  ) => {
     if (showSpinner) {
       setLoading(true);
     }
     setError(null);
     try {
+      const query = branchId ? `?branch_id=${encodeURIComponent(branchId)}` : "";
       const [workspaceData, templateData] = await Promise.all([
         apiFetchWithAuth<StoryEngineWorkspace>(
-          `/api/v1/projects/${projectId}/story-engine/workspace`,
+          `/api/v1/projects/${projectId}/story-engine/workspace${query}`,
         ),
         apiFetchWithAuth<StoryImportTemplate[]>(
           `/api/v1/projects/${projectId}/story-engine/import-templates`,
@@ -961,7 +1835,6 @@ export default function StoryRoomPage() {
         refreshChapterChainState(),
       ]);
       setWorkspace(workspaceData);
-      setStoryBible(workspaceData.story_bible ?? null);
       setImportTemplates(templateData);
       setGenre((current) => current || workspaceData.project.genre || "");
       setTone((current) => current || workspaceData.project.tone || "");
@@ -974,10 +1847,17 @@ export default function StoryRoomPage() {
     }
   }, [projectId, refreshChapterChainState]);
 
-  const loadProjectBootstrap = useCallback(async (showError = false) => {
+  const loadProjectBootstrap = useCallback(async (
+    options: {
+      showError?: boolean;
+      branchId?: string | null;
+    } = {},
+  ) => {
+    const { showError = false, branchId = null } = options;
     try {
+      const query = branchId ? `?branch_id=${encodeURIComponent(branchId)}` : "";
       const data = await apiFetchWithAuth<ProjectBootstrapState>(
-        `/api/v1/projects/${projectId}/bootstrap`,
+        `/api/v1/projects/${projectId}/bootstrap${query}`,
       );
       setBootstrapState(data);
       if (!bootstrapHydratedRef.current) {
@@ -1005,8 +1885,132 @@ export default function StoryRoomPage() {
   }, [loadWorkspace, projectId]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    setIsOnline(window.navigator.onLine);
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    void loadRecoverableLocalDrafts();
+  }, [loadRecoverableLocalDrafts]);
+
+  useEffect(() => {
+    if (!projectStructure) {
+      return;
+    }
+
+    setSelectedBranchId((current) => {
+      if (current && projectStructure.branches.some((item) => item.id === current)) {
+        return current;
+      }
+      return projectStructure.default_branch_id ?? projectStructure.branches[0]?.id ?? null;
+    });
+    setSelectedVolumeId((current) => {
+      if (current && projectStructure.volumes.some((item) => item.id === current)) {
+        return current;
+      }
+      return projectStructure.default_volume_id ?? projectStructure.volumes[0]?.id ?? null;
+    });
+  }, [projectStructure]);
+
+  useEffect(() => {
+    if (!selectedBranchId) {
+      setStoryBible(null);
+      return;
+    }
+    setStressResult(null);
+    setGuardResult(null);
+    setPausedStreamState(null);
+    setFinalResult(null);
+    void loadStoryBibleForBranch(selectedBranchId);
+    void loadProjectBootstrap({ branchId: selectedBranchId });
+    void loadWorkspace(false, selectedBranchId);
+  }, [loadProjectBootstrap, loadStoryBibleForBranch, loadWorkspace, selectedBranchId]);
+
+  useEffect(() => {
+    if (draftDirty || scopeChapters.length === 0) {
+      return;
+    }
+    const hasCurrentScopeChapter = scopeChapters.some(
+      (chapter) => chapter.chapter_number === chapterNumber,
+    );
+    if (hasCurrentScopeChapter) {
+      return;
+    }
+    const latestScopeChapter = scopeChapters[scopeChapters.length - 1];
+    if (latestScopeChapter && latestScopeChapter.chapter_number !== chapterNumber) {
+      setChapterNumber(latestScopeChapter.chapter_number);
+    }
+  }, [chapterNumber, draftDirty, scopeChapters]);
+
+  useEffect(() => {
     setActiveStage((current) => current ?? recommendedStage);
   }, [recommendedStage]);
+
+  useEffect(() => {
+    const queryKey = [
+      projectId,
+      requestedStage ?? "",
+      requestedChapterNumber ?? "",
+      requestedTool ?? "",
+    ].join(":");
+    if (queryHydratedRef.current === queryKey) {
+      return;
+    }
+
+    if (requestedChapterNumber !== null) {
+      setChapterNumber(requestedChapterNumber);
+    }
+
+    if (requestedStage) {
+      setActiveStage(requestedStage);
+      setPendingStageScroll(requestedStage);
+    } else if (requestedTool === "review") {
+      setActiveStage("draft");
+      setPendingStageScroll("draft");
+    }
+
+    if (requestedTool === "review") {
+      setPendingReviewPanelFocus(true);
+    }
+
+    queryHydratedRef.current = queryKey;
+  }, [projectId, requestedChapterNumber, requestedStage, requestedTool]);
+
+  useEffect(() => {
+    if (!isNewBookEntry || hasOutlineBlueprint) {
+      return;
+    }
+    setActiveStage("outline");
+    setPendingStageScroll("outline");
+  }, [hasOutlineBlueprint, isNewBookEntry]);
+
+  useEffect(() => {
+    if (!pendingReviewPanelFocus || activeStageValue !== "draft") {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      reviewPanelRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      setPendingReviewPanelFocus(false);
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeStageValue, pendingReviewPanelFocus]);
 
   useEffect(() => {
     void loadProjectEntityTaskState();
@@ -1027,7 +2031,7 @@ export default function StoryRoomPage() {
 
     const chapterKey =
       activeChapter?.id ??
-      `new:${projectStructure.default_branch_id ?? "default"}:${projectStructure.default_volume_id ?? "default"}:${chapterNumber}`;
+      `new:${selectedBranchId ?? "default"}:${selectedVolumeId ?? "default"}:${chapterNumber}`;
     const switchingChapter = hydratedChapterKeyRef.current !== chapterKey;
     if (!switchingChapter && draftDirty) {
       return;
@@ -1041,27 +2045,128 @@ export default function StoryRoomPage() {
       setActiveRepairInstruction(null);
       setFinalResult(null);
       setStreamStatus(null);
+      setLocalDraftRecoveredAt(null);
     }
     hydratedChapterKeyRef.current = chapterKey;
     setDraftDirty(false);
+
+    let cancelled = false;
+    const loadLocalDraftSnapshot = async () => {
+      const localDraftSnapshot = currentLocalDraftKey
+        ? await readStoryRoomLocalDraft(currentLocalDraftKey)
+        : null;
+      if (cancelled) {
+        return;
+      }
+
+      const recovery = localDraftSnapshot
+        ? analyzeStoryRoomLocalDraftRecovery(localDraftSnapshot, {
+            chapterId: activeChapter?.id ?? null,
+            chapterTitle: activeChapter?.title ?? "",
+            draftText: activeChapter?.content ?? "",
+            currentVersionNumber: activeChapter?.current_version_number ?? null,
+          })
+        : null;
+
+      setPendingLocalDraftSnapshot(
+        localDraftSnapshot && recovery?.canRestore ? localDraftSnapshot : null,
+      );
+      setPendingLocalDraftRecoveryState(
+        localDraftSnapshot && recovery?.canRestore ? recovery.state : null,
+      );
+      setLocalDraftSavedAt(localDraftSnapshot?.updatedAt ?? null);
+    };
+
+    void loadLocalDraftSnapshot();
+    return () => {
+      cancelled = true;
+    };
   }, [
     activeChapter?.content,
     activeChapter?.current_version_number,
     activeChapter?.id,
     activeChapter?.title,
     chapterNumber,
+    currentLocalDraftKey,
     draftDirty,
     projectStructure,
+    selectedBranchId,
+    selectedVolumeId,
   ]);
+
+  useEffect(() => {
+    if (!draftDirty || !currentLocalDraftKey || !projectStructure) {
+      return;
+    }
+
+    // 正文输入、流式生成和标题修改都先落一份本机暂存，避免刷新或崩溃直接丢稿。
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        if (!chapterTitle.trim() && !draftText.trim()) {
+          await removeStoryRoomLocalDraft(currentLocalDraftKey);
+          removeRecoverableLocalDraft(currentLocalDraftKey);
+          setLocalDraftSavedAt(null);
+          return;
+        }
+
+        const snapshot: StoryRoomLocalDraftSnapshot = {
+          projectId,
+          branchId: selectedBranchId,
+          volumeId: selectedVolumeId,
+          chapterNumber,
+          chapterTitle,
+          draftText,
+          outlineId: currentOutline?.outline_id ?? null,
+          sourceChapterId: activeChapter?.id ?? null,
+          sourceVersionNumber: activeChapter?.current_version_number ?? null,
+          updatedAt: new Date().toISOString(),
+        };
+        await writeStoryRoomLocalDraft(currentLocalDraftKey, snapshot);
+        upsertRecoverableLocalDraft(currentLocalDraftKey, snapshot);
+        setLocalDraftSavedAt(snapshot.updatedAt);
+      })();
+    }, 700);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    activeChapter?.current_version_number,
+    activeChapter?.id,
+    chapterNumber,
+    chapterTitle,
+    currentLocalDraftKey,
+    currentOutline?.outline_id,
+    draftDirty,
+    draftText,
+    projectId,
+    projectStructure,
+    removeRecoverableLocalDraft,
+    selectedBranchId,
+    selectedVolumeId,
+    upsertRecoverableLocalDraft,
+  ]);
+
+  useEffect(() => {
+    if (!draftDirty && !streamingChapter && !savingDraft) {
+      return;
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [draftDirty, savingDraft, streamingChapter]);
 
   useEffect(() => {
     if (!activeChapter?.id) {
       setExportingFormat(null);
-      setFinalizingChapter(false);
+      setFinalizingAction(null);
       return;
     }
     setExportingFormat(null);
-    setFinalizingChapter(false);
+    setFinalizingAction(null);
   }, [activeChapter?.id]);
 
   useEffect(() => {
@@ -1141,8 +2246,9 @@ export default function StoryRoomPage() {
 
     try {
       const profile = bootstrapState?.profile;
+      const query = selectedBranchId ? `?branch_id=${encodeURIComponent(selectedBranchId)}` : "";
       const data = await apiFetchWithAuth<ProjectBootstrapState>(
-        `/api/v1/projects/${projectId}/bootstrap`,
+        `/api/v1/projects/${projectId}/bootstrap${query}`,
         {
           method: "PUT",
           body: JSON.stringify({
@@ -1223,7 +2329,7 @@ export default function StoryRoomPage() {
           editable_level_3_outlines: replaceOutline(current.editable_level_3_outlines),
         };
       });
-      await loadWorkspace(false);
+      await loadWorkspace(false, selectedBranchId);
       setSuccess("大纲节点已经更新。");
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
@@ -1245,6 +2351,7 @@ export default function StoryRoomPage() {
         {
           method: "POST",
           body: JSON.stringify({
+            branch_id: selectedBranchId,
             idea: idea.trim() || null,
             genre: genre || null,
             tone: tone || null,
@@ -1258,8 +2365,11 @@ export default function StoryRoomPage() {
       setStressResult(data);
       setActiveStage("outline");
       setPendingStageScroll("outline");
-      setSuccess("大纲已经压成可写结构，一级大纲已锁死。");
-      await Promise.all([loadWorkspace(), loadProjectBootstrap()]);
+      setSuccess("三级大纲已经压好了，先确认章纲，再开始第一章。");
+      await Promise.all([
+        loadWorkspace(false, selectedBranchId),
+        loadProjectBootstrap({ branchId: selectedBranchId }),
+      ]);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     } finally {
@@ -1275,6 +2385,7 @@ export default function StoryRoomPage() {
         {
           method: "POST",
           body: JSON.stringify({
+            branch_id: selectedBranchId,
             chapter_number: chapterNumber,
             chapter_title: chapterTitle || null,
             outline_id: currentOutline?.outline_id ?? null,
@@ -1304,6 +2415,7 @@ export default function StoryRoomPage() {
     draftText,
     projectId,
     recentChapterTexts,
+    selectedBranchId,
   ]);
 
   useEffect(() => {
@@ -1345,6 +2457,7 @@ export default function StoryRoomPage() {
         {
           method: "POST",
           body: JSON.stringify({
+            branch_id: selectedBranchId,
             chapter_number: chapterNumber,
             chapter_title: chapterTitle || null,
             outline_id: currentOutline?.outline_id ?? null,
@@ -1472,6 +2585,7 @@ export default function StoryRoomPage() {
         {
           method: "POST",
           body: JSON.stringify({
+            branch_id: selectedBranchId,
             chapter_number: chapterNumber,
             chapter_title: chapterTitle || null,
             draft_text: draftText,
@@ -1487,7 +2601,7 @@ export default function StoryRoomPage() {
           ? data.quality_summary ?? successMessage
           : data.quality_summary ?? "这轮深度收口还没完全结束，右下方先看问题和优化稿。",
       );
-      await loadWorkspace();
+      await loadWorkspace(false, selectedBranchId);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     } finally {
@@ -1528,7 +2642,7 @@ export default function StoryRoomPage() {
           ),
         };
       });
-      await loadWorkspace(false);
+      await loadWorkspace(false, selectedBranchId);
       await loadStoryBibleGovernanceState(storyBibleBranchId, false);
       setSuccess(response.message);
     } catch (requestError) {
@@ -1889,6 +3003,7 @@ export default function StoryRoomPage() {
       );
       setDraftText(response.chapter.content);
       setDraftDirty(false);
+      await clearCurrentLocalDraft();
       setFinalResult(null);
       await Promise.all([
         refreshActiveChapterReviewState(chapter.id, {
@@ -1941,6 +3056,7 @@ export default function StoryRoomPage() {
       );
       setDraftText(response.chapter.content);
       setDraftDirty(false);
+      await clearCurrentLocalDraft();
       setFinalResult(null);
       await Promise.all([
         refreshActiveChapterReviewState(chapter.id, {
@@ -1997,6 +3113,7 @@ export default function StoryRoomPage() {
           ]),
         );
         setDraftDirty(false);
+        await clearCurrentLocalDraft();
         setSuccess(`第 ${chapterNumber} 章已保存，版本和发布状态都会按这版继续跟进。`);
       } else {
         const createdChapter = await apiFetchWithAuth<Chapter>(
@@ -2005,8 +3122,8 @@ export default function StoryRoomPage() {
             method: "POST",
             body: JSON.stringify({
               chapter_number: chapterNumber,
-              volume_id: projectStructure.default_volume_id,
-              branch_id: projectStructure.default_branch_id,
+              volume_id: selectedVolumeId,
+              branch_id: selectedBranchId,
               title: chapterTitle.trim() || null,
               content: draftText,
               outline: outlinePayload,
@@ -2017,6 +3134,7 @@ export default function StoryRoomPage() {
         );
         setChapters((current) => sortChapters([...current, createdChapter]));
         setDraftDirty(false);
+        await clearCurrentLocalDraft();
         setSuccess(`第 ${chapterNumber} 章已经存成正式章节，后续修改都会留下版本记录。`);
       }
 
@@ -2044,7 +3162,8 @@ export default function StoryRoomPage() {
     setSuccess("优化稿已经带回正文编辑区了，确认无误后记得保存正文。");
   }
 
-  async function handleSaveAsFinal() {
+  async function handleSaveAsFinal(options: { continueToNextChapter?: boolean } = {}) {
+    const { continueToNextChapter = false } = options;
     if (!activeChapter) {
       setError("请先把这一章保存成正式章节，再尝试放行。");
       return;
@@ -2054,7 +3173,7 @@ export default function StoryRoomPage() {
       return;
     }
 
-    setFinalizingChapter(true);
+    setFinalizingAction(continueToNextChapter ? "continue" : "save");
     setError(null);
     setSuccess(null);
 
@@ -2074,10 +3193,34 @@ export default function StoryRoomPage() {
           updatedChapter,
         ]),
       );
-      await refreshChapterChainState();
+      const [{ chapterData }, bootstrapData] = await Promise.all([
+        refreshChapterChainState(),
+        loadProjectBootstrap({ branchId: selectedBranchId }),
+      ]);
+
+      const nextScopeChapters = chapterData.filter((chapter) =>
+        isChapterInScope(chapter, selectedBranchId, selectedVolumeId),
+      );
+      const resolvedNextChapter = resolveNextChapterCandidate({
+        bootstrapCandidate: bootstrapData?.next_chapter ?? null,
+        currentChapterId: updatedChapter.id,
+        currentChapterNumber: updatedChapter.chapter_number,
+        branchId: selectedBranchId,
+        branchTitle: selectedBranchTitle,
+        volumeId: selectedVolumeId,
+        volumeTitle: selectedVolumeTitle,
+        scopeChapters: nextScopeChapters,
+        level3Outlines: level3OutlineList,
+      });
+
+      if (continueToNextChapter) {
+        openNextChapterDraft(resolvedNextChapter, { afterFinalize: true });
+        return;
+      }
+
       setSuccess(
         updatedChapter.status === "final"
-          ? "这章已经标记为终稿状态，可以直接导出交稿版。"
+          ? "这章已经标记为终稿状态，章节总结和设定沉淀会继续服务下一章。"
           : "终稿状态已经刷新。",
       );
     } catch (requestError) {
@@ -2093,7 +3236,7 @@ export default function StoryRoomPage() {
 
       setError(latestGateReason ?? buildUserFriendlyError(requestError));
     } finally {
-      setFinalizingChapter(false);
+      setFinalizingAction(null);
     }
   }
 
@@ -2142,7 +3285,7 @@ export default function StoryRoomPage() {
         },
       );
       await Promise.all([
-        loadWorkspace(false),
+        loadWorkspace(false, selectedBranchId),
         loadStoryBibleGovernanceState(storyBibleBranchId, false),
       ]);
       setSuccess("这条自动记设定已经确认收入圣经。");
@@ -2222,7 +3365,7 @@ export default function StoryRoomPage() {
         },
       );
       await Promise.all([
-        loadWorkspace(false),
+        loadWorkspace(false, selectedBranchId),
         loadStoryBibleGovernanceState(storyBibleBranchId, false),
       ]);
       setSuccess(`设定圣经已经退回到 V${versionNumber} 对应的版本。`);
@@ -2240,11 +3383,11 @@ export default function StoryRoomPage() {
     try {
       const payload = buildKnowledgePayload(activeTab, formState, editingId);
       const branchId = isStoryBibleKnowledgeTab(activeTab)
-        ? storyBible?.scope.branch_id ?? projectStructure?.default_branch_id ?? null
+        ? storyBibleBranchId
         : null;
 
       if (isStoryBibleKnowledgeTab(activeTab) && !branchId) {
-        throw new Error("当前项目还没有默认主线，暂时不能保存这类主设定。");
+        throw new Error("当前项目还没有默认主线，暂时不能保存这类设定。");
       }
 
       const result = await apiFetchWithAuth<StoryKnowledgeMutationResponse>(
@@ -2263,7 +3406,7 @@ export default function StoryRoomPage() {
       setEditingId(null);
       setFormState({});
       setSuccess(result.message);
-      await loadWorkspace();
+      await loadWorkspace(false, selectedBranchId);
       await loadStoryBibleGovernanceState(storyBibleBranchId, false);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
@@ -2277,10 +3420,10 @@ export default function StoryRoomPage() {
     setSuccess(null);
     try {
       const branchId = isStoryBibleKnowledgeTab(tab)
-        ? storyBible?.scope.branch_id ?? projectStructure?.default_branch_id ?? null
+        ? storyBibleBranchId
         : null;
       if (isStoryBibleKnowledgeTab(tab) && !branchId) {
-        throw new Error("当前项目还没有默认主线，暂时不能删除这类主设定。");
+        throw new Error("当前项目还没有默认主线，暂时不能删除这类设定。");
       }
 
       const result = await apiFetchWithAuth<StoryKnowledgeMutationResponse>(
@@ -2294,26 +3437,124 @@ export default function StoryRoomPage() {
         },
       );
       setSuccess(result.message);
-      await loadWorkspace();
+      await loadWorkspace(false, selectedBranchId);
       await loadStoryBibleGovernanceState(storyBibleBranchId, false);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     }
   }
 
-  async function handleSearch() {
-    if (!searchQuery.trim()) {
+  async function runKnowledgeSearch(query: string, options: { autoLocate?: boolean } = {}) {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
       setSearchResults([]);
       return;
     }
     try {
       const data = await apiFetchWithAuth<StorySearchResult[]>(
-        `/api/v1/projects/${projectId}/story-engine/search?query=${encodeURIComponent(searchQuery)}`,
+        `/api/v1/projects/${projectId}/story-engine/search?query=${encodeURIComponent(normalizedQuery)}`,
       );
       setSearchResults(data);
+      if (options.autoLocate && data.length > 0) {
+        const firstMatchedTab = resolveKnowledgeTabForEntityType(data[0].entity_type);
+        if (firstMatchedTab) {
+          setActiveTab(firstMatchedTab);
+          setHighlightedKnowledgeId(data[0].entity_id);
+        }
+      }
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
     }
+  }
+
+  async function handleSearch() {
+    await runKnowledgeSearch(searchQuery);
+  }
+
+  async function handleLocateKnowledgeFromSelection(selectionText: string) {
+    const query = selectionText.trim();
+    if (!query) {
+      setError("先在正文里选中人物、物品或规则，再去设定里定位。");
+      return;
+    }
+
+    setError(null);
+    setSuccess(null);
+    setSearchQuery(query);
+    openStage("knowledge");
+    setPendingStageScroll("knowledge");
+
+    const normalizedQuery = normalizeKnowledgeLookupText(query);
+    const localMatch =
+      knowledgeLookupEntries.find((item) => item.normalizedLabel === normalizedQuery) ??
+      knowledgeLookupEntries.find(
+        (item) =>
+          item.normalizedLabel.includes(normalizedQuery) ||
+          normalizedQuery.includes(item.normalizedLabel),
+      ) ??
+      null;
+
+    if (localMatch) {
+      setActiveTab(localMatch.tab);
+      setHighlightedKnowledgeId(localMatch.itemId);
+      setSearchResults([]);
+      setSuccess(`已在设定里定位到「${localMatch.label}」。`);
+      return;
+    }
+
+    await runKnowledgeSearch(query, { autoLocate: true });
+    setSuccess(`已把“${query}”带到设定区，你可以继续查看相关条目。`);
+  }
+
+  function handleLocateSearchResult(result: StorySearchResult) {
+    const tab = resolveKnowledgeTabForEntityType(result.entity_type);
+    if (!tab) {
+      setError("这条搜索结果暂时不能直接定位到设定卡片。");
+      return;
+    }
+
+    setActiveTab(tab);
+    setHighlightedKnowledgeId(result.entity_id);
+    setSuccess("已定位到对应设定条目。");
+  }
+
+  function handleJumpToRelatedChapter(tab: KnowledgeTabKey, item: Record<string, unknown>) {
+    const itemLabel = resolveKnowledgeItemLabel(tab, item) || "这条设定";
+    const draftMatch =
+      itemLabel &&
+      itemLabel.length > 0 &&
+      draftText.includes(itemLabel)
+        ? chapterNumber
+        : null;
+    const directChapter =
+      tab === "foreshadows"
+        ? Number(item.chapter_planted ?? item.chapter_planned_reveal ?? 0) || null
+        : tab === "timeline_events"
+          ? Number(item.chapter_number ?? 0) || null
+          : null;
+    const matchedChapter =
+      directChapter ??
+      draftMatch ??
+      (itemLabel
+        ? scopeChapters.find((chapter) => {
+            const chapterTitleText = chapter.title?.trim() ?? "";
+            return (
+              chapter.content.includes(itemLabel) ||
+              chapterTitleText.includes(itemLabel)
+            );
+          })?.chapter_number ??
+          null
+        : null);
+
+    if (!matchedChapter) {
+      setError(`暂时还没在正文里定位到「${itemLabel}」对应的章节。`);
+      return;
+    }
+
+    openStage("draft");
+    setPendingStageScroll("draft");
+    handleJumpToChapter(matchedChapter);
+    setSuccess(`已跳到第 ${matchedChapter} 章查看「${itemLabel}」相关正文。`);
   }
 
   function handleImportTemplateChange(value: string) {
@@ -2349,6 +3590,7 @@ export default function StoryRoomPage() {
         {
           method: "POST",
           body: JSON.stringify({
+            branch_id: selectedBranchId,
             template_key: selectedTemplateKey || null,
             apply_template_model_routing: false,
             replace_existing_sections: replaceSections,
@@ -2358,7 +3600,7 @@ export default function StoryRoomPage() {
       );
       setStressResult(null);
       setSuccess(buildImportSummary(data));
-      await loadWorkspace();
+      await loadWorkspace(false, selectedBranchId);
       await loadStoryBibleGovernanceState(storyBibleBranchId, false);
     } catch (requestError) {
       if (requestError instanceof SyntaxError) {
@@ -2425,6 +3667,7 @@ export default function StoryRoomPage() {
         },
       );
       setEntityTaskState(data.task);
+      await loadEntityTaskEvents(data.task.task_id);
       setSuccess(`已经开始补${ENTITY_GENERATION_SUCCESS_LABELS[kind]}，结果会挂在右侧。`);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
@@ -2456,7 +3699,7 @@ export default function StoryRoomPage() {
           body: JSON.stringify({
             task_id: entityTaskState.task_id,
             candidate_index: candidateIndex,
-            branch_id: storyBible?.scope.branch_id ?? projectStructure?.default_branch_id ?? null,
+            branch_id: storyBibleBranchId,
           }),
         },
       );
@@ -2496,7 +3739,7 @@ export default function StoryRoomPage() {
         };
       });
 
-      await loadWorkspace();
+      await loadWorkspace(false, selectedBranchId);
       if (
         data.accepted_entity_type === "characters" ||
         data.accepted_entity_type === "items" ||
@@ -2553,9 +3796,6 @@ export default function StoryRoomPage() {
             <div>
               <p className="text-xs uppercase tracking-[0.28em] text-copper">写作现场</p>
               <h1 className="mt-2 text-3xl font-semibold">{workspace?.project.title}</h1>
-              <p className="mt-3 text-sm text-black/58">
-                只走一条主路径：定故事，写正文，看优化，收设定。
-              </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
                   题材：{workspace?.project.genre ?? genre ?? "未填写"}
@@ -2571,88 +3811,154 @@ export default function StoryRoomPage() {
                 </span>
               </div>
 
-              <div className="mt-6 rounded-[28px] border border-copper/20 bg-[#fff7ef] p-5">
-                <p className="text-xs uppercase tracking-[0.18em] text-copper">当前建议先做</p>
-                <h2 className="mt-2 text-xl font-semibold">{recommendedStageCard.title}</h2>
-                <p className="mt-3 text-sm leading-7 text-black/62">
-                  {recommendedStageSummaryMap[recommendedStageCard.key]}
-                </p>
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <button
-                    className="rounded-full bg-copper px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
-                    onClick={() => openStage(recommendedStageCard.key)}
-                    type="button"
-                  >
-                    {recommendedStageActionLabelMap[recommendedStageCard.key]}
-                  </button>
-                  <Link
-                    className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
-                    href="/dashboard"
-                  >
-                    返回项目总览
-                  </Link>
+              <section className="mt-6 rounded-[28px] border border-copper/20 bg-[#fff7ef] p-5">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.18em] text-copper">下一步</p>
+                    <h2 className="mt-2 text-xl font-semibold">{recommendedStageCard.title}</h2>
+                    <p className="mt-2 text-sm leading-7 text-black/58">
+                      {recommendedStageSummaryMap[recommendedStageCard.key]}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      className="rounded-full bg-copper px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                      onClick={handlePrimaryStageAction}
+                      type="button"
+                    >
+                      {primaryStageActionLabelMap[recommendedStageCard.key]}
+                    </button>
+                    <Link
+                      className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                      href={`/dashboard/projects/${projectId}/collaborators`}
+                    >
+                      协作成员
+                    </Link>
+                    <Link
+                      className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                      href="/dashboard"
+                    >
+                      返回项目总览
+                    </Link>
+                  </div>
                 </div>
-              </div>
-            </div>
 
-            <div className="space-y-4">
-              <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
-                <p className="text-sm font-semibold">四步写作路径</p>
-                <div className="mt-4 space-y-3">
+                <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                   {stageCards.map((card, index) => {
                     const isActive = activeStageValue === card.key;
                     const isRecommended = recommendedStage === card.key;
                     return (
                       <button
                         key={card.key}
-                        className={`flex w-full items-center justify-between rounded-[22px] border px-4 py-3 text-left transition ${
+                        className={`rounded-[22px] border px-4 py-4 text-left transition ${
                           isActive
                             ? "border-copper/30 bg-white shadow-[0_14px_30px_rgba(176,112,53,0.1)]"
-                            : "border-black/10 bg-white/70 hover:bg-white"
+                            : "border-black/10 bg-white/80 hover:bg-white"
                         }`}
                         onClick={() => openStage(card.key)}
                         type="button"
                       >
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center justify-between gap-3">
                           <span className="flex h-8 w-8 items-center justify-center rounded-full border border-black/10 bg-[#fbfaf5] text-xs font-semibold text-black/62">
                             {index + 1}
                           </span>
-                          <div>
-                            <p className="text-sm font-semibold">{card.title}</p>
-                            <p className="text-xs text-black/52">{card.status}</p>
-                          </div>
+                          {isRecommended ? (
+                            <span className="rounded-full border border-copper/20 bg-[#fff7ef] px-3 py-1 text-xs text-copper">
+                              当前
+                            </span>
+                          ) : null}
                         </div>
-                        {isRecommended ? (
-                          <span className="rounded-full border border-copper/20 bg-[#fff7ef] px-3 py-1 text-xs text-copper">
-                            当前
-                          </span>
-                        ) : null}
+                        <p className="mt-3 text-sm font-semibold">{card.title}</p>
+                        <p className="mt-2 text-xs text-black/52">{card.status}</p>
                       </button>
                     );
                   })}
                 </div>
               </section>
+            </div>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
-                  <p className="text-sm text-black/55">主线范围</p>
-                  <p className="mt-3 text-lg font-semibold">{scopeLabel}</p>
-                </article>
-                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
-                  <p className="text-sm text-black/55">已存章节</p>
-                  <p className="mt-3 text-lg font-semibold">{savedChapterCount} 章</p>
-                </article>
-                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
-                  <p className="text-sm text-black/55">体量目标</p>
-                  <p className="mt-3 text-lg font-semibold">
-                    {effectiveTargetChapterCount} 章 / {targetTotalWords.toLocaleString()} 字
-                  </p>
-                </article>
-                <article className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5">
-                  <p className="text-sm text-black/55">设定待确认</p>
-                  <p className="mt-3 text-lg font-semibold">{storyBiblePendingChanges.length} 条</p>
-                </article>
-              </div>
+            <div className="space-y-4">
+              <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
+                <p className="text-sm font-semibold">{isDraftFocusMode ? "当前在写" : "当前范围"}</p>
+                <h2 className="mt-3 text-2xl font-semibold">
+                  {isDraftFocusMode
+                    ? chapterTitle.trim().length > 0
+                      ? `第 ${chapterNumber} 章 · ${chapterTitle.trim()}`
+                      : `第 ${chapterNumber} 章`
+                    : scopeLabel}
+                </h2>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+                    {currentOutline ? `已挂第 ${currentOutline.node_order} 章章纲` : "待挂章纲"}
+                  </span>
+                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+                    已存 {savedChapterCount} 章
+                  </span>
+                  <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/60">
+                    目标 {effectiveTargetChapterCount} 章
+                  </span>
+                  {hasOptimizationResult ? (
+                    <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs text-emerald-700">
+                      已有终稿结果
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button
+                    className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                    onClick={() => openStage("outline")}
+                    type="button"
+                  >
+                    回章纲
+                  </button>
+                  {!hasDraftStarted && hasOutlineBlueprint ? (
+                    <button
+                      className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                      onClick={openDraftFromOutline}
+                      type="button"
+                    >
+                      去写第一章
+                    </button>
+                  ) : null}
+                  {hasDraftStarted && !isDraftFocusMode ? (
+                    <button
+                      className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                      onClick={() => openStage("draft")}
+                      type="button"
+                    >
+                      回正文区
+                    </button>
+                  ) : null}
+                  {hasOptimizationResult ? (
+                    <button
+                      className="rounded-full border border-black/10 bg-white px-4 py-3 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
+                      onClick={() => openStage("final")}
+                      type="button"
+                    >
+                      看终稿结果
+                    </button>
+                  ) : null}
+                </div>
+              </section>
+
+              <StoryScopeSwitcher
+                branches={projectStructure?.branches ?? []}
+                volumes={projectStructure?.volumes ?? []}
+                selectedBranchId={selectedBranchId}
+                selectedVolumeId={selectedVolumeId}
+                chapterCount={savedChapterCount}
+                pendingChangeCount={storyBiblePendingChanges.length}
+                scopeChapters={scopeChapters}
+                activeChapterNumber={chapterNumber}
+                actionKey={scopeActionKey}
+                onSelectBranchId={handleSelectBranchId}
+                onSelectVolumeId={handleSelectVolumeId}
+                onJumpToChapter={handleJumpToChapter}
+                onCreateBranch={handleCreateBranch}
+                onUpdateBranch={handleUpdateBranch}
+                onCreateVolume={handleCreateVolume}
+                onUpdateVolume={handleUpdateVolume}
+              />
             </div>
           </div>
 
@@ -2670,10 +3976,14 @@ export default function StoryRoomPage() {
 
         {activeStageValue === "outline" ? (
           <section id="story-stage-outline" className="scroll-mt-6 space-y-4">
-            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <p className="text-xs uppercase tracking-[0.18em] text-copper">第一步</p>
-              <h2 className="mt-2 text-2xl font-semibold">先准备大纲输入</h2>
-              <p className="mt-3 text-sm text-black/58">输入想法，或者上传已有大纲。</p>
+            <div className="flex items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-5 py-4 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <div>
+                <p className="text-xs uppercase tracking-[0.18em] text-copper">第一步</p>
+                <h2 className="mt-1 text-xl font-semibold">生成三级大纲</h2>
+              </div>
+              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                输入想法 / 上传大纲
+              </span>
             </div>
 
             <OutlineWorkbench
@@ -2700,24 +4010,19 @@ export default function StoryRoomPage() {
               onSaveGoalProfile={() => void handleSaveStoryGoals()}
               onRunStressTest={handleRunStressTest}
               onUpdateOutline={(outlineId, payload) => void handleUpdateOutline(outlineId, payload)}
-              onOpenDraftStep={() => openStage("draft")}
+              onOpenDraftStep={openDraftFromOutline}
             />
           </section>
         ) : null}
 
         {activeStageValue === "draft" ? (
           <section id="story-stage-draft" className="scroll-mt-6 space-y-4">
-            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <p className="text-xs uppercase tracking-[0.18em] text-copper">第二步</p>
-              <h2 className="mt-2 text-2xl font-semibold">先选章节，再开始出正文</h2>
-              <p className="mt-3 text-sm text-black/58">正文只跟三级大纲走。</p>
-            </div>
-
             <DraftStudio
               chapterNumber={chapterNumber}
               chapterTitle={chapterTitle}
               draftText={draftText}
               outlines={outlineList}
+              scopeChapters={scopeChapters}
               outlineSelectionId={currentOutline?.outline_id ?? null}
               activeChapter={activeChapter}
               scopeLabel={scopeLabel}
@@ -2732,58 +4037,133 @@ export default function StoryRoomPage() {
               optimizing={optimizing}
               savingDraft={savingDraft}
               draftDirty={draftDirty}
-              editorTextareaRef={editorTextareaRef}
-              onChapterNumberChange={(value) => setChapterNumber(value)}
-              onChapterTitleChange={(value) => {
-                setChapterTitle(value);
-                setDraftDirty(true);
-              }}
-              onDraftTextChange={(value) => {
-                setDraftText(value);
-                setDraftDirty(true);
-              }}
+              isOnline={isOnline}
+              localDraftSavedAt={localDraftSavedAt}
+              localDraftRecoveredAt={localDraftRecoveredAt}
+              pendingLocalDraftUpdatedAt={pendingLocalDraftSnapshot?.updatedAt ?? null}
+              pendingLocalDraftRecoveryState={pendingLocalDraftRecoveryState}
+              recoverableDrafts={recoverableDraftCards}
+              editorRef={editorRef}
+              onChapterNumberChange={handleChapterNumberChange}
+              onChapterTitleChange={handleChapterTitleInput}
+              onDraftTextChange={handleDraftTextInput}
               onSelectOutlineId={handleSelectOutlineId}
+              onJumpToChapter={handleJumpToChapter}
               onSaveDraft={() => void handleSaveDraft()}
               onRunStreamGenerate={() => void handleRunStreamGenerate()}
               onContinueWithRepair={(option) => void handleContinueWithRepair(option)}
               onContinueAfterManualFix={() => void handleContinueAfterManualFix()}
               onRunGuardCheck={() => void triggerGuardCheck(true)}
               onRunOptimize={() => void handleRunOptimize()}
-              onAutoRemember={() => void handleRunOptimize("本章总结和设定更新建议已经自动记下来了。")}
+              onLocateSelectionInKnowledge={(selectionText) =>
+                void handleLocateKnowledgeFromSelection(selectionText)
+              }
               onOpenOutlineStep={() => openStage("outline")}
+              onOpenFinalStep={() => openStage("final")}
+              onOpenReviewTool={openReviewTool}
+              onOpenRecoverableDraft={handleOpenRecoverableDraft}
+              onRestoreLocalDraft={handleRestoreLocalDraft}
+              onDismissLocalDraft={handleDismissLocalDraft}
             />
 
-            <StyleControlPanel
-              chapterSample={styleSample}
-              preferenceProfile={preferenceProfile}
-              styleTemplates={styleTemplates}
-              loading={loadingStyleControl}
-              actionKey={styleActionKey}
-              onChapterSampleChange={setStyleSample}
-              onApplyTemplate={(templateKey) => void handleApplyStyleTemplate(templateKey)}
-              onClearTemplate={() => void handleClearStyleTemplate()}
-              onSavePreference={(payload) => void handleSaveStylePreference(payload)}
-            />
+            <section
+              ref={reviewPanelRef}
+              id="story-stage-review-tools"
+              className="scroll-mt-6 space-y-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-4 py-3 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                    精修台
+                  </span>
+                  <h2 className="text-lg font-semibold">片段改写、批注、版本回退</h2>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                    版本 {chapterVersions.length}
+                  </span>
+                  <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                    批注 {reviewWorkspace?.open_comment_count ?? 0}
+                  </span>
+                  <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                    确认点 {reviewWorkspace?.pending_checkpoint_count ?? 0}
+                  </span>
+                </div>
+              </div>
+
+              <ChapterReviewPanel
+                activeChapter={activeChapter}
+                draftText={draftText}
+                draftDirty={draftDirty}
+                reviewWorkspace={reviewWorkspace}
+                chapterVersions={chapterVersions}
+                loading={loadingChapterReview}
+                submittingActionKey={reviewSubmittingActionKey}
+                editorRef={editorRef}
+                onCreateComment={handleCreateReviewComment}
+                onUpdateComment={handleUpdateReviewComment}
+                onDeleteComment={handleDeleteReviewComment}
+                onCreateCheckpoint={handleCreateCheckpoint}
+                onUpdateCheckpoint={handleUpdateCheckpoint}
+                onCreateDecision={handleCreateReviewDecision}
+                onRollback={handleRollbackVersion}
+                onRewriteSelection={handleRewriteSelection}
+              />
+            </section>
+
+            <details className="rounded-[32px] border border-black/10 bg-white/80 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <summary className="cursor-pointer list-none text-lg font-semibold">
+                文风与写法控制
+              </summary>
+              <div className="mt-5">
+                <StyleControlPanel
+                  chapterSample={styleSample}
+                  preferenceProfile={preferenceProfile}
+                  styleTemplates={styleTemplates}
+                  loading={loadingStyleControl}
+                  actionKey={styleActionKey}
+                  onChapterSampleChange={setStyleSample}
+                  onApplyTemplate={(templateKey) => void handleApplyStyleTemplate(templateKey)}
+                  onClearTemplate={() => void handleClearStyleTemplate()}
+                  onSavePreference={(payload) => void handleSaveStylePreference(payload)}
+                />
+              </div>
+            </details>
           </section>
         ) : null}
 
         {activeStageValue === "final" ? (
           <section id="story-stage-final" className="scroll-mt-6 space-y-4">
-            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <p className="text-xs uppercase tracking-[0.18em] text-copper">第三步</p>
-              <h2 className="mt-2 text-2xl font-semibold">看终稿对比，再决定是否放行</h2>
-              <p className="mt-3 text-sm text-black/58">这里只看结果，不再回头起稿。</p>
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-4 py-3 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                  第三步
+                </span>
+                <h2 className="text-lg font-semibold">终稿</h2>
+                <span
+                  className={`rounded-full border px-3 py-1 text-xs ${
+                    visibleFinalResult
+                      ? visibleFinalResult.ready_for_publish
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : "border-amber-200 bg-amber-50 text-amber-700"
+                      : "border-black/10 bg-[#fbfaf5] text-black/60"
+                  }`}
+                >
+                  {visibleFinalResult
+                    ? visibleFinalResult.ready_for_publish
+                      ? "可以交稿"
+                      : "还要确认"
+                    : "还没出结果"}
+                </span>
+              </div>
               {!visibleFinalResult ? (
-                <div className="mt-4 flex flex-wrap items-center gap-3 rounded-[24px] border border-black/10 bg-[#fbfaf5] px-4 py-3 text-sm text-black/62">
-                  这章还没有跑出优化结果。
-                  <button
-                    className="rounded-full bg-copper px-4 py-2 text-sm font-semibold text-white"
-                    onClick={() => openStage("draft")}
-                    type="button"
-                  >
-                    回正文区继续
-                  </button>
-                </div>
+                <button
+                  className="rounded-full bg-copper px-4 py-2 text-sm font-semibold text-white"
+                  onClick={() => openStage("draft")}
+                  type="button"
+                >
+                  回正文区继续
+                </button>
               ) : null}
             </div>
 
@@ -2806,12 +4186,24 @@ export default function StoryRoomPage() {
               activeChapter={activeChapter}
               draftDirty={draftDirty}
               finalResult={finalResult}
+              nextChapter={nextChapterCandidate}
+              carryoverPreview={currentChapterCarryoverPreview}
+              pendingKnowledgeCount={
+                visibleFinalResult?.kb_update_list.filter(
+                  (item) => (item.status ?? "pending") === "pending",
+                ).length ?? 0
+              }
               exportingFormat={exportingFormat}
               finalizingChapter={finalizingChapter}
+              finalizingAction={finalizingAction}
               canApplyOptimizedDraft={canApplyOptimizedDraft}
               onOpenDraftStep={() => openStage("draft")}
               onApplyOptimizedDraft={() => handleApplyOptimizedDraft()}
               onSaveAsFinal={() => void handleSaveAsFinal()}
+              onSaveAsFinalAndContinue={() =>
+                void handleSaveAsFinal({ continueToNextChapter: true })
+              }
+              onContinueToNextChapter={() => openNextChapterDraft(nextChapterCandidate)}
               onExport={(format) => void handleExportChapter(format)}
             />
           </section>
@@ -2819,10 +4211,16 @@ export default function StoryRoomPage() {
 
         {activeStageValue === "knowledge" ? (
           <section id="story-stage-knowledge" className="scroll-mt-6 space-y-4">
-            <div className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <p className="text-xs uppercase tracking-[0.18em] text-copper">第四步</p>
-              <h2 className="mt-2 text-2xl font-semibold">最后确认设定圣经</h2>
-              <p className="mt-3 text-sm text-black/58">默认先写，最后回来收设定。</p>
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-4 py-3 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                  第四步
+                </span>
+                <h2 className="text-lg font-semibold">设定</h2>
+              </div>
+              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
+                待确认 {storyBiblePendingChanges.length} 条
+              </span>
             </div>
 
             <KnowledgeBaseBoard
@@ -2842,6 +4240,7 @@ export default function StoryRoomPage() {
               replaceSections={replaceSections}
               generationLoadingKind={dispatchingEntityKind}
               generationTask={entityTaskState}
+              generationTaskEvents={entityTaskEvents}
               acceptingCandidateIndex={acceptingCandidateIndex}
               storyBibleVersions={storyBibleVersions}
               storyBiblePendingChanges={storyBiblePendingChanges}
@@ -2865,6 +4264,8 @@ export default function StoryRoomPage() {
               onSubmitImport={() => void handleSubmitImport()}
               onStartEdit={handleStartEdit}
               onDelete={(tab, id) => void handleDeleteKnowledge(tab, id)}
+              onJumpToRelatedChapter={handleJumpToRelatedChapter}
+              onLocateSearchResult={handleLocateSearchResult}
               onCancelEdit={handleCancelEdit}
               onApprovePendingChange={(changeId) =>
                 void handleApproveStoryBiblePendingChange(changeId)
@@ -2879,34 +4280,6 @@ export default function StoryRoomPage() {
           </section>
         ) : null}
 
-        <details className="rounded-[32px] border border-black/10 bg-white/80 p-6 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <summary className="cursor-pointer list-none text-lg font-semibold">
-            更多高级工具：版本、批注、回退与章节复核
-          </summary>
-          <p className="mt-3 text-sm leading-7 text-black/60">
-            这部分默认收起来，避免打断主路径。只有当你要做版本对比、精确批注或回退章节时，再展开使用。
-          </p>
-          <div className="mt-5">
-            <ChapterReviewPanel
-              activeChapter={activeChapter}
-              draftText={draftText}
-              draftDirty={draftDirty}
-              reviewWorkspace={reviewWorkspace}
-              chapterVersions={chapterVersions}
-              loading={loadingChapterReview}
-              submittingActionKey={reviewSubmittingActionKey}
-              editorTextareaRef={editorTextareaRef}
-              onCreateComment={handleCreateReviewComment}
-              onUpdateComment={handleUpdateReviewComment}
-              onDeleteComment={handleDeleteReviewComment}
-              onCreateCheckpoint={handleCreateCheckpoint}
-              onUpdateCheckpoint={handleUpdateCheckpoint}
-              onCreateDecision={handleCreateReviewDecision}
-              onRollback={handleRollbackVersion}
-              onRewriteSelection={handleRewriteSelection}
-            />
-          </div>
-        </details>
       </div>
     </main>
   );

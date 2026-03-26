@@ -4,7 +4,7 @@ import type { StoryEngineDeliberationRound } from "@/types/api";
 
 type StoryDeliberationPanelProps = {
   title: string;
-  description: string;
+  description?: string;
   rounds: StoryEngineDeliberationRound[];
   emptyText: string;
 };
@@ -36,7 +36,7 @@ export function StoryDeliberationPanel({
         <div>
           <p className="text-xs uppercase tracking-[0.18em] text-copper">查看优化依据</p>
           <h3 className="mt-2 text-lg font-semibold">{title}</h3>
-          <p className="mt-2 text-sm leading-7 text-black/58">{description}</p>
+          {description ? <p className="mt-2 text-sm text-black/58">{description}</p> : null}
         </div>
         <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
           {rounds.length > 0 ? `${rounds.length} 轮` : "暂无"}

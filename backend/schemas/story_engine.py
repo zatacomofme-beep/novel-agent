@@ -209,6 +209,7 @@ class StoryOutlineUpdate(ORMModel):
 class StoryOutlineRead(ORMModel):
     outline_id: UUID
     project_id: UUID
+    branch_id: UUID
     parent_id: Optional[UUID] = None
     level: str
     title: str
@@ -242,6 +243,7 @@ class StoryChapterSummaryUpdate(ORMModel):
 class StoryChapterSummaryRead(ORMModel):
     summary_id: UUID
     project_id: UUID
+    branch_id: UUID
     chapter_number: int
     content: str
     core_progress: list[str]
@@ -387,6 +389,19 @@ class StoryEnginePresetCatalogRead(ORMModel):
     presets: list[StoryEnginePresetSummaryRead] = Field(default_factory=list)
 
 
+class StoryEngineModelRoutingProjectSummaryRead(ORMModel):
+    project_id: UUID
+    title: str
+    owner_email: Optional[str] = None
+    genre: Optional[str] = None
+    tone: Optional[str] = None
+    status: str
+    updated_at: datetime
+    active_preset_key: str
+    active_preset_label: Optional[str] = None
+    manual_override_count: int = 0
+
+
 class StoryEngineModelRoutingRead(ORMModel):
     project: StoryEngineProjectInfo
     default_preset_key: str
@@ -449,6 +464,7 @@ class StoryEngineDeliberationRoundRead(ORMModel):
 
 
 class OutlineStressTestRequest(ORMModel):
+    branch_id: Optional[UUID] = None
     idea: Optional[str] = Field(default=None, min_length=1)
     genre: Optional[str] = Field(default=None, max_length=100)
     tone: Optional[str] = Field(default=None, max_length=100)
@@ -482,6 +498,7 @@ class OutlineStressTestResponse(ORMModel):
 
 
 class RealtimeGuardRequest(ORMModel):
+    branch_id: Optional[UUID] = None
     chapter_number: int = Field(ge=1)
     chapter_title: Optional[str] = None
     outline_id: Optional[UUID] = None
@@ -500,6 +517,7 @@ class RealtimeGuardResponse(ORMModel):
 
 
 class FinalOptimizeRequest(ORMModel):
+    branch_id: Optional[UUID] = None
     chapter_number: int = Field(ge=1)
     chapter_title: Optional[str] = None
     draft_text: str = Field(min_length=1)
@@ -536,6 +554,7 @@ class StoryKnowledgeSuggestionResolveResponse(ORMModel):
 
 
 class ChapterStreamGenerateRequest(ORMModel):
+    branch_id: Optional[UUID] = None
     chapter_number: int = Field(ge=1)
     chapter_title: Optional[str] = None
     outline_id: Optional[UUID] = None
@@ -593,6 +612,7 @@ class StoryImportTemplateRead(ORMModel):
 
 
 class StoryBulkImportRequest(ORMModel):
+    branch_id: Optional[UUID] = None
     template_key: Optional[str] = None
     apply_template_model_routing: bool = False
     replace_existing_sections: list[str] = Field(default_factory=list)

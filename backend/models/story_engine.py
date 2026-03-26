@@ -150,6 +150,12 @@ class StoryOutline(TimestampMixin, Base):
         nullable=False,
         index=True,
     )
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("project_branches.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("story_outlines.outline_id", ondelete="CASCADE"),
@@ -183,8 +189,9 @@ class StoryChapterSummary(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint(
             "project_id",
+            "branch_id",
             "chapter_number",
-            name="uq_story_chapter_summaries_project_chapter",
+            name="uq_story_chapter_summaries_project_branch_chapter",
         ),
     )
 
@@ -196,6 +203,12 @@ class StoryChapterSummary(TimestampMixin, Base):
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("project_branches.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

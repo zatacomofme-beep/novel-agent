@@ -94,6 +94,8 @@ STRUCTURED_KNOWLEDGE_SECTION_SPECS: dict[str, StructuredKnowledgeSectionSpec] = 
     ),
 }
 
+BRANCH_SCOPED_STRUCTURED_SECTION_KEYS = {"outlines", "chapter_summaries"}
+
 STORY_BIBLE_SECTION_SCHEMAS: dict[str, type] = {
     "locations": LocationItem,
     "factions": StoryBibleFactionEntry,
@@ -160,6 +162,11 @@ async def save_story_knowledge(
             )
         else:
             validated_payload = structured_spec.create_schema.model_validate(item).model_dump()
+            if section_key in BRANCH_SCOPED_STRUCTURED_SECTION_KEYS:
+                validated_payload["branch_id"] = _require_branch_id(
+                    branch_id,
+                    action_label=guard_operation,
+                )
 
         # 批量初始化模板会先跑一次总体验证，再走这里逐条落库。
         # 这样既保留真实守护能力，又避免一套模板被逐条重型校验拖到数分钟。
@@ -170,6 +177,7 @@ async def save_story_knowledge(
                 session,
                 project_id=project_id,
                 user_id=user_id,
+                branch_id=branch_id,
                 section_key=section_key,
                 operation=guard_operation,
                 candidate_item=validated_payload,
@@ -226,6 +234,7 @@ async def save_story_knowledge(
             session,
             project_id=project_id,
             user_id=user_id,
+            branch_id=branch_id,
             section_key=section_key,
             operation=guard_operation,
             candidate_item=validated_item,
@@ -291,6 +300,7 @@ async def delete_story_knowledge(
         session,
         project_id=project_id,
         user_id=user_id,
+        branch_id=branch_id,
         section_key=section_key,
         operation=guard_operation,
         candidate_item={},

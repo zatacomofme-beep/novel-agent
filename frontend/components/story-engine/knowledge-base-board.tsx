@@ -18,6 +18,7 @@ import type {
   StorySearchResult,
   StoryTimelineMapEvent,
   StoryWorldRule,
+  TaskEvent,
   TaskState,
 } from "@/types/api";
 
@@ -55,6 +56,7 @@ type KnowledgeBaseBoardProps = {
   replaceSections: string[];
   generationLoadingKind: KnowledgeSuggestionKind | null;
   generationTask: TaskState | null;
+  generationTaskEvents: TaskEvent[];
   acceptingCandidateIndex: number | null;
   storyBibleVersions: StoryBibleVersion[];
   storyBiblePendingChanges: StoryBiblePendingChange[];
@@ -73,6 +75,8 @@ type KnowledgeBaseBoardProps = {
   onSubmitImport: () => void;
   onStartEdit: (tab: KnowledgeTabKey, item: Record<string, unknown>) => void;
   onDelete: (tab: KnowledgeTabKey, id: string) => void;
+  onJumpToRelatedChapter: (tab: KnowledgeTabKey, item: Record<string, unknown>) => void;
+  onLocateSearchResult: (result: StorySearchResult) => void;
   onCancelEdit: () => void;
   onApprovePendingChange: (changeId: string) => void;
   onRejectPendingChange: (changeId: string) => void;
@@ -334,6 +338,58 @@ function extractSuggestionCards(task: TaskState | null): Array<{
   });
 }
 
+function formatEntityGenerationEventLabel(event: TaskEvent): string {
+  const labels: Record<string, string> = {
+    queued: "已收下这轮补全",
+    dispatched: "已经排进处理队列",
+    started: "开始整理当前设定",
+    context_loaded: "已装载当前设定",
+    generation_started: "正在生成候选",
+    generation_completed: "候选初稿已完成",
+    outputs_ready: "结果已整理好",
+    succeeded: "这轮补全已完成",
+    failed: "这轮补全没跑通",
+  };
+  return labels[event.event_type] ?? event.event_type;
+}
+
+function summarizeEntityGenerationEventPayload(payload: Record<string, unknown> | null): string[] {
+  if (!payload) {
+    return [];
+  }
+
+  const summary: string[] = [];
+
+  if (typeof payload.requested_count === "number") {
+    summary.push(`目标 ${payload.requested_count} 条`);
+  }
+  if (typeof payload.candidate_count === "number") {
+    summary.push(`整理出 ${payload.candidate_count} 条`);
+  } else if (typeof payload.returned_count === "number") {
+    summary.push(`整理出 ${payload.returned_count} 条`);
+  }
+  if (typeof payload.response_source === "string") {
+    if (payload.response_source === "local_fallback") {
+      summary.push("已启用备用方案");
+    } else if (payload.response_source === "model_response") {
+      summary.push("已走主方案");
+    }
+  }
+  if (payload.failover_triggered === true) {
+    summary.push("已自动切换备用模型");
+  }
+  if (Array.isArray(payload.entity_preview) && payload.entity_preview.length > 0) {
+    const preview = payload.entity_preview
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .slice(0, 2);
+    if (preview.length > 0) {
+      summary.push(preview.join(" / "));
+    }
+  }
+
+  return summary.slice(0, 3);
+}
+
 function renderCharacterCard(item: StoryCharacter) {
   return (
     <>
@@ -561,6 +617,7 @@ export function KnowledgeBaseBoard({
   replaceSections,
   generationLoadingKind,
   generationTask,
+  generationTaskEvents,
   acceptingCandidateIndex,
   storyBibleVersions,
   storyBiblePendingChanges,
@@ -579,6 +636,8 @@ export function KnowledgeBaseBoard({
   onSubmitImport,
   onStartEdit,
   onDelete,
+  onJumpToRelatedChapter,
+  onLocateSearchResult,
   onCancelEdit,
   onApprovePendingChange,
   onRejectPendingChange,
@@ -592,6 +651,7 @@ export function KnowledgeBaseBoard({
   const selectedTemplate =
     importTemplates.find((item) => item.key === selectedTemplateKey) ?? null;
   const generationCards = extractSuggestionCards(generationTask);
+  const visibleGenerationEvents = generationTaskEvents.slice(-5);
   const generationBusy =
     generationLoadingKind !== null ||
     generationTask?.status === "queued" ||
@@ -624,11 +684,8 @@ export function KnowledgeBaseBoard({
       <div className="rounded-[36px] border border-black/10 bg-white/82 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)]">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-copper">设定圣经</p>
-            <h2 className="mt-2 text-2xl font-semibold">先只看你现在要用到的那一类设定</h2>
-            <p className="mt-3 max-w-3xl text-sm leading-7 text-black/62">
-              设定很多，但你不需要一次看完。先切到当前要用的分类，处理这一类的新增、修改和待确认变动，其他工具都放到后面。
-            </p>
+            <p className="text-xs uppercase tracking-[0.24em] text-copper">设定库</p>
+            <h2 className="mt-2 text-2xl font-semibold">看设定、改设定</h2>
           </div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(TAB_LABELS).map(([key, label]) => (
@@ -658,9 +715,6 @@ export function KnowledgeBaseBoard({
           <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
             待确认 {storyBiblePendingChanges.length} 条
           </span>
-          <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-            最近版本 {storyBibleVersions.length} 条
-          </span>
         </div>
 
         <div className="mt-6 grid gap-4">
@@ -689,6 +743,13 @@ export function KnowledgeBaseBoard({
                   <div className="mt-4 flex flex-wrap gap-2">
                     <button
                       className="rounded-full border border-black/10 bg-white px-3 py-2 text-xs font-semibold text-black/70"
+                      onClick={() => onJumpToRelatedChapter(activeTab, item)}
+                      type="button"
+                    >
+                      去正文定位
+                    </button>
+                    <button
+                      className="rounded-full border border-black/10 bg-white px-3 py-2 text-xs font-semibold text-black/70"
                       onClick={() => onStartEdit(activeTab, item)}
                       type="button"
                     >
@@ -707,7 +768,7 @@ export function KnowledgeBaseBoard({
             })
           ) : (
             <div className="rounded-[28px] border border-dashed border-black/10 bg-[#fbfaf5] p-6 text-sm leading-7 text-black/45">
-              当前分类还没有内容，右侧可以直接新增，或者先点上面的灵感补全。
+              当前分类还没有内容。
             </div>
           )}
         </div>
@@ -717,13 +778,98 @@ export function KnowledgeBaseBoard({
         <section className="rounded-[32px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-xs uppercase tracking-[0.18em] text-copper">当前最常用</p>
+              <p className="text-xs uppercase tracking-[0.18em] text-copper">先确认</p>
+              <h3 className="mt-2 text-lg font-semibold">待你确认的自动记设定</h3>
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-black/55">
+                待确认 {storyBiblePendingChanges.length}
+              </span>
+              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-black/55">
+                可回退 {storyBibleVersions.length}
+              </span>
+            </div>
+          </div>
+
+          {loadingGovernance ? (
+            <div className="mt-4 rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4 text-sm text-black/50">
+              正在同步设定记录...
+            </div>
+          ) : null}
+
+          <div className="mt-4 space-y-3">
+            {storyBiblePendingChanges.length > 0 ? (
+              storyBiblePendingChanges.slice(0, 4).map((change) => (
+                <article
+                  key={change.id}
+                  className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold">{summarizeStoryBibleChange(change)}</p>
+                      <p className="mt-2 text-xs text-black/45">
+                        {formatStoryBibleChangeType(change.change_type)} ·{" "}
+                        {formatStoryBibleChangeSource(change.change_source)} ·{" "}
+                        {formatDateTime(change.created_at)}
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-700">
+                      待确认
+                    </span>
+                  </div>
+                  <p className="mt-3 text-sm leading-7 text-black/62">
+                    {truncateText(
+                      change.reason ??
+                        extractStoryBibleEntityLabel(change.new_value) ??
+                        extractStoryBibleEntityLabel(change.old_value) ??
+                        "这条设定改动正在等待你确认。",
+                      120,
+                    )}
+                  </p>
+                  {change.proposed_by_agent ? (
+                    <span className="mt-2 inline-flex rounded-full border border-black/10 bg-white px-2.5 py-1 text-[11px] text-black/42">
+                      {change.proposed_by_agent}
+                    </span>
+                  ) : null}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={isGovernanceActionRunning(`pending:approve:${change.id}`)}
+                      onClick={() => onApprovePendingChange(change.id)}
+                      type="button"
+                    >
+                      {isGovernanceActionRunning(`pending:approve:${change.id}`)
+                        ? "确认中..."
+                        : "确认收入设定"}
+                    </button>
+                    <button
+                      className="rounded-full border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={isGovernanceActionRunning(`pending:reject:${change.id}`)}
+                      onClick={() => onRejectPendingChange(change.id)}
+                      type="button"
+                    >
+                      {isGovernanceActionRunning(`pending:reject:${change.id}`)
+                        ? "退回中..."
+                        : "退回这条建议"}
+                    </button>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <div className="rounded-[24px] border border-dashed border-black/10 bg-[#fbfaf5] p-4 text-sm text-black/45">
+                当前没有待确认设定。
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-[32px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.18em] text-copper">当前在改</p>
               <h3 className="mt-2 text-lg font-semibold">
-                {editingId ? `正在改${activeTabLabel}` : `给“${activeTabLabel}”补一条新设定`}
+                {editingId ? `修改${activeTabLabel}` : `新增${activeTabLabel}`}
               </h3>
-              <p className="mt-3 text-sm leading-7 text-black/52">
-                先改当前分类就够了。只有当你真的需要大批量导入、跨分类搜索或回退版本时，再打开后面的高级工具。
-              </p>
             </div>
             {editingId ? (
               <button
@@ -835,273 +981,194 @@ export function KnowledgeBaseBoard({
           </button>
         </section>
 
-        <section className="rounded-[32px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <h3 className="text-lg font-semibold">灵感补全</h3>
-          <p className="mt-3 text-sm leading-7 text-black/52">
-            卡设定时点一下就行，系统会先补几组候选给你挑，不会直接改掉你已经定下来的内容。
-          </p>
-
-          <div className="mt-4 flex flex-wrap gap-2">
-            {GENERATION_ACTIONS.map((action) => (
-              <button
-                key={action.key}
-                className={`rounded-full px-3 py-2 text-xs font-semibold transition ${
-                  generationLoadingKind === action.key
-                    ? "bg-copper text-white"
-                    : "border border-black/10 bg-[#fbfaf5] text-black/62 hover:bg-white"
-                }`}
-                disabled={generationBusy}
-                onClick={() => onGenerateSuggestion(action.key)}
-                type="button"
-              >
-                {generationLoadingKind === action.key ? "准备中..." : action.label}
-              </button>
-            ))}
-          </div>
-
-          {generationTask ? (
-            <div className="mt-4 rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold">{formatGenerationTaskLabel(generationTask)}</p>
-                <span className="text-xs text-black/45">
-                  {GENERATION_STATUS_LABELS[generationTask.status]} · {generationTask.progress}%
-                </span>
-              </div>
-              <p className="mt-2 text-sm leading-7 text-black/58">
-                {generationTask.message ?? "正在整理这批候选。"}
-              </p>
-            </div>
-          ) : null}
-
-          <div className="mt-4 space-y-3">
-            {generationCards.length > 0 ? (
-              generationCards.map((card) => (
-                <article
-                  key={card.title}
-                  className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4"
-                >
-                  <p className="text-sm font-semibold">{card.title}</p>
-                  <p className="mt-2 text-sm leading-7 text-black/58">{card.detail}</p>
-                  {card.canAccept ? (
-                    <button
-                      className="mt-3 rounded-full border border-black/10 bg-white px-3 py-2 text-xs font-semibold text-black/68 transition hover:bg-[#f6f0e6] disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={acceptingCandidateIndex === card.index}
-                      onClick={() => onAcceptSuggestion(card.index)}
-                      type="button"
-                    >
-                      {acceptingCandidateIndex === card.index ? "采纳中..." : "采纳进设定"}
-                    </button>
-                  ) : (
-                    <p className="mt-3 text-xs leading-6 text-black/42">
-                      这类候选暂时先当灵感稿使用，后面会继续补正式落库入口。
-                    </p>
-                  )}
-                </article>
-              ))
-            ) : (
-              <p className="text-sm leading-7 text-black/45">
-                这里会挂出最近一轮补出来的候选，方便你直接拿去扩写或改成自己的版本。
-              </p>
-            )}
-          </div>
-        </section>
-
-        <section className="rounded-[32px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <h3 className="text-lg font-semibold">主设定补全结果</h3>
-          <p className="mt-3 text-sm leading-7 text-black/52">
-            新采纳的地点、势力、剧情线会先出现在这里，方便你不用切页就能确认主设定已经收进去。
-          </p>
-
-          <div className="mt-4 space-y-4">
-            <div>
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold">地点</p>
-                <span className="text-xs text-black/45">{storyBible?.locations.length ?? 0} 条</span>
-              </div>
-              <div className="mt-3 grid gap-3">
-                {visibleLocations.length > 0 ? (
-                  visibleLocations.map((item) =>
-                    renderStoryBibleSummaryCard(
-                      `location:${item.id ?? item.name}`,
-                      item.name,
-                      String(item.data.description ?? item.data.history ?? "已收入主设定。"),
-                      [
-                        item.data.type ? `类型：${String(item.data.type)}` : "",
-                        item.data.climate ? `气候：${String(item.data.climate)}` : "",
-                      ].filter(Boolean),
-                    ),
-                  )
-                ) : (
-                  <p className="text-sm leading-7 text-black/45">还没有地点设定。</p>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold">势力</p>
-                <span className="text-xs text-black/45">{storyBible?.factions.length ?? 0} 条</span>
-              </div>
-              <div className="mt-3 grid gap-3">
-                {visibleFactions.length > 0 ? (
-                  visibleFactions.map((item) =>
-                    renderStoryBibleSummaryCard(
-                      `faction:${item.key}`,
-                      item.name,
-                      item.description ?? "已收入主设定。",
-                      [
-                        item.scale ? `规模：${item.scale}` : "",
-                        item.leader ? `首领：${item.leader}` : "",
-                      ].filter(Boolean),
-                    ),
-                  )
-                ) : (
-                  <p className="text-sm leading-7 text-black/45">还没有势力设定。</p>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold">剧情线</p>
-                <span className="text-xs text-black/45">{storyBible?.plot_threads.length ?? 0} 条</span>
-              </div>
-              <div className="mt-3 grid gap-3">
-                {visiblePlotThreads.length > 0 ? (
-                  visiblePlotThreads.map((item) =>
-                    renderStoryBibleSummaryCard(
-                      `plot:${item.id ?? item.title}`,
-                      item.title,
-                      String(item.data.description ?? item.data.resolution ?? "已收入主设定。"),
-                      [
-                        item.status ? `状态：${item.status}` : "",
-                        typeof item.importance === "number" ? `权重：${item.importance}` : "",
-                      ].filter(Boolean),
-                    ),
-                  )
-                ) : (
-                  <p className="text-sm leading-7 text-black/45">还没有剧情线设定。</p>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="rounded-[32px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-lg font-semibold">待你确认的自动记设定</h3>
-              <p className="mt-3 text-sm leading-7 text-black/52">
-                自动记下来的设定变动会先停在这里，只有你确认后才会正式收入设定圣经。
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs">
-              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-black/55">
-                待确认 {storyBiblePendingChanges.length}
-              </span>
-              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-black/55">
-                可回退版本 {storyBibleVersions.length}
-              </span>
-            </div>
-          </div>
-
-          {loadingGovernance ? (
-            <div className="mt-4 rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4 text-sm text-black/50">
-              正在同步设定收口记录...
-            </div>
-          ) : null}
-
-          <div className="mt-4 grid gap-4">
-            <div className="rounded-[24px] border border-black/10 bg-[#fbfaf5] p-4">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold">待确认的自动记设定</p>
-                <span className="text-xs text-black/45">{storyBiblePendingChanges.length} 条</span>
-              </div>
-
-              <div className="mt-3 space-y-3">
-                {storyBiblePendingChanges.length > 0 ? (
-                  storyBiblePendingChanges.slice(0, 4).map((change) => (
-                    <article
-                      key={change.id}
-                      className="rounded-[20px] border border-black/10 bg-white p-4"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold">
-                            {summarizeStoryBibleChange(change)}
-                          </p>
-                          <p className="mt-2 text-xs text-black/45">
-                            {formatStoryBibleChangeType(change.change_type)} ·{" "}
-                            {formatStoryBibleChangeSource(change.change_source)} ·{" "}
-                            {formatDateTime(change.created_at)}
-                          </p>
-                        </div>
-                        <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-700">
-                          待确认
-                        </span>
-                      </div>
-                      <p className="mt-3 text-sm leading-7 text-black/62">
-                        {truncateText(
-                          change.reason ??
-                            extractStoryBibleEntityLabel(change.new_value) ??
-                            extractStoryBibleEntityLabel(change.old_value) ??
-                            "这条设定改动正在等待你确认。",
-                          120,
-                        )}
-                      </p>
-                      {change.proposed_by_agent ? (
-                        <p className="mt-2 text-xs text-black/42">
-                          来源：{change.proposed_by_agent}
-                        </p>
-                      ) : null}
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                          className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={isGovernanceActionRunning(`pending:approve:${change.id}`)}
-                          onClick={() => onApprovePendingChange(change.id)}
-                          type="button"
-                        >
-                          {isGovernanceActionRunning(`pending:approve:${change.id}`)
-                            ? "确认中..."
-                            : "确认收入设定"}
-                        </button>
-                        <button
-                          className="rounded-full border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={isGovernanceActionRunning(`pending:reject:${change.id}`)}
-                          onClick={() => onRejectPendingChange(change.id)}
-                          type="button"
-                        >
-                          {isGovernanceActionRunning(`pending:reject:${change.id}`)
-                            ? "退回中..."
-                            : "退回这条建议"}
-                        </button>
-                      </div>
-                    </article>
-                  ))
-                ) : (
-                  <p className="text-sm leading-7 text-black/45">
-                    当前没有待你确认的自动设定变动。
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-
         <details className="rounded-[32px] border border-black/10 bg-white/88 p-5 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-          <summary className="cursor-pointer list-none text-lg font-semibold">
-            高级工具：导入、搜索、关系图和版本回退
-          </summary>
-          <p className="mt-3 text-sm leading-7 text-black/52">
-            这些都很有用，但不是第一次打开就必须处理的动作，所以先收起来。
-          </p>
+          <summary className="cursor-pointer list-none text-lg font-semibold">更多设定工具</summary>
 
           <div className="mt-5 space-y-4">
             <section className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-4">
+              <h3 className="text-sm font-semibold">灵感补全</h3>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                {GENERATION_ACTIONS.map((action) => (
+                  <button
+                    key={action.key}
+                    className={`rounded-full px-3 py-2 text-xs font-semibold transition ${
+                      generationLoadingKind === action.key
+                        ? "bg-copper text-white"
+                        : "border border-black/10 bg-white text-black/62 hover:bg-[#f6f0e6]"
+                    }`}
+                    disabled={generationBusy}
+                    onClick={() => onGenerateSuggestion(action.key)}
+                    type="button"
+                  >
+                    {generationLoadingKind === action.key ? "准备中..." : action.label}
+                  </button>
+                ))}
+              </div>
+
+              {generationTask ? (
+                <div className="mt-4 rounded-[24px] border border-black/10 bg-white p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold">{formatGenerationTaskLabel(generationTask)}</p>
+                    <span className="text-xs text-black/45">
+                      {GENERATION_STATUS_LABELS[generationTask.status]} · {generationTask.progress}%
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm text-black/58">
+                    {generationTask.message ?? "正在整理候选。"}
+                  </p>
+                </div>
+              ) : null}
+
+              {visibleGenerationEvents.length > 0 ? (
+                <div className="mt-4 rounded-[24px] border border-black/10 bg-white p-4">
+                  <p className="text-sm font-semibold">这轮补全进度</p>
+                  <div className="mt-4 space-y-3">
+                    {visibleGenerationEvents.map((event) => {
+                      const summary = summarizeEntityGenerationEventPayload(event.payload);
+                      return (
+                        <article
+                          key={event.id}
+                          className="rounded-[18px] border border-black/8 bg-[#fbfaf5] px-3 py-3"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-xs font-semibold text-black/72">
+                              {formatEntityGenerationEventLabel(event)}
+                            </p>
+                            <span className="text-[11px] text-black/42">
+                              {formatDateTime(event.created_at)}
+                            </span>
+                          </div>
+                          {summary.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {summary.map((item) => (
+                                <span
+                                  key={`${event.id}:${item}`}
+                                  className="rounded-full border border-black/10 bg-white px-2.5 py-1 text-[11px] text-black/52"
+                                >
+                                  {item}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="mt-4 space-y-3">
+                {generationCards.length > 0 ? (
+                  generationCards.map((card) => (
+                    <article
+                      key={card.title}
+                      className="rounded-[24px] border border-black/10 bg-white p-4"
+                    >
+                      <p className="text-sm font-semibold">{card.title}</p>
+                      <p className="mt-2 text-sm text-black/58">{card.detail}</p>
+                      {card.canAccept ? (
+                        <button
+                          className="mt-3 rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-2 text-xs font-semibold text-black/68 transition hover:bg-[#f6f0e6] disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={acceptingCandidateIndex === card.index}
+                          onClick={() => onAcceptSuggestion(card.index)}
+                          type="button"
+                        >
+                          {acceptingCandidateIndex === card.index ? "采纳中..." : "采纳进设定"}
+                        </button>
+                      ) : (
+                        <span className="mt-3 inline-flex rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-[11px] text-black/45">
+                          暂作灵感稿
+                        </span>
+                      )}
+                    </article>
+                  ))
+                ) : (
+                  <p className="text-sm text-black/45">最近候选会显示在这里。</p>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-4">
+              <h3 className="text-sm font-semibold">已记主设定</h3>
+
+              <div className="mt-4 space-y-4">
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold">地点</p>
+                    <span className="text-xs text-black/45">{storyBible?.locations.length ?? 0} 条</span>
+                  </div>
+                  <div className="mt-3 grid gap-3">
+                    {visibleLocations.length > 0 ? (
+                      visibleLocations.map((item) =>
+                        renderStoryBibleSummaryCard(
+                          `location:${item.id ?? item.name}`,
+                          item.name,
+                          String(item.data.description ?? item.data.history ?? "已收入主设定。"),
+                          [
+                            item.data.type ? `类型：${String(item.data.type)}` : "",
+                            item.data.climate ? `气候：${String(item.data.climate)}` : "",
+                          ].filter(Boolean),
+                        ),
+                      )
+                    ) : (
+                      <p className="text-sm text-black/45">还没有地点。</p>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold">势力</p>
+                    <span className="text-xs text-black/45">{storyBible?.factions.length ?? 0} 条</span>
+                  </div>
+                  <div className="mt-3 grid gap-3">
+                    {visibleFactions.length > 0 ? (
+                      visibleFactions.map((item) =>
+                        renderStoryBibleSummaryCard(
+                          `faction:${item.key}`,
+                          item.name,
+                          item.description ?? "已收入主设定。",
+                          [
+                            item.scale ? `规模：${item.scale}` : "",
+                            item.leader ? `首领：${item.leader}` : "",
+                          ].filter(Boolean),
+                        ),
+                      )
+                    ) : (
+                      <p className="text-sm text-black/45">还没有势力。</p>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold">剧情线</p>
+                    <span className="text-xs text-black/45">{storyBible?.plot_threads.length ?? 0} 条</span>
+                  </div>
+                  <div className="mt-3 grid gap-3">
+                    {visiblePlotThreads.length > 0 ? (
+                      visiblePlotThreads.map((item) =>
+                        renderStoryBibleSummaryCard(
+                          `plot:${item.id ?? item.title}`,
+                          item.title,
+                          String(item.data.description ?? item.data.resolution ?? "已收入主设定。"),
+                          [
+                            item.status ? `状态：${item.status}` : "",
+                            typeof item.importance === "number" ? `权重：${item.importance}` : "",
+                          ].filter(Boolean),
+                        ),
+                      )
+                    ) : (
+                      <p className="text-sm text-black/45">还没有剧情线。</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-[28px] border border-black/10 bg-[#fbfaf5] p-4">
               <h3 className="text-sm font-semibold">导入整套设定</h3>
-              <p className="mt-2 text-sm leading-7 text-black/55">
-                想快速起盘时，可以直接套一整套设定骨架；也可以把你整理好的设定包整段贴进来。
-              </p>
 
               <div className="mt-4 grid gap-3">
                 <label className="block">
@@ -1123,11 +1190,14 @@ export function KnowledgeBaseBoard({
                 {selectedTemplate ? (
                   <div className="rounded-[24px] border border-black/10 bg-white p-4">
                     <p className="text-sm font-semibold">{selectedTemplate.description}</p>
-                    <div className="mt-3 space-y-2">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       {selectedTemplate.usage_notes.map((note) => (
-                        <p key={note} className="text-sm leading-7 text-black/58">
+                        <span
+                          key={note}
+                          className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/58"
+                        >
                           {note}
-                        </p>
+                        </span>
                       ))}
                     </div>
                   </div>
@@ -1208,12 +1278,17 @@ export function KnowledgeBaseBoard({
                         <span className="text-xs text-black/45">相关度 {item.score.toFixed(2)}</span>
                       </div>
                       <p className="mt-2 text-sm leading-7 text-black/62">{item.content}</p>
+                      <button
+                        className="mt-3 rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-2 text-xs font-semibold text-black/68 transition hover:bg-[#f6f0e6]"
+                        onClick={() => onLocateSearchResult(item)}
+                        type="button"
+                      >
+                        定位条目
+                      </button>
                     </article>
                   ))
                 ) : (
-                  <p className="text-sm leading-7 text-black/45">
-                    输入关键词后，可以直接搜到旧设定，不用自己翻表。
-                  </p>
+                  <p className="text-sm text-black/45">输入关键词后开始搜索。</p>
                 )}
               </div>
             </section>
@@ -1245,9 +1320,7 @@ export function KnowledgeBaseBoard({
                     </div>
                   ))
                 ) : (
-                  <p className="text-sm leading-7 text-black/45">
-                    先给人物加关系，这里就会自动长出关系线。
-                  </p>
+                  <p className="text-sm text-black/45">先给人物加关系。</p>
                 )}
               </div>
             </section>
@@ -1298,9 +1371,7 @@ export function KnowledgeBaseBoard({
                     </article>
                   ))
                 ) : (
-                  <p className="text-sm leading-7 text-black/45">
-                    这条主线还没有可回退的设定版本记录。
-                  </p>
+                  <p className="text-sm text-black/45">还没有可回退版本。</p>
                 )}
               </div>
             </section>

@@ -63,6 +63,10 @@ class Settings(BaseSettings):
         default="https://yunwu.ai/v1",
         alias="MODEL_GATEWAY_BASE_URL",
     )
+    model_routing_admin_emails: str = Field(
+        default="",
+        alias="MODEL_ROUTING_ADMIN_EMAILS",
+    )
     default_model: str = Field(default="gpt-5.4", alias="DEFAULT_MODEL")
     model_request_timeout_seconds: int = Field(
         default=45,
@@ -128,6 +132,14 @@ class Settings(BaseSettings):
         extra="ignore",
         protected_namespaces=("settings_",),
     )
+
+    @property
+    def model_routing_admin_email_set(self) -> set[str]:
+        return {
+            item.strip().lower()
+            for item in self.model_routing_admin_emails.split(",")
+            if item.strip()
+        }
 
 
 @lru_cache(maxsize=1)

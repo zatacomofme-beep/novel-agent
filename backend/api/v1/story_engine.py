@@ -9,7 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.deps import get_current_user, get_db_session
+from api.deps import get_current_user, get_db_session, get_model_routing_admin_user
 from core.errors import AppError
 from models.user import User
 from schemas.story_engine import (
@@ -107,7 +107,7 @@ router = APIRouter()
     response_model=StoryEnginePresetCatalogRead,
 )
 async def story_engine_model_routing_preset_catalog(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_model_routing_admin_user),
 ) -> StoryEnginePresetCatalogRead:
     del current_user
     payload = list_story_engine_model_preset_catalog()
@@ -120,6 +120,7 @@ async def story_engine_model_routing_preset_catalog(
 )
 async def story_engine_workspace(
     project_id: UUID,
+    branch_id: Optional[UUID] = Query(default=None),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> StoryEngineWorkspaceRead:
@@ -127,6 +128,7 @@ async def story_engine_workspace(
         session,
         project_id=project_id,
         user_id=current_user.id,
+        branch_id=branch_id,
     )
     return StoryEngineWorkspaceRead.model_validate(payload)
 
@@ -147,7 +149,7 @@ async def story_engine_agents(
 )
 async def story_engine_model_routing(
     project_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_model_routing_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> StoryEngineModelRoutingRead:
     payload = await get_story_engine_model_routing(
@@ -165,7 +167,7 @@ async def story_engine_model_routing(
 async def story_engine_model_routing_update(
     project_id: UUID,
     payload: StoryEngineModelRoutingUpdateRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_model_routing_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> StoryEngineModelRoutingRead:
     result = await update_story_engine_model_routing(
@@ -304,6 +306,7 @@ async def story_engine_bulk_import(
         project_id=project_id,
         user_id=current_user.id,
         payload=StoryBulkImportPayload.model_validate(import_payload),
+        branch_id=payload.branch_id,
         replace_existing_sections=payload.replace_existing_sections,
         model_preset_key=(
             str(template.get("recommended_model_preset_key") or "").strip()
@@ -349,6 +352,7 @@ async def story_engine_outline_stress_test(
         session,
         project_id=project_id,
         user_id=current_user.id,
+        branch_id=payload.branch_id,
         idea=payload.idea,
         source_material=payload.source_material,
         source_material_name=payload.source_material_name,
@@ -374,6 +378,7 @@ async def story_engine_realtime_guard(
         session,
         project_id=project_id,
         user_id=current_user.id,
+        branch_id=payload.branch_id,
         chapter_number=payload.chapter_number,
         chapter_title=payload.chapter_title,
         outline_id=payload.outline_id,
@@ -398,6 +403,7 @@ async def story_engine_chapter_stream(
                 session,
                 project_id=project_id,
                 user_id=current_user.id,
+                branch_id=payload.branch_id,
                 chapter_number=payload.chapter_number,
                 chapter_title=payload.chapter_title,
                 outline_id=payload.outline_id,
@@ -438,6 +444,7 @@ async def story_engine_final_optimize(
         session,
         project_id=project_id,
         user_id=current_user.id,
+        branch_id=payload.branch_id,
         chapter_number=payload.chapter_number,
         chapter_title=payload.chapter_title,
         draft_text=payload.draft_text,
@@ -818,10 +825,18 @@ async def story_engine_timeline_event_delete(
 )
 async def story_engine_outline_list(
     project_id: UUID,
+    branch_id: Optional[UUID] = Query(default=None),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[StoryOutlineRead]:
-    return await _list_entity_response(session, project_id=project_id, user_id=current_user.id, entity_type="outlines", schema=StoryOutlineRead)
+    return await _list_entity_response(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+        entity_type="outlines",
+        schema=StoryOutlineRead,
+        branch_id=branch_id,
+    )
 
 
 @router.post(
@@ -832,10 +847,19 @@ async def story_engine_outline_list(
 async def story_engine_outline_create(
     project_id: UUID,
     payload: StoryOutlineCreate,
+    branch_id: Optional[UUID] = Query(default=None),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> StoryOutlineRead:
-    return await _create_entity_response(session, project_id=project_id, user_id=current_user.id, entity_type="outlines", payload=payload.model_dump(), schema=StoryOutlineRead)
+    return await _create_entity_response(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+        entity_type="outlines",
+        payload=payload.model_dump(),
+        schema=StoryOutlineRead,
+        branch_id=branch_id,
+    )
 
 
 @router.patch(
@@ -872,10 +896,18 @@ async def story_engine_outline_delete(
 )
 async def story_engine_chapter_summary_list(
     project_id: UUID,
+    branch_id: Optional[UUID] = Query(default=None),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[StoryChapterSummaryRead]:
-    return await _list_entity_response(session, project_id=project_id, user_id=current_user.id, entity_type="chapter_summaries", schema=StoryChapterSummaryRead)
+    return await _list_entity_response(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+        entity_type="chapter_summaries",
+        schema=StoryChapterSummaryRead,
+        branch_id=branch_id,
+    )
 
 
 @router.post(
@@ -886,10 +918,19 @@ async def story_engine_chapter_summary_list(
 async def story_engine_chapter_summary_create(
     project_id: UUID,
     payload: StoryChapterSummaryCreate,
+    branch_id: Optional[UUID] = Query(default=None),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> StoryChapterSummaryRead:
-    return await _create_entity_response(session, project_id=project_id, user_id=current_user.id, entity_type="chapter_summaries", payload=payload.model_dump(), schema=StoryChapterSummaryRead)
+    return await _create_entity_response(
+        session,
+        project_id=project_id,
+        user_id=current_user.id,
+        entity_type="chapter_summaries",
+        payload=payload.model_dump(),
+        schema=StoryChapterSummaryRead,
+        branch_id=branch_id,
+    )
 
 
 @router.patch(
@@ -927,12 +968,14 @@ async def _list_entity_response(
     user_id: UUID,
     entity_type: str,
     schema,
+    branch_id: Optional[UUID] = None,
 ) -> list[Any]:
     entities = await list_entities(
         session,
         project_id=project_id,
         user_id=user_id,
         entity_type=entity_type,
+        branch_id=branch_id,
     )
     return [schema.model_validate(item) for item in entities]
 
@@ -945,7 +988,10 @@ async def _create_entity_response(
     entity_type: str,
     payload: dict[str, Any],
     schema,
+    branch_id: Optional[UUID] = None,
 ) -> Any:
+    if branch_id is not None:
+        payload = {**payload, "branch_id": branch_id}
     entity = await create_entity(
         session,
         project_id=project_id,

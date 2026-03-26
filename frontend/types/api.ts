@@ -76,6 +76,19 @@ export interface StoryEnginePresetCatalog {
   presets: StoryEnginePresetSummary[];
 }
 
+export interface StoryEngineModelRoutingProjectSummary {
+  project_id: string;
+  title: string;
+  owner_email: string | null;
+  genre: string | null;
+  tone: string | null;
+  status: string;
+  updated_at: string;
+  active_preset_key: string;
+  active_preset_label: string | null;
+  manual_override_count: number;
+}
+
 export interface ProjectVolume {
   id: string;
   project_id: string;
@@ -291,6 +304,8 @@ export interface DashboardProjectSummary {
   access_role: string;
   owner_email: string | null;
   collaborator_count: number;
+  has_bootstrap_profile: boolean;
+  has_novel_blueprint: boolean;
   updated_at: string;
   chapter_count: number;
   word_count: number;
@@ -353,6 +368,7 @@ export interface DashboardRecentTask {
   message: string | null;
   project_id: string | null;
   chapter_id: string | null;
+  chapter_number: number | null;
   updated_at: string;
 }
 
@@ -1146,6 +1162,7 @@ export interface StoryTimelineMapEvent {
 export interface StoryOutline {
   outline_id: string;
   project_id: string;
+  branch_id: string;
   parent_id: string | null;
   level: "level_1" | "level_2" | "level_3" | string;
   title: string;
@@ -1162,6 +1179,7 @@ export interface StoryOutline {
 export interface StoryChapterSummary {
   summary_id: string;
   project_id: string;
+  branch_id: string;
   chapter_number: number;
   content: string;
   core_progress: string[];
@@ -1349,6 +1367,7 @@ export interface PortableStoryEngineRoutingPayload {
 }
 
 export interface OutlineStressTestRequest {
+  branch_id?: string | null;
   idea: string | null;
   genre: string | null;
   tone: string | null;
@@ -1371,6 +1390,7 @@ export interface OutlineStressTestResponse {
 }
 
 export interface RealtimeGuardRequest {
+  branch_id?: string | null;
   chapter_number: number;
   chapter_title: string | null;
   outline_id: string | null;
@@ -1389,6 +1409,7 @@ export interface RealtimeGuardResponse {
 }
 
 export interface FinalOptimizeRequest {
+  branch_id?: string | null;
   chapter_number: number;
   chapter_title: string | null;
   draft_text: string;
@@ -1447,6 +1468,7 @@ export interface StoryKnowledgeMutationResponse {
 }
 
 export interface ChapterStreamGenerateRequest {
+  branch_id?: string | null;
   chapter_number: number;
   chapter_title: string | null;
   outline_id: string | null;
@@ -1558,6 +1580,7 @@ export interface StoryImportTemplate {
 }
 
 export interface StoryBulkImportRequest {
+  branch_id?: string | null;
   template_key: string | null;
   apply_template_model_routing: boolean;
   replace_existing_sections: string[];

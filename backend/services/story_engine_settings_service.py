@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from core.config import get_settings
 from core.errors import AppError
 from models.project import Project
+from models.user import User
 from services.project_service import PROJECT_PERMISSION_EDIT
 
 
@@ -322,7 +325,6 @@ def _normalize_route(
     available_model_ids: set[str],
     strict: bool,
 ) -> dict[str, str]:
-    fallback = _build_env_default_route(role_key)
     if not isinstance(raw_route, dict):
         if strict:
             raise AppError(
@@ -331,7 +333,7 @@ def _normalize_route(
                 status_code=422,
                 metadata={"role_key": role_key},
             )
-        return fallback
+        return _build_env_default_route(role_key)
 
     model = str(raw_route.get("model") or "").strip()
     if not model:
@@ -342,7 +344,7 @@ def _normalize_route(
                 status_code=422,
                 metadata={"role_key": role_key},
             )
-        return fallback
+        return _build_env_default_route(role_key)
 
     if available_model_ids and model not in available_model_ids:
         if strict:
@@ -352,7 +354,7 @@ def _normalize_route(
                 status_code=422,
                 metadata={"role_key": role_key, "model": model},
             )
-        return fallback
+        return _build_env_default_route(role_key)
 
     return {
         "model": model,
@@ -490,6 +492,86 @@ def list_story_engine_model_preset_catalog() -> dict[str, Any]:
     }
 
 
+def build_story_engine_model_routing_project_summary(project: Project) -> dict[str, Any]:
+    config = _load_profile_config()
+    project_settings = _normalize_project_settings(
+        getattr(project, "story_engine_settings", None),
+        config=config,
+        strict=False,
+    )
+    active_preset_key = project_settings["active_preset_key"]
+    preset = config["preset_map"].get(active_preset_key, {})
+    manual_overrides = project_settings.get("manual_overrides", {})
+    owner_email = getattr(getattr(project, "user", None), "email", None)
+    return {
+        "project_id": project.id,
+        "title": project.title,
+        "owner_email": owner_email,
+        "genre": project.genre,
+        "tone": project.tone,
+        "status": project.status,
+        "updated_at": project.updated_at,
+        "active_preset_key": active_preset_key,
+        "active_preset_label": preset.get("label"),
+        "manual_override_count": len(manual_overrides),
+    }
+ 
+
+async def list_story_engine_model_routing_projects(
+    session: AsyncSession,
+    *,
+    query: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    statement = (
+        select(Project)
+        .join(Project.user)
+        .options(selectinload(Project.user))
+        .order_by(Project.updated_at.desc())
+        .limit(limit)
+    )
+
+    normalized_query = (query or "").strip()
+    if normalized_query:
+        like_query = f"%{normalized_query}%"
+        statement = statement.where(
+            or_(
+                Project.title.ilike(like_query),
+                Project.genre.ilike(like_query),
+                Project.tone.ilike(like_query),
+                User.email.ilike(like_query),
+            )
+        )
+
+    result = await session.execute(statement)
+    projects = result.scalars().all()
+    return [
+        build_story_engine_model_routing_project_summary(project)
+        for project in projects
+    ]
+
+
+async def _get_story_engine_model_routing_project_for_admin(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+) -> Project:
+    statement = (
+        select(Project)
+        .where(Project.id == project_id)
+        .options(selectinload(Project.user))
+    )
+    result = await session.execute(statement)
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise AppError(
+            code="project.not_found",
+            message="项目不存在。",
+            status_code=404,
+        )
+    return project
+
+
 def get_story_engine_model_preset_label(preset_key: Optional[str]) -> Optional[str]:
     if not preset_key:
         return None
@@ -612,6 +694,18 @@ async def get_story_engine_model_routing(
     return build_story_engine_model_routing_payload(project)
 
 
+async def get_story_engine_model_routing_for_admin(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+) -> dict[str, Any]:
+    project = await _get_story_engine_model_routing_project_for_admin(
+        session,
+        project_id=project_id,
+    )
+    return build_story_engine_model_routing_payload(project)
+
+
 async def update_story_engine_model_routing(
     session: AsyncSession,
     *,
@@ -627,6 +721,33 @@ async def update_story_engine_model_routing(
         project_id,
         user_id,
         permission=PROJECT_PERMISSION_EDIT,
+    )
+    config = _load_profile_config()
+    normalized_settings = _normalize_project_settings(
+        {
+            "active_preset_key": active_preset_key,
+            "manual_overrides": manual_overrides,
+        },
+        config=config,
+        strict=True,
+    )
+    project.story_engine_settings = normalized_settings
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+    return build_story_engine_model_routing_payload(project)
+
+
+async def update_story_engine_model_routing_for_admin(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    active_preset_key: str,
+    manual_overrides: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    project = await _get_story_engine_model_routing_project_for_admin(
+        session,
+        project_id=project_id,
     )
     config = _load_profile_config()
     normalized_settings = _normalize_project_settings(

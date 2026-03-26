@@ -46,3 +46,16 @@ async def get_current_user(
             status_code=401,
         )
     return user
+
+
+async def get_model_routing_admin_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    admin_emails = settings().model_routing_admin_email_set
+    if current_user.email.lower() not in admin_emails:
+        raise AppError(
+            code="auth.forbidden",
+            message="当前账号没有后台策略权限。",
+            status_code=403,
+        )
+    return current_user

@@ -265,7 +265,13 @@ async def get_owned_project(
     _apply_project_access_metadata(project, role)
 
     changed = await ensure_project_structure(session, project)
-    if changed:
+    storage_normalized = False
+    if with_relations:
+        storage_normalized = await _normalize_project_story_bible_storage(
+            session,
+            project,
+        )
+    if changed or storage_normalized:
         await session.commit()
         result = await session.execute(statement)
         project, collaborator_role = result.first()
@@ -774,8 +780,8 @@ def build_public_story_bible_sections(
             if isinstance(item, dict)
         ],
         "world_settings": public_world_settings,
-        "items": _merge_story_bible_section_rows(legacy_items, native_items),
-        "factions": _merge_story_bible_section_rows(legacy_factions, native_factions),
+        "items": _merge_story_bible_section_rows(native_items, legacy_items),
+        "factions": _merge_story_bible_section_rows(native_factions, legacy_factions),
         "locations": [
             deepcopy(item)
             for item in sections.get("locations", [])
@@ -821,6 +827,22 @@ def combine_public_story_bible_world_settings(
         if isinstance(item, dict)
     )
     return combined
+
+
+def canonicalize_story_bible_branch_payload(
+    base_sections: dict[str, list[dict[str, Any]]],
+    branch_story_bible_payload: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(branch_story_bible_payload, dict):
+        return {}
+    merged_sections = merge_story_bible_sections(
+        base_sections,
+        branch_story_bible_payload=branch_story_bible_payload,
+    )
+    return build_story_bible_branch_delta_payload(
+        base_sections,
+        merged_sections,
+    )
 
 
 def _is_story_bible_virtual_wrapper(row: dict[str, Any]) -> bool:
@@ -2564,6 +2586,207 @@ async def ensure_project_structure(
     if changed:
         await session.flush()
     return changed
+
+
+async def _normalize_project_story_bible_storage(
+    session: AsyncSession,
+    project: Project,
+) -> bool:
+    changed = await _migrate_project_story_bible_wrappers_to_native(
+        session,
+        project,
+    )
+
+    branch_story_bible_result = await session.execute(
+        select(ProjectBranchStoryBible).where(
+            ProjectBranchStoryBible.project_id == project.id,
+        )
+    )
+    branch_story_bibles = {
+        snapshot.branch_id: snapshot
+        for snapshot in branch_story_bible_result.scalars().all()
+    }
+    if not branch_story_bibles:
+        return changed
+
+    branch_resolution_cache: dict[UUID, StoryBibleResolution] = {}
+    branch_story_bible_cache: dict[UUID, Optional[ProjectBranchStoryBible]] = {
+        branch.id: branch_story_bibles.get(branch.id)
+        for branch in project.branches
+    }
+
+    for branch in project.branches:
+        branch_story_bible = branch_story_bible_cache.get(branch.id)
+        if branch_story_bible is None or not isinstance(branch_story_bible.payload, dict):
+            continue
+        resolution = await resolve_story_bible_resolution(
+            session,
+            project,
+            branch=branch,
+            branch_story_bible_cache=branch_story_bible_cache,
+            branch_resolution_cache=branch_resolution_cache,
+        )
+        canonical_payload = canonicalize_story_bible_branch_payload(
+            resolution.base_sections,
+            branch_story_bible.payload,
+        )
+        if not canonical_payload:
+            await session.delete(branch_story_bible)
+            branch_story_bible_cache[branch.id] = None
+            changed = True
+            continue
+        if canonical_payload != branch_story_bible.payload:
+            branch_story_bible.payload = canonical_payload
+            changed = True
+
+    if changed:
+        await session.flush()
+    return changed
+
+
+async def _migrate_project_story_bible_wrappers_to_native(
+    session: AsyncSession,
+    project: Project,
+) -> bool:
+    changed = False
+    native_item_keys = {
+        str(item.key).strip().lower()
+        for item in project.items
+        if str(getattr(item, "key", "")).strip()
+    }
+    native_item_names = {
+        str(item.name).strip().lower()
+        for item in project.items
+        if str(getattr(item, "name", "")).strip()
+    }
+    native_faction_keys = {
+        str(item.key).strip().lower()
+        for item in project.factions
+        if str(getattr(item, "key", "")).strip()
+    }
+    native_faction_names = {
+        str(item.name).strip().lower()
+        for item in project.factions
+        if str(getattr(item, "name", "")).strip()
+    }
+
+    next_world_settings: list[WorldSetting] = []
+    for world_setting in list(project.world_settings):
+        serialized_row = {
+            "id": str(world_setting.id),
+            "key": world_setting.key,
+            "title": world_setting.title,
+            "data": world_setting.data,
+            "version": world_setting.version,
+        }
+        if _is_story_bible_item_wrapper(serialized_row):
+            candidate = _build_project_item_from_legacy_world_setting(world_setting)
+            if candidate is not None:
+                candidate_key = str(candidate.key).strip().lower()
+                candidate_name = str(candidate.name).strip().lower()
+                if candidate_key not in native_item_keys and candidate_name not in native_item_names:
+                    session.add(candidate)
+                    project.items.append(candidate)
+                    if candidate_key:
+                        native_item_keys.add(candidate_key)
+                    if candidate_name:
+                        native_item_names.add(candidate_name)
+            await session.delete(world_setting)
+            changed = True
+            continue
+        if _is_story_bible_faction_wrapper(serialized_row):
+            candidate = _build_project_faction_from_legacy_world_setting(world_setting)
+            if candidate is not None:
+                candidate_key = str(candidate.key).strip().lower()
+                candidate_name = str(candidate.name).strip().lower()
+                if (
+                    candidate_key not in native_faction_keys
+                    and candidate_name not in native_faction_names
+                ):
+                    session.add(candidate)
+                    project.factions.append(candidate)
+                    if candidate_key:
+                        native_faction_keys.add(candidate_key)
+                    if candidate_name:
+                        native_faction_names.add(candidate_name)
+            await session.delete(world_setting)
+            changed = True
+            continue
+        next_world_settings.append(world_setting)
+
+    if changed:
+        project.world_settings = next_world_settings
+    return changed
+
+
+def _build_project_item_from_legacy_world_setting(
+    world_setting: WorldSetting,
+) -> ProjectItem | None:
+    try:
+        payload = _world_setting_wrapper_to_item_entry(
+            {
+                "id": str(world_setting.id),
+                "key": world_setting.key,
+                "title": world_setting.title,
+                "data": world_setting.data,
+                "version": world_setting.version,
+            }
+        )
+    except ValidationError:
+        return None
+    return ProjectItem(
+        id=world_setting.id,
+        project_id=world_setting.project_id,
+        key=payload["key"],
+        name=payload["name"],
+        item_type=payload.get("type"),
+        rarity=payload.get("rarity"),
+        description=payload.get("description"),
+        effects=_clean_story_bible_string_list(payload.get("effects")),
+        owner=payload.get("owner"),
+        location=payload.get("location"),
+        status=payload.get("status"),
+        introduced_chapter=payload.get("introduced_chapter"),
+        forbidden_holders=_clean_story_bible_string_list(payload.get("forbidden_holders")),
+        version=int(payload.get("version") or 1),
+        created_at=world_setting.created_at,
+        updated_at=world_setting.updated_at,
+    )
+
+
+def _build_project_faction_from_legacy_world_setting(
+    world_setting: WorldSetting,
+) -> ProjectFaction | None:
+    try:
+        payload = _world_setting_wrapper_to_faction_entry(
+            {
+                "id": str(world_setting.id),
+                "key": world_setting.key,
+                "title": world_setting.title,
+                "data": world_setting.data,
+                "version": world_setting.version,
+            }
+        )
+    except ValidationError:
+        return None
+    return ProjectFaction(
+        id=world_setting.id,
+        project_id=world_setting.project_id,
+        key=payload["key"],
+        name=payload["name"],
+        faction_type=payload.get("type"),
+        scale=payload.get("scale"),
+        description=payload.get("description"),
+        goals=payload.get("goals"),
+        leader=payload.get("leader"),
+        members=_clean_story_bible_string_list(payload.get("members")),
+        territory=payload.get("territory"),
+        resources=_clean_story_bible_string_list(payload.get("resources")),
+        ideology=payload.get("ideology"),
+        version=int(payload.get("version") or 1),
+        created_at=world_setting.created_at,
+        updated_at=world_setting.updated_at,
+    )
 
 
 async def resolve_project_structure_scope(

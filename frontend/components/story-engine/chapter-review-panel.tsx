@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type RefObject } from "react";
+import { useEffect, useMemo, useState, type MutableRefObject } from "react";
 
 import {
   buildReviewCommentThreads,
@@ -11,6 +11,11 @@ import {
   formatReviewVerdict,
   reviewVerdictTone,
 } from "@/components/editor/formatters";
+import {
+  type DraftEditorHandle,
+  type DraftEditorSelection,
+  EMPTY_DRAFT_SELECTION,
+} from "@/components/story-engine/draft-editor-handle";
 import type {
   Chapter,
   ChapterReviewWorkspace,
@@ -49,12 +54,6 @@ type ReviewDecisionCreatePayload = {
   focus_points: string[];
 };
 
-type SelectionSnapshot = {
-  start: number | null;
-  end: number | null;
-  text: string;
-};
-
 type ChapterReviewPanelProps = {
   activeChapter: Chapter | null;
   draftText: string;
@@ -63,7 +62,7 @@ type ChapterReviewPanelProps = {
   chapterVersions: ChapterVersion[];
   loading: boolean;
   submittingActionKey: string | null;
-  editorTextareaRef: RefObject<HTMLTextAreaElement | null>;
+  editorRef: MutableRefObject<DraftEditorHandle | null>;
   onCreateComment: (payload: CommentCreatePayload) => Promise<boolean>;
   onUpdateComment: (commentId: string, payload: CommentUpdatePayload) => Promise<boolean>;
   onDeleteComment: (commentId: string) => Promise<boolean>;
@@ -97,22 +96,6 @@ const DECISION_OPTIONS = [
   { value: "changes_requested", label: "还要再改" },
   { value: "blocked", label: "先别往后推" },
 ] as const;
-
-function normalizeSelection(textarea: HTMLTextAreaElement | null): SelectionSnapshot {
-  if (!textarea) {
-    return { start: null, end: null, text: "" };
-  }
-  const start = textarea.selectionStart ?? 0;
-  const end = textarea.selectionEnd ?? 0;
-  if (end <= start) {
-    return { start: null, end: null, text: "" };
-  }
-  return {
-    start,
-    end,
-    text: textarea.value.slice(start, end),
-  };
-}
 
 function normalizeFocusPoints(value: string): string[] {
   return value
@@ -159,7 +142,7 @@ export function ChapterReviewPanel({
   chapterVersions,
   loading,
   submittingActionKey,
-  editorTextareaRef,
+  editorRef,
   onCreateComment,
   onUpdateComment,
   onDeleteComment,
@@ -169,11 +152,7 @@ export function ChapterReviewPanel({
   onRollback,
   onRewriteSelection,
 }: ChapterReviewPanelProps) {
-  const [selection, setSelection] = useState<SelectionSnapshot>({
-    start: null,
-    end: null,
-    text: "",
-  });
+  const [selection, setSelection] = useState<DraftEditorSelection>(EMPTY_DRAFT_SELECTION);
   const [commentBody, setCommentBody] = useState("");
   const [commentAssigneeId, setCommentAssigneeId] = useState("");
   const [replyParentId, setReplyParentId] = useState<string | null>(null);
@@ -209,26 +188,17 @@ export function ChapterReviewPanel({
 
   useEffect(() => {
     // 这里持续监听编辑器选区，保证右侧“重写这段 / 留个批注”能准确拿到正文中的定位。
-    const textarea = editorTextareaRef.current;
     const syncSelection = () => {
-      setSelection(normalizeSelection(editorTextareaRef.current));
+      setSelection(editorRef.current?.getSelection() ?? EMPTY_DRAFT_SELECTION);
     };
 
     syncSelection();
-    if (!textarea) {
-      return;
-    }
-
-    textarea.addEventListener("select", syncSelection);
-    textarea.addEventListener("keyup", syncSelection);
-    textarea.addEventListener("mouseup", syncSelection);
+    document.addEventListener("selectionchange", syncSelection);
 
     return () => {
-      textarea.removeEventListener("select", syncSelection);
-      textarea.removeEventListener("keyup", syncSelection);
-      textarea.removeEventListener("mouseup", syncSelection);
+      document.removeEventListener("selectionchange", syncSelection);
     };
-  }, [draftText, editorTextareaRef]);
+  }, [draftText, editorRef]);
 
   useEffect(() => {
     // 章节切换时重置局部表单，避免把上一章的批注/结论误带到下一章。
@@ -242,8 +212,8 @@ export function ChapterReviewPanel({
     setDecisionVerdict("changes_requested");
     setDecisionSummary("");
     setDecisionFocusPoints("");
-    setSelection(normalizeSelection(editorTextareaRef.current));
-  }, [activeChapter?.id, editorTextareaRef]);
+    setSelection(editorRef.current?.getSelection() ?? EMPTY_DRAFT_SELECTION);
+  }, [activeChapter?.id, editorRef]);
 
   function isSubmitting(key: string): boolean {
     return submittingActionKey === key;
@@ -293,15 +263,9 @@ export function ChapterReviewPanel({
       return;
     }
 
-    const textarea = editorTextareaRef.current;
-    if (!textarea) {
-      return;
-    }
-
     // 改写完成后重新高亮新片段，方便写手立刻看到被替换的位置。
     window.requestAnimationFrame(() => {
-      textarea.focus();
-      textarea.setSelectionRange(
+      editorRef.current?.setSelectionRange(
         response.selection_start,
         response.rewritten_selection_end,
       );
@@ -348,10 +312,7 @@ export function ChapterReviewPanel({
     return (
       <section className="rounded-[36px] border border-black/10 bg-white/82 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)]">
         <p className="text-xs uppercase tracking-[0.24em] text-copper">章节收口台</p>
-        <h2 className="mt-2 text-2xl font-semibold">先存正文，再开始记版本和收口</h2>
-        <p className="mt-3 max-w-3xl text-sm leading-7 text-black/62">
-          这一块只处理正式章节。你先在上面点一次“保存正文”，下面就会自动出现版本记录、批注、确认点和本章结论。
-        </p>
+        <h2 className="mt-2 text-2xl font-semibold">先保存正文</h2>
       </section>
     );
   }
@@ -361,10 +322,7 @@ export function ChapterReviewPanel({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-copper">章节收口台</p>
-          <h2 className="mt-2 text-2xl font-semibold">版本、批注、确认点，都在这一处收口</h2>
-          <p className="mt-3 max-w-3xl text-sm leading-7 text-black/62">
-            这里不让你看后台流程，只把真正会影响这章能不能继续往下推的东西摆出来。
-          </p>
+          <h2 className="mt-2 text-2xl font-semibold">版本、批注、确认点</h2>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
           <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-black/55">
@@ -390,7 +348,7 @@ export function ChapterReviewPanel({
 
       {loading ? (
         <div className="mt-6 rounded-[28px] border border-black/10 bg-[#fbfaf5] p-5 text-sm text-black/55">
-          正在同步这章的版本、批注和确认记录...
+          正在同步收口数据...
         </div>
       ) : null}
 
@@ -400,9 +358,6 @@ export function ChapterReviewPanel({
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold">版本台</p>
-                <p className="mt-2 text-sm leading-7 text-black/60">
-                  每次正式保存和回退都会留痕。退回旧版本时，系统会把它重新记成一版新的当前稿。
-                </p>
               </div>
               <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
                 共 {versionList.length} 版
@@ -454,7 +409,7 @@ export function ChapterReviewPanel({
                 })
               ) : (
                 <div className="rounded-[24px] border border-dashed border-black/12 bg-white p-4 text-sm text-black/50">
-                  这一章目前还只有初始版本，后续保存后会继续累积。
+                  暂时只有当前版本。
                 </div>
               )}
             </div>
@@ -462,9 +417,6 @@ export function ChapterReviewPanel({
 
           <section className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
             <p className="text-sm font-semibold">重写这段</p>
-            <p className="mt-2 text-sm leading-7 text-black/60">
-              先在左侧正文里选中一段，再告诉系统你想把这段修成什么感觉。
-            </p>
 
             <div className="mt-4 rounded-[24px] border border-black/10 bg-white p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -476,17 +428,17 @@ export function ChapterReviewPanel({
                 <button
                   className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-2 text-xs font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
                   onClick={() =>
-                    setSelection(normalizeSelection(editorTextareaRef.current))
+                    setSelection(editorRef.current?.getSelection() ?? EMPTY_DRAFT_SELECTION)
                   }
                   type="button"
                 >
                   刷新选区
                 </button>
               </div>
-              <p className="mt-3 text-sm leading-7 text-black/62">
+              <p className="mt-3 text-sm text-black/62">
                 {hasSelection
                   ? `当前片段：${truncateText(selection.text, 140)}`
-                  : "你在正文中框选的内容会显示在这里。"}
+                  : "先选中正文片段。"}
               </p>
             </div>
 
@@ -521,9 +473,6 @@ export function ChapterReviewPanel({
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold">批注区</p>
-                <p className="mt-2 text-sm leading-7 text-black/60">
-                  有问题就留一句，能定位到具体句段最好，后面处理时不容易跑偏。
-                </p>
               </div>
               <span className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-black/55">
                 已解决 {reviewWorkspace?.resolved_comment_count ?? 0}
@@ -811,7 +760,7 @@ export function ChapterReviewPanel({
                 ))
               ) : (
                 <div className="rounded-[24px] border border-dashed border-black/12 bg-white p-4 text-sm text-black/50">
-                  这章还没有批注。写到觉得哪句不稳、哪段有风险时，直接在这里留。
+                  这章还没有批注。
                 </div>
               )}
             </div>
@@ -820,9 +769,6 @@ export function ChapterReviewPanel({
           <section className="grid gap-6 lg:grid-cols-2">
             <div className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
               <p className="text-sm font-semibold">挂个确认点</p>
-              <p className="mt-2 text-sm leading-7 text-black/60">
-                用来卡住关键转折、大纲关口或分支选择，避免后面写着写着走偏。
-              </p>
 
               <label className="mt-4 block">
                 <span className="text-xs text-black/55">确认点类型</span>
@@ -977,9 +923,6 @@ export function ChapterReviewPanel({
 
             <div className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-5">
               <p className="text-sm font-semibold">给这一章下结论</p>
-              <p className="mt-2 text-sm leading-7 text-black/60">
-                当你觉得这章已经差不多了，就在这里留一句结论，告诉后面这章能不能继续往下推。
-              </p>
 
               <label className="mt-4 block">
                 <span className="text-xs text-black/55">结论</span>
@@ -1074,7 +1017,7 @@ export function ChapterReviewPanel({
                   ))
                 ) : (
                   <div className="rounded-[22px] border border-dashed border-black/12 bg-white p-4 text-sm text-black/50">
-                    这章还没有正式结论。等你觉得差不多了，再在这里留一句。
+                    这章还没有正式结论。
                   </div>
                 )}
               </div>

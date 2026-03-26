@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -27,6 +28,11 @@ from schemas.project import (
     PlotThreadGenerationRequest,
     PlotThreadGenerationResponse,
 )
+from services.story_engine_model_service import (
+    get_story_engine_role_model,
+    get_story_engine_role_reasoning,
+)
+from services.story_engine_settings_service import resolve_story_engine_model_routing
 
 
 _LIST_SPLIT_PATTERN = re.compile(r"[\n,，、/；;|]+")
@@ -109,36 +115,87 @@ _PLOT_THREAD_STAGES = [
 ]
 
 
+@dataclass(frozen=True)
+class EntityGenerationPipelineConfig:
+    generation_type: str
+    task_name: str
+    result_key: str
+    route_roles: tuple[str, ...]
+    label: str
+
+
+@dataclass
+class EntityGenerationPipelineResult:
+    generation_type: str
+    result_key: str
+    response: Any
+    trace: dict[str, Any]
+
+
+ENTITY_GENERATION_PIPELINE_CONFIGS: dict[str, EntityGenerationPipelineConfig] = {
+    "characters": EntityGenerationPipelineConfig(
+        generation_type="characters",
+        task_name="story_bible.characters",
+        result_key="characters",
+        route_roles=("guardian", "outline", "style_guardian"),
+        label="人物候选",
+    ),
+    "supporting": EntityGenerationPipelineConfig(
+        generation_type="supporting",
+        task_name="story_bible.characters",
+        result_key="characters",
+        route_roles=("guardian", "outline", "style_guardian"),
+        label="配角候选",
+    ),
+    "items": EntityGenerationPipelineConfig(
+        generation_type="items",
+        task_name="story_bible.items",
+        result_key="items",
+        route_roles=("outline", "anchor", "guardian"),
+        label="物品候选",
+    ),
+    "locations": EntityGenerationPipelineConfig(
+        generation_type="locations",
+        task_name="story_bible.locations",
+        result_key="locations",
+        route_roles=("outline", "guardian", "anchor"),
+        label="地点候选",
+    ),
+    "factions": EntityGenerationPipelineConfig(
+        generation_type="factions",
+        task_name="story_bible.factions",
+        result_key="factions",
+        route_roles=("commercial", "guardian", "outline"),
+        label="势力候选",
+    ),
+    "plot_threads": EntityGenerationPipelineConfig(
+        generation_type="plot_threads",
+        task_name="story_bible.plot_threads",
+        result_key="plot_threads",
+        route_roles=("commercial", "outline", "guardian"),
+        label="剧情线候选",
+    ),
+}
+
+
 async def generate_characters(
     session: AsyncSession,
     project_id: UUID,
     user_id: UUID,
     payload: CharacterGenerationRequest,
 ) -> CharacterGenerationResponse:
-    story_bible = await load_story_bible_context(session, project_id, user_id)
-    fallback_response = _build_character_fallback(story_bible, payload)
-    raw = await _run_structured_generation(
-        task_name="story_bible.characters",
-        system_prompt=_build_character_system_prompt(),
-        prompt=_build_character_prompt(story_bible, payload),
-        fallback_response=fallback_response,
+    pipeline_result = await run_entity_generation_pipeline(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        generation_type=(
+            "supporting"
+            if str(payload.character_type or "").strip().lower() == "supporting"
+            else "characters"
+        ),
+        payload=payload,
     )
-    parsed = _parse_structured_response(raw, CharacterGenerationResponse)
-    if parsed is None:
-        return fallback_response
-    return CharacterGenerationResponse(
-        characters=_normalize_named_models(
-            parsed.characters,
-            fallback_response.characters,
-            field_name="name",
-            count=payload.count,
-            taken_keys=_collect_existing_character_names(story_bible, payload.existing_characters),
-            transform=lambda candidate: _normalize_character_candidate(
-                candidate,
-                fallback_role=payload.character_type,
-            ),
-        )
-    )
+    return pipeline_result.response
 
 
 async def generate_items(
@@ -147,30 +204,14 @@ async def generate_items(
     user_id: UUID,
     payload: ItemGenerationRequest,
 ) -> ItemGenerationResponse:
-    story_bible = await load_story_bible_context(session, project_id, user_id)
-    fallback_response = _build_item_fallback(story_bible, payload)
-    raw = await _run_structured_generation(
-        task_name="story_bible.items",
-        system_prompt=_build_item_system_prompt(),
-        prompt=_build_item_prompt(story_bible, payload),
-        fallback_response=fallback_response,
+    pipeline_result = await run_entity_generation_pipeline(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        generation_type="items",
+        payload=payload,
     )
-    parsed = _parse_structured_response(raw, ItemGenerationResponse)
-    if parsed is None:
-        return fallback_response
-    return ItemGenerationResponse(
-        items=_normalize_named_models(
-            parsed.items,
-            fallback_response.items,
-            field_name="name",
-            count=payload.count,
-            taken_keys=_collect_existing_item_names(story_bible, payload.existing_items),
-            transform=lambda candidate: _normalize_item_candidate(
-                candidate,
-                fallback_type=payload.item_type,
-            ),
-        )
-    )
+    return pipeline_result.response
 
 
 async def generate_locations(
@@ -179,30 +220,14 @@ async def generate_locations(
     user_id: UUID,
     payload: LocationGenerationRequest,
 ) -> LocationGenerationResponse:
-    story_bible = await load_story_bible_context(session, project_id, user_id)
-    fallback_response = _build_location_fallback(story_bible, payload)
-    raw = await _run_structured_generation(
-        task_name="story_bible.locations",
-        system_prompt=_build_location_system_prompt(),
-        prompt=_build_location_prompt(story_bible, payload),
-        fallback_response=fallback_response,
+    pipeline_result = await run_entity_generation_pipeline(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        generation_type="locations",
+        payload=payload,
     )
-    parsed = _parse_structured_response(raw, LocationGenerationResponse)
-    if parsed is None:
-        return fallback_response
-    return LocationGenerationResponse(
-        locations=_normalize_named_models(
-            parsed.locations,
-            fallback_response.locations,
-            field_name="name",
-            count=payload.count,
-            taken_keys=_collect_existing_location_names(story_bible, payload.existing_locations),
-            transform=lambda candidate: _normalize_location_candidate(
-                candidate,
-                fallback_type=payload.location_type,
-            ),
-        )
-    )
+    return pipeline_result.response
 
 
 async def generate_factions(
@@ -211,30 +236,14 @@ async def generate_factions(
     user_id: UUID,
     payload: FactionGenerationRequest,
 ) -> FactionGenerationResponse:
-    story_bible = await load_story_bible_context(session, project_id, user_id)
-    fallback_response = _build_faction_fallback(story_bible, payload)
-    raw = await _run_structured_generation(
-        task_name="story_bible.factions",
-        system_prompt=_build_faction_system_prompt(),
-        prompt=_build_faction_prompt(story_bible, payload),
-        fallback_response=fallback_response,
+    pipeline_result = await run_entity_generation_pipeline(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        generation_type="factions",
+        payload=payload,
     )
-    parsed = _parse_structured_response(raw, FactionGenerationResponse)
-    if parsed is None:
-        return fallback_response
-    return FactionGenerationResponse(
-        factions=_normalize_named_models(
-            parsed.factions,
-            fallback_response.factions,
-            field_name="name",
-            count=payload.count,
-            taken_keys=_collect_existing_faction_names(story_bible, payload.existing_factions),
-            transform=lambda candidate: _normalize_faction_candidate(
-                candidate,
-                fallback_type=payload.faction_type,
-            ),
-        )
-    )
+    return pipeline_result.response
 
 
 async def generate_plot_threads(
@@ -243,55 +252,402 @@ async def generate_plot_threads(
     user_id: UUID,
     payload: PlotThreadGenerationRequest,
 ) -> PlotThreadGenerationResponse:
+    pipeline_result = await run_entity_generation_pipeline(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        generation_type="plot_threads",
+        payload=payload,
+    )
+    return pipeline_result.response
+
+
+async def run_entity_generation_pipeline(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    user_id: UUID,
+    generation_type: str,
+    payload: Any,
+) -> EntityGenerationPipelineResult:
+    config = _get_entity_generation_pipeline_config(generation_type)
     story_bible = await load_story_bible_context(session, project_id, user_id)
+    model_routing = await _resolve_entity_generation_model_routing(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+    )
+    context_snapshot = _build_entity_generation_context_snapshot(
+        story_bible,
+        payload,
+        generation_type=generation_type,
+    )
+
+    if generation_type in {"characters", "supporting"}:
+        return await _run_character_generation_pipeline(
+            config=config,
+            story_bible=story_bible,
+            payload=payload,
+            model_routing=model_routing,
+            context_snapshot=context_snapshot,
+        )
+    if generation_type == "items":
+        return await _run_item_generation_pipeline(
+            config=config,
+            story_bible=story_bible,
+            payload=payload,
+            model_routing=model_routing,
+            context_snapshot=context_snapshot,
+        )
+    if generation_type == "locations":
+        return await _run_location_generation_pipeline(
+            config=config,
+            story_bible=story_bible,
+            payload=payload,
+            model_routing=model_routing,
+            context_snapshot=context_snapshot,
+        )
+    if generation_type == "factions":
+        return await _run_faction_generation_pipeline(
+            config=config,
+            story_bible=story_bible,
+            payload=payload,
+            model_routing=model_routing,
+            context_snapshot=context_snapshot,
+        )
+    if generation_type == "plot_threads":
+        return await _run_plot_thread_generation_pipeline(
+            config=config,
+            story_bible=story_bible,
+            payload=payload,
+            model_routing=model_routing,
+            context_snapshot=context_snapshot,
+        )
+    raise KeyError(f"Unsupported entity generation type: {generation_type}")
+
+
+async def _run_character_generation_pipeline(
+    *,
+    config: EntityGenerationPipelineConfig,
+    story_bible: StoryBibleContext,
+    payload: CharacterGenerationRequest,
+    model_routing: Optional[dict[str, dict[str, Any]]],
+    context_snapshot: dict[str, Any],
+) -> EntityGenerationPipelineResult:
+    fallback_response = _build_character_fallback(story_bible, payload)
+    raw_result = await _run_structured_generation(
+        config=config,
+        system_prompt=_build_character_system_prompt(),
+        prompt=_build_character_prompt(story_bible, payload),
+        fallback_response=fallback_response,
+        response_model=CharacterGenerationResponse,
+        model_routing=model_routing,
+        context_snapshot=context_snapshot,
+    )
+    parsed = raw_result["parsed"]
+    normalized_items = _normalize_named_models(
+        parsed.characters if parsed is not None else [],
+        fallback_response.characters,
+        field_name="name",
+        count=payload.count,
+        taken_keys=_collect_existing_character_names(story_bible, payload.existing_characters),
+        transform=lambda candidate: _normalize_character_candidate(
+            candidate,
+            fallback_role=payload.character_type,
+        ),
+    )
+    response = CharacterGenerationResponse(characters=normalized_items)
+    return EntityGenerationPipelineResult(
+        generation_type=config.generation_type,
+        result_key=config.result_key,
+        response=response,
+        trace=_build_generation_trace_payload(
+            config=config,
+            raw_result=raw_result,
+            response=response,
+            requested_count=payload.count,
+        ),
+    )
+
+
+async def _run_item_generation_pipeline(
+    *,
+    config: EntityGenerationPipelineConfig,
+    story_bible: StoryBibleContext,
+    payload: ItemGenerationRequest,
+    model_routing: Optional[dict[str, dict[str, Any]]],
+    context_snapshot: dict[str, Any],
+) -> EntityGenerationPipelineResult:
+    fallback_response = _build_item_fallback(story_bible, payload)
+    raw_result = await _run_structured_generation(
+        config=config,
+        system_prompt=_build_item_system_prompt(),
+        prompt=_build_item_prompt(story_bible, payload),
+        fallback_response=fallback_response,
+        response_model=ItemGenerationResponse,
+        model_routing=model_routing,
+        context_snapshot=context_snapshot,
+    )
+    parsed = raw_result["parsed"]
+    normalized_items = _normalize_named_models(
+        parsed.items if parsed is not None else [],
+        fallback_response.items,
+        field_name="name",
+        count=payload.count,
+        taken_keys=_collect_existing_item_names(story_bible, payload.existing_items),
+        transform=lambda candidate: _normalize_item_candidate(
+            candidate,
+            fallback_type=payload.item_type,
+        ),
+    )
+    response = ItemGenerationResponse(items=normalized_items)
+    return EntityGenerationPipelineResult(
+        generation_type=config.generation_type,
+        result_key=config.result_key,
+        response=response,
+        trace=_build_generation_trace_payload(
+            config=config,
+            raw_result=raw_result,
+            response=response,
+            requested_count=payload.count,
+        ),
+    )
+
+
+async def _run_location_generation_pipeline(
+    *,
+    config: EntityGenerationPipelineConfig,
+    story_bible: StoryBibleContext,
+    payload: LocationGenerationRequest,
+    model_routing: Optional[dict[str, dict[str, Any]]],
+    context_snapshot: dict[str, Any],
+) -> EntityGenerationPipelineResult:
+    fallback_response = _build_location_fallback(story_bible, payload)
+    raw_result = await _run_structured_generation(
+        config=config,
+        system_prompt=_build_location_system_prompt(),
+        prompt=_build_location_prompt(story_bible, payload),
+        fallback_response=fallback_response,
+        response_model=LocationGenerationResponse,
+        model_routing=model_routing,
+        context_snapshot=context_snapshot,
+    )
+    parsed = raw_result["parsed"]
+    normalized_items = _normalize_named_models(
+        parsed.locations if parsed is not None else [],
+        fallback_response.locations,
+        field_name="name",
+        count=payload.count,
+        taken_keys=_collect_existing_location_names(story_bible, payload.existing_locations),
+        transform=lambda candidate: _normalize_location_candidate(
+            candidate,
+            fallback_type=payload.location_type,
+        ),
+    )
+    response = LocationGenerationResponse(locations=normalized_items)
+    return EntityGenerationPipelineResult(
+        generation_type=config.generation_type,
+        result_key=config.result_key,
+        response=response,
+        trace=_build_generation_trace_payload(
+            config=config,
+            raw_result=raw_result,
+            response=response,
+            requested_count=payload.count,
+        ),
+    )
+
+
+async def _run_faction_generation_pipeline(
+    *,
+    config: EntityGenerationPipelineConfig,
+    story_bible: StoryBibleContext,
+    payload: FactionGenerationRequest,
+    model_routing: Optional[dict[str, dict[str, Any]]],
+    context_snapshot: dict[str, Any],
+) -> EntityGenerationPipelineResult:
+    fallback_response = _build_faction_fallback(story_bible, payload)
+    raw_result = await _run_structured_generation(
+        config=config,
+        system_prompt=_build_faction_system_prompt(),
+        prompt=_build_faction_prompt(story_bible, payload),
+        fallback_response=fallback_response,
+        response_model=FactionGenerationResponse,
+        model_routing=model_routing,
+        context_snapshot=context_snapshot,
+    )
+    parsed = raw_result["parsed"]
+    normalized_items = _normalize_named_models(
+        parsed.factions if parsed is not None else [],
+        fallback_response.factions,
+        field_name="name",
+        count=payload.count,
+        taken_keys=_collect_existing_faction_names(story_bible, payload.existing_factions),
+        transform=lambda candidate: _normalize_faction_candidate(
+            candidate,
+            fallback_type=payload.faction_type,
+        ),
+    )
+    response = FactionGenerationResponse(factions=normalized_items)
+    return EntityGenerationPipelineResult(
+        generation_type=config.generation_type,
+        result_key=config.result_key,
+        response=response,
+        trace=_build_generation_trace_payload(
+            config=config,
+            raw_result=raw_result,
+            response=response,
+            requested_count=payload.count,
+        ),
+    )
+
+
+async def _run_plot_thread_generation_pipeline(
+    *,
+    config: EntityGenerationPipelineConfig,
+    story_bible: StoryBibleContext,
+    payload: PlotThreadGenerationRequest,
+    model_routing: Optional[dict[str, dict[str, Any]]],
+    context_snapshot: dict[str, Any],
+) -> EntityGenerationPipelineResult:
     fallback_response = _build_plot_thread_fallback(story_bible, payload)
-    raw = await _run_structured_generation(
-        task_name="story_bible.plot_threads",
+    raw_result = await _run_structured_generation(
+        config=config,
         system_prompt=_build_plot_thread_system_prompt(),
         prompt=_build_plot_thread_prompt(story_bible, payload),
         fallback_response=fallback_response,
+        response_model=PlotThreadGenerationResponse,
+        model_routing=model_routing,
+        context_snapshot=context_snapshot,
     )
-    parsed = _parse_structured_response(raw, PlotThreadGenerationResponse)
-    if parsed is None:
-        return fallback_response
-    return PlotThreadGenerationResponse(
-        plot_threads=_normalize_named_models(
-            parsed.plot_threads,
-            fallback_response.plot_threads,
-            field_name="title",
-            count=payload.count,
-            taken_keys=_collect_existing_plot_thread_names(story_bible, payload.existing_plots),
-            transform=lambda candidate: _normalize_plot_thread_candidate(
-                candidate,
-                fallback_type=payload.plot_type,
-            ),
-        )
+    parsed = raw_result["parsed"]
+    normalized_items = _normalize_named_models(
+        parsed.plot_threads if parsed is not None else [],
+        fallback_response.plot_threads,
+        field_name="title",
+        count=payload.count,
+        taken_keys=_collect_existing_plot_thread_names(story_bible, payload.existing_plots),
+        transform=lambda candidate: _normalize_plot_thread_candidate(
+            candidate,
+            fallback_type=payload.plot_type,
+        ),
+    )
+    response = PlotThreadGenerationResponse(plot_threads=normalized_items)
+    return EntityGenerationPipelineResult(
+        generation_type=config.generation_type,
+        result_key=config.result_key,
+        response=response,
+        trace=_build_generation_trace_payload(
+            config=config,
+            raw_result=raw_result,
+            response=response,
+            requested_count=payload.count,
+        ),
     )
 
 
 async def _run_structured_generation(
     *,
-    task_name: str,
+    config: EntityGenerationPipelineConfig,
     system_prompt: str,
     prompt: str,
     fallback_response: Any,
-) -> str:
+    response_model: Any,
+    model_routing: Optional[dict[str, dict[str, Any]]],
+    context_snapshot: dict[str, Any],
+) -> dict[str, Any]:
     fallback_json = json.dumps(
         fallback_response.model_dump(mode="json"),
         ensure_ascii=False,
         indent=2,
     )
-    result = await model_gateway.generate_text(
-        GenerationRequest(
-            task_name=task_name,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=0.85,
-            max_tokens=2200,
-        ),
-        fallback=lambda: fallback_json,
+    candidates = _build_entity_generation_model_candidates(
+        generation_type=config.generation_type,
+        model_routing=model_routing,
     )
-    return result.content
+    failover_attempts: list[dict[str, Any]] = []
+    selected_result: Any | None = None
+    selected_candidate: dict[str, Any] | None = None
+    parsed_payload: Any | None = None
+    response_source = "fallback_response"
+
+    for index, candidate in enumerate(candidates):
+        result = await model_gateway.generate_text(
+            GenerationRequest(
+                task_name=config.task_name,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=candidate["model"],
+                reasoning_effort=candidate["reasoning_effort"],
+                temperature=0.85,
+                max_tokens=2200,
+                metadata={
+                    "entity_generation_type": config.generation_type,
+                    "entity_generation_label": config.label,
+                    "entity_route_role": candidate["role"],
+                    "entity_route_index": index,
+                    "entity_route_total": len(candidates),
+                },
+            ),
+            fallback=lambda: fallback_json,
+        )
+        parsed = _parse_structured_response(result.content, response_model)
+        should_failover = _should_failover_entity_generation_result(
+            result=result,
+            parsed_payload=parsed,
+        )
+        if should_failover and index < len(candidates) - 1:
+            failover_attempts.append(
+                _build_entity_generation_failover_attempt(
+                    candidate=candidate,
+                    result=result,
+                    parse_succeeded=parsed is not None,
+                )
+            )
+            continue
+
+        selected_result = result
+        selected_candidate = candidate
+        parsed_payload = parsed
+        response_source = _resolve_entity_response_source(
+            result=result,
+            parsed_payload=parsed,
+        )
+        break
+
+    if selected_result is None:
+        selected_candidate = candidates[0] if candidates else None
+        selected_result = await model_gateway.generate_text(
+            GenerationRequest(
+                task_name=config.task_name,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.85,
+                max_tokens=2200,
+                metadata={
+                    "entity_generation_type": config.generation_type,
+                    "entity_generation_label": config.label,
+                    "entity_route_role": selected_candidate["role"] if selected_candidate else "default",
+                },
+            ),
+            fallback=lambda: fallback_json,
+        )
+        parsed_payload = _parse_structured_response(selected_result.content, response_model)
+        response_source = _resolve_entity_response_source(
+            result=selected_result,
+            parsed_payload=parsed_payload,
+        )
+
+    return {
+        "parsed": parsed_payload,
+        "selected_result": selected_result,
+        "selected_candidate": selected_candidate,
+        "failover_attempts": failover_attempts,
+        "response_source": response_source,
+        "context_snapshot": context_snapshot,
+        "fallback_response": fallback_response,
+        "candidates": candidates,
+    }
 
 
 def _parse_structured_response(raw: str, response_model: Any) -> Any | None:
@@ -302,6 +658,176 @@ def _parse_structured_response(raw: str, response_model: Any) -> Any | None:
         return response_model.model_validate(payload)
     except ValidationError:
         return None
+
+
+def _get_entity_generation_pipeline_config(
+    generation_type: str,
+) -> EntityGenerationPipelineConfig:
+    config = ENTITY_GENERATION_PIPELINE_CONFIGS.get(generation_type)
+    if config is None:
+        raise KeyError(f"Unsupported entity generation type: {generation_type}")
+    return config
+
+
+async def _resolve_entity_generation_model_routing(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    user_id: UUID,
+) -> Optional[dict[str, dict[str, Any]]]:
+    try:
+        from services.story_engine_kb_service import get_story_engine_project
+
+        project = await get_story_engine_project(session, project_id, user_id)
+        return resolve_story_engine_model_routing(project)
+    except Exception:
+        return None
+
+
+def _build_entity_generation_model_candidates(
+    *,
+    generation_type: str,
+    model_routing: Optional[dict[str, dict[str, Any]]],
+) -> list[dict[str, str]]:
+    config = _get_entity_generation_pipeline_config(generation_type)
+    candidates: list[dict[str, str]] = []
+    seen_models: set[str] = set()
+    for role in config.route_roles:
+        model = get_story_engine_role_model(role, model_routing).strip()
+        if not model or model in seen_models:
+            continue
+        seen_models.add(model)
+        candidates.append(
+            {
+                "role": role,
+                "model": model,
+                "reasoning_effort": get_story_engine_role_reasoning(role, model_routing),
+            }
+        )
+    return candidates
+
+
+def _should_failover_entity_generation_result(
+    *,
+    result: Any,
+    parsed_payload: Any | None,
+) -> bool:
+    metadata = dict(getattr(result, "metadata", None) or {})
+    remote_error = metadata.get("remote_error")
+    if parsed_payload is None:
+        return True
+    if not getattr(result, "used_fallback", False):
+        return False
+    return isinstance(remote_error, dict) and bool(remote_error)
+
+
+def _build_entity_generation_failover_attempt(
+    *,
+    candidate: dict[str, Any],
+    result: Any,
+    parse_succeeded: bool,
+) -> dict[str, Any]:
+    metadata = dict(getattr(result, "metadata", None) or {})
+    remote_error = metadata.get("remote_error")
+    payload: dict[str, Any] = {
+        "role": candidate["role"],
+        "model": candidate["model"],
+        "reasoning_effort": candidate["reasoning_effort"],
+        "selected_provider": metadata.get("selected_provider"),
+        "used_fallback": bool(getattr(result, "used_fallback", False)),
+        "parse_succeeded": parse_succeeded,
+    }
+    if isinstance(remote_error, dict):
+        payload["remote_error"] = remote_error
+    if not parse_succeeded:
+        payload["failure_reason"] = "invalid_json"
+    return payload
+
+
+def _resolve_entity_response_source(
+    *,
+    result: Any,
+    parsed_payload: Any | None,
+) -> str:
+    if parsed_payload is None:
+        return "fallback_response"
+    if getattr(result, "used_fallback", False):
+        return "local_fallback"
+    return "model_response"
+
+
+def _build_generation_trace_payload(
+    *,
+    config: EntityGenerationPipelineConfig,
+    raw_result: dict[str, Any],
+    response: Any,
+    requested_count: int,
+) -> dict[str, Any]:
+    parsed_payload = raw_result["parsed"]
+    selected_result = raw_result["selected_result"]
+    selected_candidate = raw_result["selected_candidate"] or {}
+    fallback_response = raw_result["fallback_response"]
+    result_key = config.result_key
+    parsed_candidates = list(getattr(parsed_payload, result_key, []) or []) if parsed_payload is not None else []
+    response_candidates = list(getattr(response, result_key, []) or [])
+    fallback_candidates = list(getattr(fallback_response, result_key, []) or [])
+    selected_metadata = dict(getattr(selected_result, "metadata", None) or {})
+    remote_error = selected_metadata.get("remote_error")
+    raw_candidate_count = len(parsed_candidates) if parsed_payload is not None else len(fallback_candidates)
+    fallback_fill_count = max(0, len(response_candidates) - len(parsed_candidates))
+
+    return {
+        "generation_type": config.generation_type,
+        "label": config.label,
+        "result_key": result_key,
+        "requested_count": requested_count,
+        "returned_count": len(response_candidates),
+        "raw_candidate_count": raw_candidate_count,
+        "fallback_fill_count": fallback_fill_count,
+        "response_source": raw_result["response_source"],
+        "parse_succeeded": parsed_payload is not None,
+        "selected_role": selected_candidate.get("role"),
+        "selected_model": getattr(selected_result, "model", None),
+        "selected_provider": getattr(selected_result, "provider", None),
+        "selected_reasoning_effort": selected_candidate.get("reasoning_effort"),
+        "used_fallback": bool(getattr(selected_result, "used_fallback", False)),
+        "failover_triggered": len(raw_result["failover_attempts"]) > 0,
+        "failover_attempts": raw_result["failover_attempts"],
+        "candidate_route_roles": [item["role"] for item in raw_result["candidates"]],
+        "candidate_route_models": [item["model"] for item in raw_result["candidates"]],
+        "context_snapshot": raw_result["context_snapshot"],
+        "entity_preview": [
+            str(getattr(item, "name", None) or getattr(item, "title", None) or "").strip()
+            for item in response_candidates[:5]
+            if str(getattr(item, "name", None) or getattr(item, "title", None) or "").strip()
+        ],
+        "remote_error": remote_error if isinstance(remote_error, dict) else None,
+    }
+
+
+def _build_entity_generation_context_snapshot(
+    story_bible: StoryBibleContext,
+    payload: Any,
+    *,
+    generation_type: str,
+) -> dict[str, Any]:
+    return {
+        "generation_type": generation_type,
+        "scope_kind": story_bible.scope_kind,
+        "branch_title": story_bible.branch_title,
+        "project_title": story_bible.title,
+        "genre": payload.genre if hasattr(payload, "genre") else story_bible.genre,
+        "tone": payload.tone if hasattr(payload, "tone") else story_bible.tone,
+        "theme": getattr(payload, "theme", None) or story_bible.theme,
+        "requested_count": getattr(payload, "count", None),
+        "character_count": len(story_bible.characters),
+        "item_count": len(story_bible.items),
+        "location_count": len(story_bible.locations),
+        "faction_count": len(story_bible.factions),
+        "plot_thread_count": len(story_bible.plot_threads),
+        "world_rule_count": len(story_bible.world_settings),
+        "total_override_count": story_bible.total_override_count,
+    }
 
 
 def _extract_json_payload(raw: str) -> dict[str, Any] | None:

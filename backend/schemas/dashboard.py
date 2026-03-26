@@ -16,6 +16,8 @@ class DashboardProjectSummaryRead(ORMModel):
     access_role: str = "owner"
     owner_email: Optional[str] = None
     collaborator_count: int = 0
+    has_bootstrap_profile: bool = False
+    has_novel_blueprint: bool = False
     updated_at: datetime
     chapter_count: int
     word_count: int
@@ -78,6 +80,7 @@ class DashboardRecentTaskRead(ORMModel):
     message: Optional[str] = None
     project_id: Optional[UUID] = None
     chapter_id: Optional[UUID] = None
+    chapter_number: Optional[int] = None
     updated_at: datetime
 
 
