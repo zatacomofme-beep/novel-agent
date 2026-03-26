@@ -1492,6 +1492,7 @@ export interface OutlineStressTestResponse {
   debate_rounds_completed: number;
   agent_reports: StoryEngineAgentReport[];
   deliberation_rounds: StoryEngineDeliberationRound[];
+  workflow_timeline: StoryEngineWorkflowEvent[];
 }
 
 export interface StoryEngineWorkflowEvent {
@@ -1723,4 +1724,5 @@ export interface StoryBulkImportResponse {
   applied_model_preset_key: string | null;
   applied_model_preset_label: string | null;
   warnings: string[];
+  workflow_timeline: StoryEngineWorkflowEvent[];
 }

@@ -139,10 +139,13 @@ Meaning:
 - 它一边消费 Story Engine 工作流，一边把正文落入正式 `Chapter` 主链
 - 它现在只暴露写手必要信息，完整 review/comment/checkpoint 仍保留在独立章节编辑器
 - workspace 返回里已经补入 `knowledge_provenance`，后台可以按实体维度给出来源章节、关联设定和最近变更摘要，前台暂时仍保持黑盒
+- `outline-stress-test` 现在也会返回 `workflow_timeline`，并持久化到统一任务系统，开书阶段不再是一次性黑盒调用
+- `imports/bulk` 现在也会返回 `workflow_timeline`，并持久化到统一任务系统；模板导入、自定义设定包导入和覆盖区块替换都能进入最近过程回放
 - `realtime-guard` 与 `final-optimize` 现在都会返回 `workflow_timeline`
 - `chapter-stream` 的每条 NDJSON 事件现在都会带 `workflow_event`，终止事件会补齐完整 `workflow_timeline`
 - `story-room` 现在同时消费“本机保稿 + 云端续写草稿”两层写作保护；正式章节保存、回滚、片段改写后，前台会主动清理当前章的云端续写稿
 - `story-room` 现在还会把“当前页工作流时间线 + 项目任务回放”合并展示为写手可读的最近过程；`chapter-stream / realtime-guard / final-optimize` 也都已经正式并入统一任务系统
+- Dashboard 和 `story-room` 的“最近过程”现在都能覆盖开书的大纲压力测试与初始化导入动作，不再只偏向正文阶段
 - 这三条章节工作流现在都会额外接受可选 `chapter_id`，已落库章节会直接挂到真实章节任务链；未落库章节则退回项目级任务记录
 
 ### Story Bible Workspace

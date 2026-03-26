@@ -5,6 +5,11 @@
 这份文档不是 PRD，也不是泛化建议，而是后续开发时直接对照执行的任务表。
 目标是把“哪些已经做完、哪些正在收口、哪些可以后做、哪些暂不做”说清楚。
 
+当前这份文档分为两部分：
+
+- 上半部分是 `V1` 归档记录，保留第一轮主链收口的真实进度。
+- 文末的 `第二版实施任务表（当前有效）` 是后续继续开发时要执行的唯一有效顺序。
+
 ---
 
 ## 固定边界
@@ -183,6 +188,8 @@
 | `P2-01` | 跨端云端续写草稿 | `已完成（第一版）` | `P2` | 在本机保稿之外补齐云端暂存，让桌面和手机能接着写同一章 | `backend/api/v1/story_engine.py` `backend/services/story_engine_cloud_draft_service.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/components/story-engine/draft-studio.tsx` |
 | `P2-02` | 工作台任务轨迹与流程回放 | `已完成（第一版）` | `P2` | 把已有 `workflow_timeline / task_runs / task_events` 更完整地收口到 `story-room` 与 `dashboard` | `backend/api/v1/tasks.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` |
 | `E2-01` | 章节工作流持久化并轨到任务系统 | `已完成（第一版）` | `P2` | 让章节流式生成、实时守护、终稿收口不仅返回时间线，还沉到统一 `task_runs / task_events` 主链 | `backend/services/story_engine_workflow_service.py` `backend/services/task_service.py` `backend/models/task_run.py` `backend/models/task_event.py` |
+| `E2-02` | 大纲压力测试并轨到任务系统 | `已完成（第一版）` | `P2` | 让开书第一步也进入统一任务链，支持大纲生成、挑刺、裁决、落库的完整回放 | `backend/services/story_engine_workflow_service.py` `backend/api/v1/story_engine.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` |
+| `E2-03` | 初始化导入 / 模板导入并轨到任务系统 | `已完成（第一版）` | `P2` | 把上传大纲、模板导入、知识库批量初始化等开书动作并到统一任务链，结束项目初始化阶段的最后分叉 | `backend/api/v1/story_engine.py` `backend/services/story_engine_import_service.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` |
 
 ### `P2-01` 验收标准
 
@@ -217,6 +224,32 @@
 - 已完成（第一版）：`story-room` 现在会把当前 `chapter_id` 透传到三个工作流，请求能稳定绑定真实章节；未正式落章时则自动退回项目级任务记录。
 - 已完成（第一版）：Dashboard 与任务详情读取章节号时，已经支持从 `task.result.chapter_number` 回退，不会因为任务挂在项目级而丢失章号。
 - 已完成（第一版）：`story-room` 与 Dashboard 都已经识别 `workflow_status=paused`，暂停态回放不会再被误显示成普通“已完成”。
+
+### `E2-02` 验收标准
+
+- `outline-stress-test` 有可查询的统一任务记录。
+- 大纲初版生成、守护/节奏/逻辑校验、补丁轮、裁决和落库都能回放。
+- 写手在 `story-room` 和 Dashboard 看到的“最近过程”不再只偏向正文阶段，开书阶段也完整可见。
+
+### `E2-02` 当前进度
+
+- 已完成（第一版）：`outline-stress-test` 现在也会写入统一 `task_runs / task_events`，开书阶段第一次真正进入项目级任务主链。
+- 已完成（第一版）：时间线已经覆盖 `outline_stress_started / outline_blueprint_prepared / guardian_review / commercial_review / logic_review / debate_patch_applied / outline_arbitration / outline_persisted / outline_stress_completed`，不再只有最终返回结果。
+- 已完成（第一版）：`story-room` 发起大纲压力测试后，会把 `workflow_timeline` 立即并入当前页最近过程，同时刷新项目级任务回放。
+- 已完成（第一版）：Dashboard 最近任务区已经能识别 `story_engine.outline_stress_test`，并把动作入口直接导向大纲区，开书阶段不再是回放盲区。
+
+### `E2-03` 验收标准
+
+- `imports/bulk` 有可查询的统一任务记录。
+- 模板导入、手工设定包导入、覆盖区块替换、后台策略套用都能回放。
+- 写手在 `story-room` 和 Dashboard 看到的最近过程，已经覆盖“导入起盘设定”这一类项目初始化动作。
+
+### `E2-03` 当前进度
+
+- 已完成（第一版）：`story_engine/imports/bulk` 现在会写入统一 `task_runs / task_events`，并返回标准化 `workflow_timeline`，不再是同步导入后一次性黑盒返回。
+- 已完成（第一版）：时间线已经覆盖 `bulk_import_started / bulk_import_preflight_checked / bulk_import_replace_scope_prepared / bulk_import_{section} / bulk_import_model_preset_applied / bulk_import_completed`，能回看整套初始化设定是怎么落进去的。
+- 已完成（第一版）：`story-room` 导入设定成功后，会立刻把导入过程并入最近过程，并刷新项目任务回放；Dashboard 也已经能识别 `story_engine.bulk_import` 并跳回设定区。
+- 已完成（第一版）：相关后端回归已经补到导入服务层，当前导入链和既有大纲/正文/终稿链一起通过了针对性测试与前端类型检查。
 
 ### `P2-01` 当前进度
 
@@ -292,16 +325,106 @@
 13. `P2-01` 跨端云端续写草稿
 14. `P2-02` 工作台任务轨迹与流程回放
 15. `E2-01` 章节工作流持久化并轨到任务系统
+16. `E2-02` 大纲压力测试并轨到任务系统
+17. `E2-03` 初始化导入 / 模板导入并轨到任务系统
 
 ---
 
 ## 当前判断
 
-如果只看“能不能用”，项目已经能跑主链。
+如果只看“能不能用”，项目已经不只是能跑主链，而是已经把“开书初始化 -> 大纲 -> 正文 -> 终稿 -> 设定沉淀”这一整条核心路径的主要工作流都并到了统一任务回放里。
 
-如果看“能不能作为真正稳定的写作产品持续使用”，当前主链部分已经基本收口，接下来优先级应转向两类：
+如果看“能不能作为真正稳定的写作产品持续使用”，当前任务表里的 `P0 / P1 / P2 / E1 / E2` 这一批已经基本完成第一轮收口。接下来更合理的动作不是脱表继续散改，而是先做两件事：
 
-- 后台工程链路继续并轨，减少“已能调用但未进入统一任务链”的分叉实现
-- 领域模型与事件流继续纯化，为后续长期维护、观测和移动端适配打底
+- 先按固定 smoke 清单，把“开书初始化 / 导入模板 / 测大纲漏洞 / 生成正文 / 终稿收口 / 下一章接续”整链再做一轮系统回归
+- 再补下一版任务表，把后续要做的体验精修、工程纯化或运维能力明确编号后继续推进
 
-按当前任务表，`P2-02` 也已经完成第一版。现在写手前台已经能看到“最近做了什么、卡在哪一步、怎么回看过程”，所以下一步要进入 `E2-01`，把章节流式生成、实时守护、终稿收口彻底并轨进统一 `task_runs / task_events` 主链，结束“当前页可回放但未完全持久化”的状态。
+按当前任务表，现有明确列出的“必须先做 / 可以后做 / 下一阶段任务”已经全部推进到 `已完成（第一版）` 或 `暂不做`。如果后面继续新增开发项，应该先回写这份表，再开始下一轮实现。
+
+---
+
+## 第二版实施任务表（当前有效）
+
+这部分是从现在开始继续开发时要遵守的新顺序。
+
+第一版已经把核心主链打通，第二版不再重开新流程，而是集中解决四类问题：
+
+- 把“人工 smoke 可用”升级为“可重复执行的自动化回归”
+- 把“能看到最近过程”升级为“实时过程可推送、失败后可恢复”
+- 把“单工作台主链能跑”升级为“长时间使用也稳定、不拖、不乱”
+- 把“工程上能工作”升级为“可维护、可观察、可上线”
+
+### 第二版固定边界
+
+- 写手前台仍然只保留 `创建项目 -> 大纲 -> 正文 -> 终稿 -> 设定 -> 下一章` 这一条主路径。
+- 第二版不引入新前台体系，不把管理员配置、模型组合、底层辩论机制暴露给写手。
+- 第二版优先做“稳、顺、可回放、可恢复”，不是优先堆更多按钮和页面。
+- 所有新任务依然优先收口在 `dashboard / story-room`，不让旧页面重新成为主入口。
+
+### 第二版里程碑
+
+| 里程碑 | 状态 | 说明 |
+| --- | --- | --- |
+| 自动化回归落地 | `待开始` | 把现在的人工 smoke 清单沉成可执行脚本和固定入口 |
+| 实时任务过程升级 | `待开始` | 把轮询式过程查看升级成更即时的任务推送和跨页同步 |
+| 长流程稳定性升级 | `待开始` | 让大纲、导入、终稿这类长流程能失败恢复、重试和继续看 |
+| 工作台性能纯化 | `待开始` | 把 `story-room` 的大工作区做按阶段分层加载和缓存收口 |
+
+### 第二版必须先做
+
+| ID | 任务 | 状态 | 优先级 | 目标 | 关键文件 |
+| --- | --- | --- | --- | --- | --- |
+| `P3-01` | 主链自动化回归落地 | `待开始` | `P0` | 把现有人工 smoke 清单沉成固定命令、固定数据和固定断言，后续每次改主链都能直接跑 | `docs/architecture/current-priority-checklist.md` `backend/scripts/story_engine_live_smoke.py` `frontend/package.json` `backend/tests` |
+| `P3-02` | 工作台最近过程实时推送 | `待开始` | `P0` | 让 `story-room` 和 Dashboard 不再主要靠轮询刷新，而是更即时地看到“刚发生了什么 / 卡在哪一步” | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` `backend/api/ws.py` `backend/realtime/task_events.py` |
+| `P3-03` | 长流程失败恢复与重试收口 | `待开始` | `P0` | 让导入设定、测大纲漏洞、终稿收口等长流程在失败/中断后可恢复、可重试、可继续查看结果 | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `backend/services/story_engine_import_service.py` `backend/services/story_engine_workflow_service.py` `backend/services/task_service.py` |
+| `P3-04` | `story-room` 首屏减载与按阶段懒加载 | `待开始` | `P0` | 把大工作台改成按阶段拉取和缓存，减少首次进入、切章、切分线时的等待和卡顿 | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `backend/api/v1/story_engine.py` `backend/services/story_engine_kb_service.py` `backend/services/task_service.py` |
+
+### 第二版可以后做
+
+| ID | 任务 | 状态 | 优先级 | 说明 | 关键文件 |
+| --- | --- | --- | --- | --- | --- |
+| `P4-01` | 跨项目风格 / 模板资产库 | `待开始` | `P1` | 把用户常用的文风底稿、起盘模板、章节手感沉成个人资产，而不只停留在当前项目里 | `frontend/app/dashboard/preferences/page.tsx` `backend/api/v1/profile.py` `backend/services/preference_service.py` |
+| `P4-02` | 协作写作的章节锁与冲突提醒 | `待开始` | `P1` | 让多人协作从“能加成员”提升到“谁在改哪一章、会不会互相覆盖”可感知 | `frontend/app/dashboard/projects/[projectId]/collaborators/page.tsx` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `backend/services/project_service.py` `backend/api/v1/projects.py` |
+| `P4-03` | 导出 / 交付中心 | `待开始` | `P1` | 把项目导出从零散按钮收成统一出口，补齐整书导出、分卷导出、终稿包导出等常用动作 | `frontend/app/dashboard/page.tsx` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `backend/services/export_service.py` `backend/api/v1/projects.py` |
+
+### 第二版工程纯化项
+
+| ID | 任务 | 状态 | 优先级 | 说明 | 关键文件 |
+| --- | --- | --- | --- | --- | --- |
+| `E3-01` | Story Engine 长流程异步任务化 | `待开始` | `P1` | 把大纲压力测试、批量导入、终稿收口从同步请求进一步收口到后台任务派发，减少超时和前台阻塞 | `backend/tasks/celery_app.py` `backend/services/story_engine_workflow_service.py` `backend/services/story_engine_import_service.py` `backend/api/v1/story_engine.py` |
+| `E3-02` | 任务事件订阅层统一 | `待开始` | `P1` | 把已有 `task_events`、WebSocket、前台轮询入口统一成一套更稳定的订阅层，减少页面各自拼装 | `backend/realtime/task_events.py` `backend/api/ws.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` |
+| `E3-03` | `story-room workspace` 契约拆分与缓存 | `待开始` | `P1` | 把现在偏大的 workspace 读法拆成主数据 + 分阶段数据 + 轻量缓存，减少重复拉全量 | `backend/api/v1/story_engine.py` `backend/services/story_engine_kb_service.py` `frontend/types/api.ts` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` |
+| `E3-04` | 自动化 smoke 数据夹具与脚本统一 | `待开始` | `P1` | 把手工 smoke、后端 live smoke、前端测试入口统一命名、统一命令、统一测试账号策略 | `backend/scripts/story_engine_live_smoke.py` `backend/tests` `frontend/package.json` `docs/architecture/current-priority-checklist.md` |
+
+### 第二版暂不做
+
+第二版继续沿用第一版的暂不做边界，额外补一条：
+
+- 不做写手前台的“高级设置中心”扩张；所有高复杂度控制继续收口在后台管理员能力里。
+
+### 第二版推荐实施顺序
+
+从现在开始，后续建议严格按下面顺序推进：
+
+1. `P3-01` 主链自动化回归落地
+2. `E3-04` 自动化 smoke 数据夹具与脚本统一
+3. `E3-01` Story Engine 长流程异步任务化
+4. `E3-02` 任务事件订阅层统一
+5. `P3-02` 工作台最近过程实时推送
+6. `P3-03` 长流程失败恢复与重试收口
+7. `E3-03` `story-room workspace` 契约拆分与缓存
+8. `P3-04` `story-room` 首屏减载与按阶段懒加载
+9. `P4-01` 跨项目风格 / 模板资产库
+10. `P4-02` 协作写作的章节锁与冲突提醒
+11. `P4-03` 导出 / 交付中心
+
+### 第二版当前判断
+
+当前最合理的下一步不是继续往产品里加新按钮，而是先把“已经能用”的主链变成“每次改完都能快速验证、长流程断了也能接着跑、工作台过程更实时”的稳定版本。
+
+所以第二版的第一个实际执行点应该是：
+
+- 先完成 `P3-01`，把主链自动化回归固定下来
+- 然后立刻补 `E3-04`，把 smoke 的脚本、数据夹具和命令入口统一
+
+只有这两步先落地，后面继续改实时推送、异步任务化和性能分层时，回归成本才不会持续抬高。

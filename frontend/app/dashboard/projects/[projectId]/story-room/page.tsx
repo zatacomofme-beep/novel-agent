@@ -328,6 +328,9 @@ function resolveWorkflowStage(workflowType: string): StoryRoomStageKey {
   if (workflowType.startsWith("entity_generation")) {
     return "knowledge";
   }
+  if (workflowType === "bulk_import") {
+    return "knowledge";
+  }
   return "draft";
 }
 
@@ -337,6 +340,7 @@ function formatWorkflowLabel(workflowType: string): string {
     realtime_guard: "正文检查",
     final_optimize: "终稿收口",
     outline_stress_test: "三级大纲整理",
+    bulk_import: "设定导入",
   };
   return labels[workflowType] ?? "最近过程";
 }
@@ -344,6 +348,8 @@ function formatWorkflowLabel(workflowType: string): string {
 function formatTaskPlaybackLabel(taskType: string): string {
   const labels: Record<string, string> = {
     chapter_generation: "正文生成",
+    "story_engine.bulk_import": "导入设定",
+    "story_engine.outline_stress_test": "测大纲漏洞",
     "story_engine.chapter_stream": "正文生成",
     "story_engine.realtime_guard": "正文检查",
     "story_engine.final_optimize": "终稿收口",
@@ -359,6 +365,9 @@ function formatTaskPlaybackLabel(taskType: string): string {
 
 function resolveTaskPlaybackStage(taskType: string): StoryRoomStageKey {
   if (taskType.startsWith("entity_generation.")) {
+    return "knowledge";
+  }
+  if (taskType === "story_engine.bulk_import") {
     return "knowledge";
   }
   if (taskType.includes("outline")) {
@@ -3138,12 +3147,17 @@ export default function StoryRoomPage() {
         },
       );
       setStressResult(data);
+      const workflowRun = buildWorkflowRunFromTimeline(data.workflow_timeline ?? []);
+      if (workflowRun) {
+        upsertWorkflowRun(workflowRun);
+      }
       setActiveStage("outline");
       setPendingStageScroll("outline");
       setSuccess("三级大纲已经压好了，先确认章纲，再开始第一章。");
       await Promise.all([
         loadWorkspace(false, selectedBranchId),
         loadProjectBootstrap({ branchId: selectedBranchId }),
+        loadProjectTaskPlayback(),
       ]);
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
@@ -4403,9 +4417,16 @@ export default function StoryRoomPage() {
         },
       );
       setStressResult(null);
+      const workflowRun = buildWorkflowRunFromTimeline(data.workflow_timeline ?? []);
+      if (workflowRun) {
+        upsertWorkflowRun(workflowRun);
+      }
       setSuccess(buildImportSummary(data));
-      await loadWorkspace(false, selectedBranchId);
-      await loadStoryBibleGovernanceState(storyBibleBranchId, false);
+      await Promise.all([
+        loadWorkspace(false, selectedBranchId),
+        loadStoryBibleGovernanceState(storyBibleBranchId, false),
+        loadProjectTaskPlayback(),
+      ]);
     } catch (requestError) {
       if (requestError instanceof SyntaxError) {
         setError("设定包格式看起来不完整，请检查逗号、括号和引号。");

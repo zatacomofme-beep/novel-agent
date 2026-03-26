@@ -157,6 +157,25 @@ async def run_outline_stress_test(
     target_total_words: int,
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
+    workflow_id = _build_workflow_id("outline_stress_test")
+    task_state = await _create_workflow_task_state(
+        session,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        project_id=project_id,
+        user_id=user_id,
+        chapter_id=None,
+        chapter_number=None,
+        initial_message="正在拆脑洞、压三级大纲并做长线挑刺。",
+        initial_result=_build_workflow_task_base_result(
+            workflow_id=workflow_id,
+            workflow_type="outline_stress_test",
+            workflow_status="running",
+            chapter_number=None,
+            chapter_title=None,
+            branch_id=branch_id,
+        ),
+    )
     initial_state: OutlineStressState = {
         "session": session,
         "project_id": project_id,
@@ -175,57 +194,121 @@ async def run_outline_stress_test(
         "unresolved_issues": [],
         "debate_history": [],
     }
-    if LANGGRAPH_AVAILABLE:
-        graph = _build_outline_stress_graph()
-        result = await graph.ainvoke(initial_state)
-    else:
-        result = await _run_outline_stress_fallback(initial_state)
-    persisted = await _persist_outline_stress_result(
-        session=session,
-        project_id=project_id,
-        user_id=user_id,
-        branch_id=branch_id,
-        outline_draft=result["outline_draft"],
-        initial_kb=result["initial_kb"],
-    )
-    serialized_outlines = _serialize_story_api_entities(
-        "outlines",
-        persisted["outlines"],
-    )
-    return {
-        "locked_level_1_outlines": [
-            item for item in serialized_outlines if item.get("level") == "level_1"
-        ],
-        "editable_level_2_outlines": [
-            item for item in serialized_outlines if item.get("level") == "level_2"
-        ],
-        "editable_level_3_outlines": [
-            item for item in serialized_outlines if item.get("level") == "level_3"
-        ],
-        "initial_knowledge_base": {
-            entity_type: _serialize_story_api_entities(
-                entity_type,
-                persisted["initial_kb"].get(entity_type) or [],
+    try:
+        if LANGGRAPH_AVAILABLE:
+            graph = _build_outline_stress_graph()
+            result = await graph.ainvoke(initial_state)
+        else:
+            result = await _run_outline_stress_fallback(initial_state)
+        persisted = await _persist_outline_stress_result(
+            session=session,
+            project_id=project_id,
+            user_id=user_id,
+            branch_id=branch_id,
+            outline_draft=result["outline_draft"],
+            initial_kb=result["initial_kb"],
+        )
+        workflow_timeline = _build_outline_stress_workflow_timeline(
+            workflow_id=workflow_id,
+            branch_id=branch_id,
+            idea=idea,
+            source_material=source_material,
+            target_chapter_count=target_chapter_count,
+            target_total_words=target_total_words,
+            result=result,
+            persisted=persisted,
+        )
+        serialized_outlines = _serialize_story_api_entities(
+            "outlines",
+            persisted["outlines"],
+        )
+        response = {
+            "locked_level_1_outlines": [
+                item for item in serialized_outlines if item.get("level") == "level_1"
+            ],
+            "editable_level_2_outlines": [
+                item for item in serialized_outlines if item.get("level") == "level_2"
+            ],
+            "editable_level_3_outlines": [
+                item for item in serialized_outlines if item.get("level") == "level_3"
+            ],
+            "initial_knowledge_base": {
+                entity_type: _serialize_story_api_entities(
+                    entity_type,
+                    persisted["initial_kb"].get(entity_type) or [],
+                )
+                for entity_type in (
+                    "characters",
+                    "foreshadows",
+                    "items",
+                    "world_rules",
+                    "timeline_events",
+                )
+            },
+            "risk_report": result["arbitrated_report"]["issues"],
+            "optimization_plan": result["optimization_plan"],
+            "debate_rounds_completed": result["debate_round"],
+            "agent_reports": [
+                result["guardian_report"],
+                result["commercial_report"],
+                result["logic_report"],
+                result["arbitrated_report"],
+            ],
+            "deliberation_rounds": _build_outline_deliberation_rounds(result),
+            "workflow_timeline": workflow_timeline,
+        }
+        for index, workflow_event in enumerate(workflow_timeline):
+            await _persist_workflow_task_event(
+                session,
+                task_state=task_state,
+                project_id=project_id,
+                user_id=user_id,
+                chapter_id=None,
+                workflow_type="outline_stress_test",
+                workflow_event=workflow_event,
+                result_patch=(
+                    {
+                        **_build_workflow_task_base_result(
+                            workflow_id=workflow_id,
+                            workflow_type="outline_stress_test",
+                            workflow_status=(
+                                "completed"
+                                if len(response["risk_report"]) == 0
+                                else "paused"
+                            ),
+                            chapter_number=None,
+                            chapter_title=None,
+                            branch_id=branch_id,
+                            workflow_timeline=workflow_timeline,
+                        ),
+                        "risk_count": len(response["risk_report"]),
+                        "debate_rounds_completed": response["debate_rounds_completed"],
+                        "optimization_plan_count": len(response["optimization_plan"]),
+                        "locked_level_1_count": len(response["locked_level_1_outlines"]),
+                        "editable_level_2_count": len(response["editable_level_2_outlines"]),
+                        "editable_level_3_count": len(response["editable_level_3_outlines"]),
+                    }
+                    if index == len(workflow_timeline) - 1
+                    else None
+                ),
+                finalize=index == len(workflow_timeline) - 1,
             )
-            for entity_type in (
-                "characters",
-                "foreshadows",
-                "items",
-                "world_rules",
-                "timeline_events",
-            )
-        },
-        "risk_report": result["arbitrated_report"]["issues"],
-        "optimization_plan": result["optimization_plan"],
-        "debate_rounds_completed": result["debate_round"],
-        "agent_reports": [
-            result["guardian_report"],
-            result["commercial_report"],
-            result["logic_report"],
-            result["arbitrated_report"],
-        ],
-        "deliberation_rounds": _build_outline_deliberation_rounds(result),
-    }
+        return response
+    except Exception as exc:
+        await _persist_workflow_task_failure(
+            session,
+            task_state=task_state,
+            project_id=project_id,
+            user_id=user_id,
+            chapter_id=None,
+            workflow_id=workflow_id,
+            workflow_type="outline_stress_test",
+            chapter_number=None,
+            chapter_title=None,
+            branch_id=branch_id,
+            error=exc,
+        )
+        raise
 
 
 async def run_realtime_guard(
@@ -847,6 +930,8 @@ def _build_workflow_id(workflow_type: str) -> str:
 
 
 _WORKFLOW_TASK_TYPE_MAP = {
+    "outline_stress_test": "story_engine.outline_stress_test",
+    "bulk_import": "story_engine.bulk_import",
     "realtime_guard": "story_engine.realtime_guard",
     "chapter_stream": "story_engine.chapter_stream",
     "final_optimize": "story_engine.final_optimize",
@@ -973,6 +1058,37 @@ def _resolve_workflow_task_progress(
         if stage == "stream_completed":
             return 100
         return 0
+
+    if workflow_type == "outline_stress_test":
+        progress_map = {
+            "outline_stress_started": 5,
+            "outline_blueprint_prepared": 24,
+            "guardian_review": 42,
+            "commercial_review": 56,
+            "logic_review": 70,
+            "debate_patch_applied": 82,
+            "outline_arbitration": 90,
+            "outline_persisted": 96,
+            "outline_stress_completed": 100,
+        }
+        return progress_map.get(stage, 0)
+
+    if workflow_type == "bulk_import":
+        progress_map = {
+            "bulk_import_started": 5,
+            "bulk_import_preflight_checked": 18,
+            "bulk_import_replace_scope_prepared": 26,
+            "bulk_import_world_rules": 38,
+            "bulk_import_characters": 50,
+            "bulk_import_foreshadows": 60,
+            "bulk_import_items": 68,
+            "bulk_import_timeline_events": 76,
+            "bulk_import_outlines": 86,
+            "bulk_import_chapter_summaries": 92,
+            "bulk_import_model_preset_applied": 96,
+            "bulk_import_completed": 100,
+        }
+        return progress_map.get(stage, 0)
 
     if workflow_type == "final_optimize":
         progress_map = {
@@ -1242,6 +1358,182 @@ def _build_anchor_workflow_details(anchor_payload: dict[str, Any]) -> dict[str, 
             if str(item.get("title") or item.get("name") or item.get("content") or "").strip()
         ],
     }
+
+
+def _build_outline_outline_counts(outline_draft: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    return {
+        "level_1_count": len(outline_draft.get("level_1") or []),
+        "level_2_count": len(outline_draft.get("level_2") or []),
+        "level_3_count": len(outline_draft.get("level_3") or []),
+    }
+
+
+def _build_outline_kb_counts(initial_kb: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    return {
+        "character_count": len(initial_kb.get("characters") or []),
+        "foreshadow_count": len(initial_kb.get("foreshadows") or []),
+        "item_count": len(initial_kb.get("items") or []),
+        "world_rule_count": len(initial_kb.get("world_rules") or []),
+        "timeline_event_count": len(initial_kb.get("timeline_events") or []),
+    }
+
+
+def _build_outline_stress_workflow_timeline(
+    *,
+    workflow_id: str,
+    branch_id: Optional[UUID],
+    idea: Optional[str],
+    source_material: Optional[str],
+    target_chapter_count: int,
+    target_total_words: int,
+    result: OutlineStressState,
+    persisted: dict[str, Any],
+) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    outline_draft = dict(result.get("outline_draft") or {})
+    initial_kb = dict(result.get("initial_kb") or {})
+    outline_counts = _build_outline_outline_counts(outline_draft)
+    kb_counts = _build_outline_kb_counts(initial_kb)
+    arbitrated_report = dict(result.get("arbitrated_report") or {})
+    remaining_issue_count = len(arbitrated_report.get("issues") or [])
+    optimization_plan = list(result.get("optimization_plan") or [])
+
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="outline_stress_started",
+        status="started",
+        label="开始压三级大纲",
+        branch_id=branch_id,
+        details={
+            "idea_length": len(str(idea or "").strip()),
+            "source_material_length": len(str(source_material or "").strip()),
+            "target_chapter_count": target_chapter_count,
+            "target_total_words": target_total_words,
+        },
+    )
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="outline_blueprint_prepared",
+        status="completed",
+        label="初版大纲与设定已展开",
+        branch_id=branch_id,
+        details={
+            **outline_counts,
+            **kb_counts,
+        },
+    )
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="guardian_review",
+        status="completed",
+        label="设定守护完成校验",
+        branch_id=branch_id,
+        agent_keys=["guardian"],
+        details=_build_report_workflow_details(dict(result.get("guardian_report") or {})),
+    )
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="commercial_review",
+        status="completed",
+        label="节奏校验完成",
+        branch_id=branch_id,
+        agent_keys=["commercial"],
+        details=_build_report_workflow_details(dict(result.get("commercial_report") or {})),
+    )
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="logic_review",
+        status="completed",
+        label="逻辑长线挑刺完成",
+        branch_id=branch_id,
+        agent_keys=["logic_debunker"],
+        details=_build_report_workflow_details(dict(result.get("logic_report") or {})),
+    )
+
+    for item in result.get("debate_history") or []:
+        focus_issue = dict(item.get("focus_issue") or {})
+        remaining_issue_count_in_round = int(item.get("remaining_issue_count") or 0)
+        _append_workflow_event(
+            timeline,
+            workflow_id=workflow_id,
+            workflow_type="outline_stress_test",
+            stage="debate_patch_applied",
+            status="completed",
+            label=f"第 {int(item.get('round_number') or 0)} 轮补丁已落下",
+            message=str(item.get("patch_action") or "").strip() or None,
+            branch_id=branch_id,
+            round_number=int(item.get("round_number") or 0) or None,
+            agent_keys=["guardian", "commercial", "logic_debunker"],
+            details={
+                "focus_issue_title": str(focus_issue.get("title") or "").strip() or None,
+                "focus_issue_severity": str(focus_issue.get("severity") or "").strip() or None,
+                "remaining_issue_count": remaining_issue_count_in_round,
+            },
+        )
+
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="outline_arbitration",
+        status="completed" if remaining_issue_count == 0 else "paused",
+        label="统一裁决已生成",
+        message=str(arbitrated_report.get("summary") or "").strip() or None,
+        branch_id=branch_id,
+        agent_keys=["arbitrator"],
+        details={
+            **_build_report_workflow_details(arbitrated_report),
+            "remaining_issue_count": remaining_issue_count,
+            "optimization_plan_count": len(optimization_plan),
+        },
+    )
+
+    persisted_outlines = list(persisted.get("outlines") or [])
+    persisted_initial_kb = dict(persisted.get("initial_kb") or {})
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="outline_persisted",
+        status="completed",
+        label="锁死大纲与初始设定已入库",
+        branch_id=branch_id,
+        details={
+            "persisted_outline_count": len(persisted_outlines),
+            **_build_outline_kb_counts(persisted_initial_kb),
+        },
+    )
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="outline_stress_test",
+        stage="outline_stress_completed",
+        status="completed" if remaining_issue_count == 0 else "paused",
+        label="大纲压力测试已完成",
+        message=(
+            "主线已经锁死，可以进入正文。"
+            if remaining_issue_count == 0
+            else f"当前仍有 {remaining_issue_count} 个高风险点，建议先处理后再开写。"
+        ),
+        branch_id=branch_id,
+        details={
+            "remaining_issue_count": remaining_issue_count,
+            "debate_rounds_completed": int(result.get("debate_round") or 0),
+            "optimization_plan_count": len(optimization_plan),
+            **outline_counts,
+        },
+    )
+    return timeline
 
 
 def _count_blocking_alerts(alerts: list[dict[str, Any]]) -> int:

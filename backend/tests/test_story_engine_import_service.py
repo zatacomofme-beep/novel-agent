@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from core.errors import AppError
-from schemas.story_engine import StoryBulkImportPayload
+from schemas.story_engine import StoryBulkImportPayload, StoryBulkImportResponse
 from services.story_engine_import_service import bulk_import_story_payload
 
 
@@ -19,6 +19,17 @@ def _ok_mutation_result(*, warning_count: int = 0, alerts: list[dict] | None = N
         "blocking_issue_count": 0,
         "warning_count": warning_count,
     }
+
+
+class _TaskCapableSession:
+    def add(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
 
 
 class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -67,7 +78,10 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
                 replace_existing_sections=[],
             )
 
+        dumped = StoryBulkImportResponse.model_validate(result).model_dump(mode="json")
         self.assertEqual(result["imported_counts"]["characters"], 1)
+        self.assertEqual(dumped["workflow_timeline"][0]["stage"], "bulk_import_started")
+        self.assertEqual(dumped["workflow_timeline"][-1]["stage"], "bulk_import_completed")
         save_kwargs = mocked_save.await_args.kwargs
         self.assertEqual(save_kwargs["section_key"], "characters")
         self.assertEqual(save_kwargs["source_workflow"], "bulk_import")
@@ -245,3 +259,71 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         mocked_save.assert_not_awaited()
+
+    async def test_bulk_import_persists_task_run_and_events_when_session_supports_it(self) -> None:
+        project_id = uuid4()
+        user_id = uuid4()
+        payload = StoryBulkImportPayload.model_validate(
+            {
+                "characters": [
+                    {
+                        "name": "林澈",
+                        "appearance": None,
+                        "personality": "警惕而克制",
+                        "micro_habits": [],
+                        "abilities": {},
+                        "relationships": [],
+                        "status": "active",
+                        "arc_stage": "initial",
+                        "arc_boundaries": [],
+                    }
+                ],
+                "world_rules": [
+                    {
+                        "rule_name": "越级爆发必有代价",
+                        "rule_content": "任何越级都要付出真实代价。",
+                        "negative_list": ["无代价爆发"],
+                        "scope": "battle",
+                    }
+                ],
+            }
+        )
+        create_task_run_mock = AsyncMock()
+        persist_task_event_mock = AsyncMock()
+
+        with patch(
+            "services.story_engine_import_service.get_story_engine_project",
+            AsyncMock(return_value=SimpleNamespace()),
+        ), patch(
+            "services.story_engine_import_service._resolve_import_branch_id",
+            AsyncMock(return_value=uuid4()),
+        ), patch(
+            "services.story_engine_import_service.run_story_bulk_import_guard",
+            AsyncMock(return_value=_ok_mutation_result()),
+        ), patch(
+            "services.story_engine_import_service._find_by_field",
+            AsyncMock(return_value=None),
+        ), patch(
+            "services.story_engine_import_service.save_story_knowledge",
+            AsyncMock(return_value=_ok_mutation_result()),
+        ), patch(
+            "services.story_engine_workflow_service.create_task_run",
+            create_task_run_mock,
+        ), patch(
+            "services.story_engine_import_service._persist_workflow_task_event",
+            persist_task_event_mock,
+        ):
+            result = await bulk_import_story_payload(
+                _TaskCapableSession(),
+                project_id=project_id,
+                user_id=user_id,
+                payload=payload,
+                replace_existing_sections=[],
+            )
+
+        self.assertEqual(create_task_run_mock.await_count, 1)
+        self.assertEqual(
+            persist_task_event_mock.await_count,
+            len(result["workflow_timeline"]),
+        )
+        self.assertEqual(result["workflow_timeline"][-1]["stage"], "bulk_import_completed")

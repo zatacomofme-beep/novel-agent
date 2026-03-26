@@ -265,6 +265,8 @@ function QualityTrendCard({ trend }: { trend: DashboardProjectQualityTrend }) {
 
 const recentTaskTypeLabels: Record<string, string> = {
   chapter_generation: "续写下一章",
+  "story_engine.bulk_import": "导入设定",
+  "story_engine.outline_stress_test": "测大纲漏洞",
   "story_engine.chapter_stream": "生成正文",
   "story_engine.realtime_guard": "检查正文",
   "story_engine.final_optimize": "终稿收口",
@@ -316,6 +318,18 @@ function buildRecentTaskHref(task: DashboardRecentTask): string | null {
     });
   }
 
+  if (task.task_type === "story_engine.bulk_import") {
+    return buildStoryRoomHref(task.project_id, {
+      stage: "knowledge",
+    });
+  }
+
+  if (task.task_type === "story_engine.outline_stress_test") {
+    return buildStoryRoomHref(task.project_id, {
+      stage: "outline",
+    });
+  }
+
   if (task.task_type === "story_engine.final_optimize") {
     return buildStoryRoomHref(task.project_id, {
       stage: "final",
@@ -343,6 +357,12 @@ function buildRecentTaskHref(task: DashboardRecentTask): string | null {
 function buildRecentTaskActionLabel(task: DashboardRecentTask): string {
   if (task.task_type.startsWith("entity_generation.")) {
     return "去设定区";
+  }
+  if (task.task_type === "story_engine.bulk_import") {
+    return "去设定区";
+  }
+  if (task.task_type === "story_engine.outline_stress_test") {
+    return "去大纲区";
   }
   if (task.task_type === "story_engine.final_optimize") {
     return "去终稿区";

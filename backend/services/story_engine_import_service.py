@@ -30,7 +30,15 @@ from services.story_engine_unified_knowledge_service import (
     delete_story_knowledge,
     save_story_knowledge,
 )
-from services.story_engine_workflow_service import run_story_bulk_import_guard
+from services.story_engine_workflow_service import (
+    _append_workflow_event,
+    _build_workflow_id,
+    _build_workflow_task_base_result,
+    _create_workflow_task_state,
+    _persist_workflow_task_event,
+    _persist_workflow_task_failure,
+    run_story_bulk_import_guard,
+)
 
 
 IMPORTABLE_SECTIONS = (
@@ -261,275 +269,439 @@ async def bulk_import_story_payload(
         user_id=user_id,
         branch_id=branch_id,
     )
-    normalized_replace_sections = [item for item in replace_existing_sections if item in IMPORTABLE_SECTIONS]
-    existing_entities_by_section: dict[str, list[Any]] = {}
-
-    warnings: list[str] = []
-    preflight_result = await run_story_bulk_import_guard(
+    workflow_id = _build_workflow_id("bulk_import")
+    payload_snapshot = payload.model_dump(mode="json")
+    input_counts = _build_import_section_counts(payload_snapshot)
+    task_state = await _create_workflow_task_state(
         session,
+        workflow_id=workflow_id,
+        workflow_type="bulk_import",
         project_id=project_id,
         user_id=user_id,
-        branch_id=resolved_branch_id,
-        payload=payload.model_dump(mode="json"),
+        chapter_id=None,
+        chapter_number=None,
+        initial_message="正在导入起盘设定、三级大纲和基础圣经。",
+        initial_result={
+            **_build_workflow_task_base_result(
+                workflow_id=workflow_id,
+                workflow_type="bulk_import",
+                workflow_status="running",
+                chapter_number=None,
+                chapter_title=None,
+                branch_id=resolved_branch_id,
+            ),
+            "incoming_counts": input_counts,
+        },
     )
-    _raise_when_bulk_import_guard_blocks(preflight_result)
-    _extend_import_preflight_warnings(warnings, preflight_result)
-    if len(normalized_replace_sections) != len(replace_existing_sections):
-        _append_import_warning(warnings, "部分 replace_existing_sections 无效，已自动忽略。")
+    workflow_timeline: list[dict[str, Any]] = []
+    normalized_replace_sections = [item for item in replace_existing_sections if item in IMPORTABLE_SECTIONS]
+    existing_entities_by_section: dict[str, list[Any]] = {}
+    warnings: list[str] = []
 
-    for section in normalized_replace_sections:
-        existing_entities_by_section[section] = await list_entities(
+    async def record_event(
+        *,
+        stage: str,
+        status: str,
+        label: str,
+        message: str | None = None,
+        details: dict[str, Any] | None = None,
+        finalize: bool = False,
+        result_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workflow_event = _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="bulk_import",
+            stage=stage,
+            status=status,
+            label=label,
+            message=message,
+            branch_id=resolved_branch_id,
+            details=details,
+        )
+        next_result_patch = dict(result_patch or {})
+        if "workflow_timeline" in next_result_patch:
+            next_result_patch["workflow_timeline"] = workflow_timeline
+        await _persist_workflow_task_event(
+            session,
+            task_state=task_state,
+            project_id=project_id,
+            user_id=user_id,
+            chapter_id=None,
+            workflow_type="bulk_import",
+            workflow_event=workflow_event,
+            result_patch=next_result_patch or None,
+            finalize=finalize,
+        )
+        return workflow_event
+
+    try:
+        await record_event(
+            stage="bulk_import_started",
+            status="started",
+            label="开始导入起盘设定",
+            message="正在检查这批起盘设定，并准备写入项目圣经。",
+            details={
+                "incoming_counts": input_counts,
+                "replace_section_count": len(replace_existing_sections),
+            },
+        )
+
+        preflight_result = await run_story_bulk_import_guard(
             session,
             project_id=project_id,
             user_id=user_id,
-            entity_type=section,
-            branch_id=resolved_branch_id if section in {"outlines", "chapter_summaries"} else None,
+            branch_id=resolved_branch_id,
+            payload=payload_snapshot,
         )
-        if section == "outlines" and any(
-            getattr(entity, "locked", False) for entity in existing_entities_by_section[section]
-        ):
-            _append_import_warning(
-                warnings,
-                "一级大纲已锁定；覆盖导入时只会替换可编辑卷纲和章纲，主线圣经保持不动。",
-            )
+        _raise_when_bulk_import_guard_blocks(preflight_result)
+        _extend_import_preflight_warnings(warnings, preflight_result)
+        if len(normalized_replace_sections) != len(replace_existing_sections):
+            _append_import_warning(warnings, "部分 replace_existing_sections 无效，已自动忽略。")
 
-    imported_counts = {section: 0 for section in IMPORTABLE_SECTIONS}
-    imported_signatures = {section: set() for section in IMPORTABLE_SECTIONS}
+        await record_event(
+            stage="bulk_import_preflight_checked",
+            status="completed",
+            label="导入前检查已完成",
+            message=str(preflight_result.get("message") or "").strip() or "这批设定可以开始导入。",
+            details={
+                "blocking_issue_count": int(preflight_result.get("blocking_issue_count") or 0),
+                "warning_count": int(preflight_result.get("warning_count") or 0),
+                "incoming_counts": input_counts,
+            },
+        )
 
-    # 先导入世界规则，再导入人物，避免人物能力依赖的底层规则在守护校验时不可见。
-    for item in payload.world_rules:
-        item_payload = item.model_dump()
-        imported_signatures["world_rules"].add(
-            _build_import_payload_signature("world_rules", item_payload)
-        )
-        existing = await _find_by_field(
-            session,
-            project_id=project_id,
-            entity_type="world_rules",
-            field_name="rule_name",
-            field_value=item.rule_name,
-        )
-        mutation_result = await save_story_knowledge(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key="world_rules",
-            item=item_payload,
-            entity_id=str(existing.rule_id) if existing is not None else None,
-            source_workflow="bulk_import",
-            guard_operation="导入",
-            skip_guard=True,
-        )
-        _extend_import_guard_warnings(
-            warnings,
-            section_key="world_rules",
-            item_label=item.rule_name,
-            mutation_result=mutation_result,
-        )
-        imported_counts["world_rules"] += 1
-
-    for item in payload.characters:
-        item_payload = item.model_dump()
-        imported_signatures["characters"].add(
-            _build_import_payload_signature("characters", item_payload)
-        )
-        existing = await _find_by_field(
-            session,
-            project_id=project_id,
-            entity_type="characters",
-            field_name="name",
-            field_value=item.name,
-        )
-        mutation_result = await save_story_knowledge(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key="characters",
-            item=item_payload,
-            entity_id=str(existing.character_id) if existing is not None else None,
-            source_workflow="bulk_import",
-            guard_operation="导入",
-            skip_guard=True,
-        )
-        _extend_import_guard_warnings(
-            warnings,
-            section_key="characters",
-            item_label=item.name,
-            mutation_result=mutation_result,
-        )
-        imported_counts["characters"] += 1
-
-    for item in payload.foreshadows:
-        item_payload = item.model_dump()
-        imported_signatures["foreshadows"].add(
-            _build_import_payload_signature("foreshadows", item_payload)
-        )
-        existing = await _find_by_field(
-            session,
-            project_id=project_id,
-            entity_type="foreshadows",
-            field_name="content",
-            field_value=item.content,
-        )
-        mutation_result = await save_story_knowledge(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key="foreshadows",
-            item=item_payload,
-            entity_id=str(existing.foreshadow_id) if existing is not None else None,
-            source_workflow="bulk_import",
-            guard_operation="导入",
-            skip_guard=True,
-        )
-        _extend_import_guard_warnings(
-            warnings,
-            section_key="foreshadows",
-            item_label=_build_import_item_label("foreshadows", item_payload),
-            mutation_result=mutation_result,
-        )
-        imported_counts["foreshadows"] += 1
-
-    for item in payload.items:
-        item_payload = item.model_dump()
-        imported_signatures["items"].add(
-            _build_import_payload_signature("items", item_payload)
-        )
-        existing = await _find_by_field(
-            session,
-            project_id=project_id,
-            entity_type="items",
-            field_name="name",
-            field_value=item.name,
-        )
-        mutation_result = await save_story_knowledge(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key="items",
-            item=item_payload,
-            entity_id=str(existing.item_id) if existing is not None else None,
-            source_workflow="bulk_import",
-            guard_operation="导入",
-            skip_guard=True,
-        )
-        _extend_import_guard_warnings(
-            warnings,
-            section_key="items",
-            item_label=item.name,
-            mutation_result=mutation_result,
-        )
-        imported_counts["items"] += 1
-
-    for item in payload.timeline_events:
-        item_payload = item.model_dump()
-        imported_signatures["timeline_events"].add(
-            _build_import_payload_signature("timeline_events", item_payload)
-        )
-        existing = await _find_timeline_event(
-            session,
-            project_id=project_id,
-            chapter_number=item.chapter_number,
-            core_event=item.core_event,
-        )
-        mutation_result = await save_story_knowledge(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key="timeline_events",
-            item=item_payload,
-            entity_id=str(existing.event_id) if existing is not None else None,
-            source_workflow="bulk_import",
-            guard_operation="导入",
-            skip_guard=True,
-        )
-        _extend_import_guard_warnings(
-            warnings,
-            section_key="timeline_events",
-            item_label=_build_import_item_label("timeline_events", item_payload),
-            mutation_result=mutation_result,
-        )
-        imported_counts["timeline_events"] += 1
-
-    outline_parent_map: dict[str, UUID] = {}
-    for level in ("level_1", "level_2", "level_3"):
-        for item in [outline for outline in payload.outlines if outline.level == level]:
-            parent_id = outline_parent_map.get(item.parent_title or "")
-            if parent_id is None and item.parent_title:
-                parent_outline = await _find_outline_by_title(
-                    session,
-                    project_id=project_id,
-                    branch_id=resolved_branch_id,
-                    title=item.parent_title,
-                )
-                if parent_outline is not None:
-                    parent_id = parent_outline.outline_id
-            outline_payload = item.model_dump(exclude={"parent_title"})
-            if parent_id is not None:
-                outline_payload["parent_id"] = parent_id
-            imported_signatures["outlines"].add(
-                _build_import_payload_signature("outlines", outline_payload)
-            )
-            existing = await _find_outline(
+        for section in normalized_replace_sections:
+            existing_entities_by_section[section] = await list_entities(
                 session,
                 project_id=project_id,
-                branch_id=resolved_branch_id,
-                title=item.title,
-                level=item.level,
+                user_id=user_id,
+                entity_type=section,
+                branch_id=resolved_branch_id if section in {"outlines", "chapter_summaries"} else None,
             )
-            target_outline = existing
-            if item.level == "level_1" and target_outline is None:
-                target_outline = await _find_any_level_1_outline(
-                    session,
-                    project_id=project_id,
-                    branch_id=resolved_branch_id,
-                )
-            if target_outline is None:
-                mutation_result = await save_story_knowledge(
-                    session,
-                    project_id=project_id,
-                    user_id=user_id,
-                    section_key="outlines",
-                    item=outline_payload,
-                    branch_id=resolved_branch_id,
-                    source_workflow="bulk_import",
-                    guard_operation="导入",
-                    skip_guard=True,
-                )
-                _extend_import_guard_warnings(
+            if section == "outlines" and any(
+                getattr(entity, "locked", False) for entity in existing_entities_by_section[section]
+            ):
+                _append_import_warning(
                     warnings,
-                    section_key="outlines",
-                    item_label=item.title,
-                    mutation_result=mutation_result,
+                    "一级大纲已锁定；覆盖导入时只会替换可编辑卷纲和章纲，主线圣经保持不动。",
                 )
-                created = await _find_outline(
+
+        if normalized_replace_sections:
+            await record_event(
+                stage="bulk_import_replace_scope_prepared",
+                status="completed",
+                label="覆盖区块已确认",
+                message=f"这次会按区块替换：{'、'.join(SECTION_LABEL_MAP[item] for item in normalized_replace_sections)}。",
+                details={
+                    "replaced_sections": normalized_replace_sections,
+                    "replace_section_count": len(normalized_replace_sections),
+                },
+            )
+
+        imported_counts = {section: 0 for section in IMPORTABLE_SECTIONS}
+        imported_signatures = {section: set() for section in IMPORTABLE_SECTIONS}
+
+        # 先导入世界规则，再导入人物，避免人物能力依赖的底层规则在守护校验时不可见。
+        for item in payload.world_rules:
+            item_payload = item.model_dump()
+            imported_signatures["world_rules"].add(
+                _build_import_payload_signature("world_rules", item_payload)
+            )
+            existing = await _find_by_field(
+                session,
+                project_id=project_id,
+                entity_type="world_rules",
+                field_name="rule_name",
+                field_value=item.rule_name,
+            )
+            mutation_result = await save_story_knowledge(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                section_key="world_rules",
+                item=item_payload,
+                entity_id=str(existing.rule_id) if existing is not None else None,
+                source_workflow="bulk_import",
+                guard_operation="导入",
+                skip_guard=True,
+            )
+            _extend_import_guard_warnings(
+                warnings,
+                section_key="world_rules",
+                item_label=item.rule_name,
+                mutation_result=mutation_result,
+            )
+            imported_counts["world_rules"] += 1
+
+        if _should_emit_bulk_import_section_event(
+            section_key="world_rules",
+            input_counts=input_counts,
+            replace_existing_sections=normalized_replace_sections,
+        ):
+            await record_event(
+                stage="bulk_import_world_rules",
+                status="completed",
+                label="规则设定已导入",
+                message=_build_bulk_import_section_message(
+                    "world_rules",
+                    imported_counts["world_rules"],
+                    replace_mode="world_rules" in normalized_replace_sections,
+                ),
+                details={
+                    "section_key": "world_rules",
+                    "imported_count": imported_counts["world_rules"],
+                    "replace_mode": "world_rules" in normalized_replace_sections,
+                },
+            )
+
+        for item in payload.characters:
+            item_payload = item.model_dump()
+            imported_signatures["characters"].add(
+                _build_import_payload_signature("characters", item_payload)
+            )
+            existing = await _find_by_field(
+                session,
+                project_id=project_id,
+                entity_type="characters",
+                field_name="name",
+                field_value=item.name,
+            )
+            mutation_result = await save_story_knowledge(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                section_key="characters",
+                item=item_payload,
+                entity_id=str(existing.character_id) if existing is not None else None,
+                source_workflow="bulk_import",
+                guard_operation="导入",
+                skip_guard=True,
+            )
+            _extend_import_guard_warnings(
+                warnings,
+                section_key="characters",
+                item_label=item.name,
+                mutation_result=mutation_result,
+            )
+            imported_counts["characters"] += 1
+
+        if _should_emit_bulk_import_section_event(
+            section_key="characters",
+            input_counts=input_counts,
+            replace_existing_sections=normalized_replace_sections,
+        ):
+            await record_event(
+                stage="bulk_import_characters",
+                status="completed",
+                label="人物设定已导入",
+                message=_build_bulk_import_section_message(
+                    "characters",
+                    imported_counts["characters"],
+                    replace_mode="characters" in normalized_replace_sections,
+                ),
+                details={
+                    "section_key": "characters",
+                    "imported_count": imported_counts["characters"],
+                    "replace_mode": "characters" in normalized_replace_sections,
+                },
+            )
+
+        for item in payload.foreshadows:
+            item_payload = item.model_dump()
+            imported_signatures["foreshadows"].add(
+                _build_import_payload_signature("foreshadows", item_payload)
+            )
+            existing = await _find_by_field(
+                session,
+                project_id=project_id,
+                entity_type="foreshadows",
+                field_name="content",
+                field_value=item.content,
+            )
+            mutation_result = await save_story_knowledge(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                section_key="foreshadows",
+                item=item_payload,
+                entity_id=str(existing.foreshadow_id) if existing is not None else None,
+                source_workflow="bulk_import",
+                guard_operation="导入",
+                skip_guard=True,
+            )
+            _extend_import_guard_warnings(
+                warnings,
+                section_key="foreshadows",
+                item_label=_build_import_item_label("foreshadows", item_payload),
+                mutation_result=mutation_result,
+            )
+            imported_counts["foreshadows"] += 1
+
+        if _should_emit_bulk_import_section_event(
+            section_key="foreshadows",
+            input_counts=input_counts,
+            replace_existing_sections=normalized_replace_sections,
+        ):
+            await record_event(
+                stage="bulk_import_foreshadows",
+                status="completed",
+                label="伏笔设定已导入",
+                message=_build_bulk_import_section_message(
+                    "foreshadows",
+                    imported_counts["foreshadows"],
+                    replace_mode="foreshadows" in normalized_replace_sections,
+                ),
+                details={
+                    "section_key": "foreshadows",
+                    "imported_count": imported_counts["foreshadows"],
+                    "replace_mode": "foreshadows" in normalized_replace_sections,
+                },
+            )
+
+        for item in payload.items:
+            item_payload = item.model_dump()
+            imported_signatures["items"].add(
+                _build_import_payload_signature("items", item_payload)
+            )
+            existing = await _find_by_field(
+                session,
+                project_id=project_id,
+                entity_type="items",
+                field_name="name",
+                field_value=item.name,
+            )
+            mutation_result = await save_story_knowledge(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                section_key="items",
+                item=item_payload,
+                entity_id=str(existing.item_id) if existing is not None else None,
+                source_workflow="bulk_import",
+                guard_operation="导入",
+                skip_guard=True,
+            )
+            _extend_import_guard_warnings(
+                warnings,
+                section_key="items",
+                item_label=item.name,
+                mutation_result=mutation_result,
+            )
+            imported_counts["items"] += 1
+
+        if _should_emit_bulk_import_section_event(
+            section_key="items",
+            input_counts=input_counts,
+            replace_existing_sections=normalized_replace_sections,
+        ):
+            await record_event(
+                stage="bulk_import_items",
+                status="completed",
+                label="物品设定已导入",
+                message=_build_bulk_import_section_message(
+                    "items",
+                    imported_counts["items"],
+                    replace_mode="items" in normalized_replace_sections,
+                ),
+                details={
+                    "section_key": "items",
+                    "imported_count": imported_counts["items"],
+                    "replace_mode": "items" in normalized_replace_sections,
+                },
+            )
+
+        for item in payload.timeline_events:
+            item_payload = item.model_dump()
+            imported_signatures["timeline_events"].add(
+                _build_import_payload_signature("timeline_events", item_payload)
+            )
+            existing = await _find_timeline_event(
+                session,
+                project_id=project_id,
+                chapter_number=item.chapter_number,
+                core_event=item.core_event,
+            )
+            mutation_result = await save_story_knowledge(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+                section_key="timeline_events",
+                item=item_payload,
+                entity_id=str(existing.event_id) if existing is not None else None,
+                source_workflow="bulk_import",
+                guard_operation="导入",
+                skip_guard=True,
+            )
+            _extend_import_guard_warnings(
+                warnings,
+                section_key="timeline_events",
+                item_label=_build_import_item_label("timeline_events", item_payload),
+                mutation_result=mutation_result,
+            )
+            imported_counts["timeline_events"] += 1
+
+        if _should_emit_bulk_import_section_event(
+            section_key="timeline_events",
+            input_counts=input_counts,
+            replace_existing_sections=normalized_replace_sections,
+        ):
+            await record_event(
+                stage="bulk_import_timeline_events",
+                status="completed",
+                label="时间线设定已导入",
+                message=_build_bulk_import_section_message(
+                    "timeline_events",
+                    imported_counts["timeline_events"],
+                    replace_mode="timeline_events" in normalized_replace_sections,
+                ),
+                details={
+                    "section_key": "timeline_events",
+                    "imported_count": imported_counts["timeline_events"],
+                    "replace_mode": "timeline_events" in normalized_replace_sections,
+                },
+            )
+
+        outline_parent_map: dict[str, UUID] = {}
+        for level in ("level_1", "level_2", "level_3"):
+            for item in [outline for outline in payload.outlines if outline.level == level]:
+                parent_id = outline_parent_map.get(item.parent_title or "")
+                if parent_id is None and item.parent_title:
+                    parent_outline = await _find_outline_by_title(
+                        session,
+                        project_id=project_id,
+                        branch_id=resolved_branch_id,
+                        title=item.parent_title,
+                    )
+                    if parent_outline is not None:
+                        parent_id = parent_outline.outline_id
+                outline_payload = item.model_dump(exclude={"parent_title"})
+                if parent_id is not None:
+                    outline_payload["parent_id"] = parent_id
+                imported_signatures["outlines"].add(
+                    _build_import_payload_signature("outlines", outline_payload)
+                )
+                existing = await _find_outline(
                     session,
                     project_id=project_id,
                     branch_id=resolved_branch_id,
                     title=item.title,
                     level=item.level,
                 )
-                if created is None:
-                    raise AppError(
-                        code="story_engine.import_outline_not_found",
-                        message=f"大纲《{item.title}》导入后未能成功落库，请重试。",
-                        status_code=500,
+                target_outline = existing
+                if item.level == "level_1" and target_outline is None:
+                    target_outline = await _find_any_level_1_outline(
+                        session,
+                        project_id=project_id,
+                        branch_id=resolved_branch_id,
                     )
-            else:
-                if item.level == "level_1" and getattr(target_outline, "locked", False):
-                    _append_import_warning(
-                        warnings,
-                        f"一级大纲《{target_outline.title}》已锁定，这次导入保留原主线不覆盖。",
-                    )
-                    created = target_outline
-                else:
+                if target_outline is None:
                     mutation_result = await save_story_knowledge(
                         session,
                         project_id=project_id,
                         user_id=user_id,
                         section_key="outlines",
                         item=outline_payload,
-                        entity_id=str(target_outline.outline_id),
                         branch_id=resolved_branch_id,
                         source_workflow="bulk_import",
                         guard_operation="导入",
@@ -547,79 +719,217 @@ async def bulk_import_story_payload(
                         branch_id=resolved_branch_id,
                         title=item.title,
                         level=item.level,
-                    ) or target_outline
-            outline_parent_map[item.title] = created.outline_id
-            imported_counts["outlines"] += 1
+                    )
+                    if created is None:
+                        raise AppError(
+                            code="story_engine.import_outline_not_found",
+                            message=f"大纲《{item.title}》导入后未能成功落库，请重试。",
+                            status_code=500,
+                        )
+                else:
+                    if item.level == "level_1" and getattr(target_outline, "locked", False):
+                        _append_import_warning(
+                            warnings,
+                            f"一级大纲《{target_outline.title}》已锁定，这次导入保留原主线不覆盖。",
+                        )
+                        created = target_outline
+                    else:
+                        mutation_result = await save_story_knowledge(
+                            session,
+                            project_id=project_id,
+                            user_id=user_id,
+                            section_key="outlines",
+                            item=outline_payload,
+                            entity_id=str(target_outline.outline_id),
+                            branch_id=resolved_branch_id,
+                            source_workflow="bulk_import",
+                            guard_operation="导入",
+                            skip_guard=True,
+                        )
+                        _extend_import_guard_warnings(
+                            warnings,
+                            section_key="outlines",
+                            item_label=item.title,
+                            mutation_result=mutation_result,
+                        )
+                        created = await _find_outline(
+                            session,
+                            project_id=project_id,
+                            branch_id=resolved_branch_id,
+                            title=item.title,
+                            level=item.level,
+                        ) or target_outline
+                outline_parent_map[item.title] = created.outline_id
+                imported_counts["outlines"] += 1
 
-    for item in payload.chapter_summaries:
-        item_payload = item.model_dump()
-        imported_signatures["chapter_summaries"].add(
-            _build_import_payload_signature("chapter_summaries", item_payload)
-        )
-        existing = await _find_chapter_summary(
-            session,
-            project_id=project_id,
-            branch_id=resolved_branch_id,
-            chapter_number=item.chapter_number,
-        )
-        mutation_result = await save_story_knowledge(
-            session,
-            project_id=project_id,
-            user_id=user_id,
-            section_key="chapter_summaries",
-            item=item_payload,
-            entity_id=str(existing.summary_id) if existing is not None else None,
-            branch_id=resolved_branch_id,
-            source_workflow="bulk_import",
-            guard_operation="导入",
-            skip_guard=True,
-        )
-        _extend_import_guard_warnings(
-            warnings,
-            section_key="chapter_summaries",
-            item_label=_build_import_item_label("chapter_summaries", item_payload),
-            mutation_result=mutation_result,
-        )
-        imported_counts["chapter_summaries"] += 1
+        if _should_emit_bulk_import_section_event(
+            section_key="outlines",
+            input_counts=input_counts,
+            replace_existing_sections=normalized_replace_sections,
+        ):
+            await record_event(
+                stage="bulk_import_outlines",
+                status="completed",
+                label="三级大纲已导入",
+                message=_build_bulk_import_section_message(
+                    "outlines",
+                    imported_counts["outlines"],
+                    replace_mode="outlines" in normalized_replace_sections,
+                ),
+                details={
+                    "section_key": "outlines",
+                    "imported_count": imported_counts["outlines"],
+                    "replace_mode": "outlines" in normalized_replace_sections,
+                },
+            )
 
-    for section in normalized_replace_sections:
-        for entity in existing_entities_by_section.get(section, []):
-            if section == "outlines" and getattr(entity, "locked", False):
-                continue
-            identity_signature = _build_import_entity_signature(section, entity)
-            if identity_signature in imported_signatures[section]:
-                continue
-            await delete_story_knowledge(
+        for item in payload.chapter_summaries:
+            item_payload = item.model_dump()
+            imported_signatures["chapter_summaries"].add(
+                _build_import_payload_signature("chapter_summaries", item_payload)
+            )
+            existing = await _find_chapter_summary(
+                session,
+                project_id=project_id,
+                branch_id=resolved_branch_id,
+                chapter_number=item.chapter_number,
+            )
+            mutation_result = await save_story_knowledge(
                 session,
                 project_id=project_id,
                 user_id=user_id,
-                section_key=section,
-                entity_id=str(getattr(entity, SECTION_ID_FIELD_MAP[section])),
-                branch_id=resolved_branch_id if section in {"outlines", "chapter_summaries"} else None,
+                section_key="chapter_summaries",
+                item=item_payload,
+                entity_id=str(existing.summary_id) if existing is not None else None,
+                branch_id=resolved_branch_id,
                 source_workflow="bulk_import",
+                guard_operation="导入",
+                skip_guard=True,
+            )
+            _extend_import_guard_warnings(
+                warnings,
+                section_key="chapter_summaries",
+                item_label=_build_import_item_label("chapter_summaries", item_payload),
+                mutation_result=mutation_result,
+            )
+            imported_counts["chapter_summaries"] += 1
+
+        if _should_emit_bulk_import_section_event(
+            section_key="chapter_summaries",
+            input_counts=input_counts,
+            replace_existing_sections=normalized_replace_sections,
+        ):
+            await record_event(
+                stage="bulk_import_chapter_summaries",
+                status="completed",
+                label="章节总结已导入",
+                message=_build_bulk_import_section_message(
+                    "chapter_summaries",
+                    imported_counts["chapter_summaries"],
+                    replace_mode="chapter_summaries" in normalized_replace_sections,
+                ),
+                details={
+                    "section_key": "chapter_summaries",
+                    "imported_count": imported_counts["chapter_summaries"],
+                    "replace_mode": "chapter_summaries" in normalized_replace_sections,
+                },
             )
 
-    applied_model_preset_label: str | None = None
-    if model_preset_key:
-        project = await get_story_engine_project(
-            session,
-            project_id,
-            user_id,
-            permission=PROJECT_PERMISSION_EDIT,
-        )
-        project.story_engine_settings = build_story_engine_settings_for_preset(model_preset_key)
-        session.add(project)
-        await session.commit()
-        await session.refresh(project)
-        applied_model_preset_label = get_story_engine_model_preset_label(model_preset_key)
+        for section in normalized_replace_sections:
+            for entity in existing_entities_by_section.get(section, []):
+                if section == "outlines" and getattr(entity, "locked", False):
+                    continue
+                identity_signature = _build_import_entity_signature(section, entity)
+                if identity_signature in imported_signatures[section]:
+                    continue
+                await delete_story_knowledge(
+                    session,
+                    project_id=project_id,
+                    user_id=user_id,
+                    section_key=section,
+                    entity_id=str(getattr(entity, SECTION_ID_FIELD_MAP[section])),
+                    branch_id=resolved_branch_id if section in {"outlines", "chapter_summaries"} else None,
+                    source_workflow="bulk_import",
+                )
 
-    return {
-        "imported_counts": imported_counts,
-        "replaced_sections": normalized_replace_sections,
-        "applied_model_preset_key": model_preset_key,
-        "applied_model_preset_label": applied_model_preset_label,
-        "warnings": warnings,
-    }
+        applied_model_preset_label: str | None = None
+        if model_preset_key:
+            project = await get_story_engine_project(
+                session,
+                project_id,
+                user_id,
+                permission=PROJECT_PERMISSION_EDIT,
+            )
+            project.story_engine_settings = build_story_engine_settings_for_preset(model_preset_key)
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            applied_model_preset_label = get_story_engine_model_preset_label(model_preset_key)
+            await record_event(
+                stage="bulk_import_model_preset_applied",
+                status="completed",
+                label="后台策略已套用",
+                message=f"已套用后台策略：{applied_model_preset_label}。",
+                details={
+                    "applied_model_preset_key": model_preset_key,
+                    "applied_model_preset_label": applied_model_preset_label,
+                },
+            )
+
+        response = {
+            "imported_counts": imported_counts,
+            "replaced_sections": normalized_replace_sections,
+            "applied_model_preset_key": model_preset_key,
+            "applied_model_preset_label": applied_model_preset_label,
+            "warnings": warnings,
+            "workflow_timeline": workflow_timeline,
+        }
+        await record_event(
+            stage="bulk_import_completed",
+            status="completed",
+            label="起盘设定已经导入",
+            message=_build_bulk_import_completed_message(response),
+            details={
+                "imported_total": sum(imported_counts.values()),
+                "warning_count": len(warnings),
+                "replace_section_count": len(normalized_replace_sections),
+            },
+            finalize=True,
+            result_patch={
+                **_build_workflow_task_base_result(
+                    workflow_id=workflow_id,
+                    workflow_type="bulk_import",
+                    workflow_status="completed",
+                    chapter_number=None,
+                    chapter_title=None,
+                    branch_id=resolved_branch_id,
+                    workflow_timeline=workflow_timeline,
+                ),
+                "incoming_counts": input_counts,
+                "imported_counts": imported_counts,
+                "replaced_sections": normalized_replace_sections,
+                "warning_count": len(warnings),
+                "applied_model_preset_key": model_preset_key,
+                "applied_model_preset_label": applied_model_preset_label,
+            },
+        )
+        return response
+    except Exception as exc:
+        await _persist_workflow_task_failure(
+            session,
+            task_state=task_state,
+            project_id=project_id,
+            user_id=user_id,
+            chapter_id=None,
+            workflow_id=workflow_id,
+            workflow_type="bulk_import",
+            chapter_number=None,
+            chapter_title=None,
+            branch_id=resolved_branch_id,
+            error=exc,
+            workflow_timeline=workflow_timeline,
+        )
+        raise
 
 
 def _raise_when_bulk_import_guard_blocks(guard_result: dict[str, Any]) -> None:
@@ -747,6 +1057,48 @@ def _build_import_item_label(section_key: str, item: dict[str, Any]) -> str:
         if value:
             return value
     return SECTION_LABEL_MAP.get(section_key, section_key)
+
+
+def _build_import_section_counts(payload: dict[str, Any]) -> dict[str, int]:
+    return {
+        section: len(payload.get(section) or [])
+        for section in IMPORTABLE_SECTIONS
+    }
+
+
+def _should_emit_bulk_import_section_event(
+    *,
+    section_key: str,
+    input_counts: dict[str, int],
+    replace_existing_sections: list[str],
+) -> bool:
+    return int(input_counts.get(section_key) or 0) > 0 or section_key in replace_existing_sections
+
+
+def _build_bulk_import_section_message(
+    section_key: str,
+    imported_count: int,
+    *,
+    replace_mode: bool,
+) -> str:
+    section_label = SECTION_LABEL_MAP.get(section_key, section_key)
+    if replace_mode:
+        return f"{section_label}已导入 {imported_count} 条，并按区块清理了旧条目。"
+    return f"{section_label}已导入 {imported_count} 条。"
+
+
+def _build_bulk_import_completed_message(result: dict[str, Any]) -> str:
+    imported_counts = dict(result.get("imported_counts") or {})
+    pieces = [
+        f"{SECTION_LABEL_MAP.get(section, section)}{count}条"
+        for section, count in imported_counts.items()
+        if int(count or 0) > 0
+    ]
+    summary = "，".join(pieces) if pieces else "设定包已经导入"
+    warning_count = len(result.get("warnings") or [])
+    if warning_count > 0:
+        return f"起盘设定已导入：{summary}。另有 {warning_count} 条提醒可稍后处理。"
+    return f"起盘设定已导入：{summary}。"
 
 
 async def _find_by_field(

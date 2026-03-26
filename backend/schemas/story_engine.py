@@ -571,6 +571,7 @@ class OutlineStressTestResponse(ORMModel):
     debate_rounds_completed: int = 0
     agent_reports: list[StoryEngineAgentReportRead] = Field(default_factory=list)
     deliberation_rounds: list[StoryEngineDeliberationRoundRead] = Field(default_factory=list)
+    workflow_timeline: list[StoryEngineWorkflowEventRead] = Field(default_factory=list)
 
 
 class RealtimeGuardRequest(ORMModel):
@@ -707,6 +708,7 @@ class StoryBulkImportResponse(ORMModel):
     applied_model_preset_key: Optional[str] = None
     applied_model_preset_label: Optional[str] = None
     warnings: list[str] = Field(default_factory=list)
+    workflow_timeline: list[StoryEngineWorkflowEventRead] = Field(default_factory=list)
 
 
 class StoryGeneratedCandidateAcceptRequest(ORMModel):
