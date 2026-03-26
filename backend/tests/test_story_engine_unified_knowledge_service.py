@@ -31,7 +31,12 @@ class StoryEngineUnifiedKnowledgeServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "services.story_engine_unified_knowledge_service.update_entity",
-            AsyncMock(),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    character_id=entity_id,
+                    name="林澈",
+                )
+            ),
         ) as mocked_update, patch(
             "services.story_engine_unified_knowledge_service.create_entity",
             AsyncMock(),
@@ -61,6 +66,8 @@ class StoryEngineUnifiedKnowledgeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["name"], "林澈")
         self.assertEqual(payload["personality"], "警惕而克制")
         self.assertEqual(result["message"], "这条设定已保存，并通过守护校验。")
+        self.assertEqual(result["entity_locator"]["entity_id"], str(entity_id))
+        self.assertEqual(result["entity_locator"]["label"], "林澈")
 
     async def test_save_story_knowledge_routes_location_update_to_story_bible(self) -> None:
         project_id = uuid4()
@@ -106,6 +113,8 @@ class StoryEngineUnifiedKnowledgeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delete_payload.section_key, "locations")
         self.assertEqual(delete_payload.entity_key, "name:旧港口")
         self.assertIn("连续性提醒", result["message"])
+        self.assertEqual(result["entity_locator"]["entity_key"], "name:新港口")
+        self.assertEqual(result["entity_locator"]["label"], "新港口")
 
     async def test_delete_story_knowledge_routes_structured_section_to_entity_delete(self) -> None:
         project_id = uuid4()
@@ -113,6 +122,14 @@ class StoryEngineUnifiedKnowledgeServiceTests(unittest.IsolatedAsyncioTestCase):
         entity_id = uuid4()
 
         with patch(
+            "services.story_engine_unified_knowledge_service.get_entity",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    rule_id=entity_id,
+                    rule_name="潮汐法则",
+                )
+            ),
+        ), patch(
             "services.story_engine_unified_knowledge_service.delete_entity",
             AsyncMock(),
         ) as mocked_delete, patch(
@@ -131,6 +148,9 @@ class StoryEngineUnifiedKnowledgeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mocked_delete.await_args.kwargs["entity_type"], "world_rules")
         self.assertEqual(mocked_delete.await_args.kwargs["entity_id"], entity_id)
         self.assertEqual(result["message"], "这条设定已删除，并通过守护校验。")
+        self.assertEqual(result["entity_locator"]["entity_id"], str(entity_id))
+        self.assertEqual(result["entity_locator"]["entity_key"], f"id:{entity_id}")
+        self.assertEqual(result["entity_locator"]["label"], "潮汐法则")
 
     async def test_save_story_knowledge_raises_when_guard_blocks(self) -> None:
         project_id = uuid4()

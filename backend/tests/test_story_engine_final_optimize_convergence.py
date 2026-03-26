@@ -139,6 +139,16 @@ class StoryEngineFinalOptimizeConvergenceTests(unittest.IsolatedAsyncioTestCase)
         self.assertTrue(result["ready_for_publish"])
         self.assertEqual(result["remaining_issue_count"], 0)
         self.assertIn("已经收口 2 轮", result["quality_summary"])
+        self.assertEqual(result["workflow_timeline"][0]["stage"], "final_optimize_started")
+        self.assertIn(
+            "guardian_review",
+            [item["stage"] for item in result["workflow_timeline"]],
+        )
+        self.assertEqual(result["workflow_timeline"][-1]["stage"], "final_optimize_completed")
+        self.assertIn(
+            "chapter_summary_persisted",
+            [item["stage"] for item in result["workflow_timeline"]],
+        )
 
     async def test_final_optimize_marks_needs_attention_when_issue_stabilizes(self) -> None:
         project_id = uuid4()

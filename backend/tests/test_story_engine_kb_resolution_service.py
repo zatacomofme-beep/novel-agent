@@ -18,6 +18,7 @@ class StoryEngineKBResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
         applied_entity_id = uuid4()
         summary = SimpleNamespace(
             summary_id=summary_id,
+            branch_id=uuid4(),
             chapter_number=12,
             kb_update_suggestions=[
                 {
@@ -32,6 +33,7 @@ class StoryEngineKBResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         updated_summary = SimpleNamespace(
             summary_id=summary_id,
+            branch_id=summary.branch_id,
             chapter_number=12,
             kb_update_suggestions=[
                 {
@@ -81,6 +83,7 @@ class StoryEngineKBResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
         summary_id = uuid4()
         summary = SimpleNamespace(
             summary_id=summary_id,
+            branch_id=uuid4(),
             chapter_number=3,
             kb_update_suggestions=[
                 {
@@ -95,6 +98,7 @@ class StoryEngineKBResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         updated_summary = SimpleNamespace(
             summary_id=summary_id,
+            branch_id=summary.branch_id,
             chapter_number=3,
             kb_update_suggestions=[
                 {

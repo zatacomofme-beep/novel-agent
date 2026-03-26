@@ -47,6 +47,9 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
             "services.story_engine_import_service.get_story_engine_project",
             AsyncMock(return_value=SimpleNamespace()),
         ), patch(
+            "services.story_engine_import_service._resolve_import_branch_id",
+            AsyncMock(return_value=uuid4()),
+        ), patch(
             "services.story_engine_import_service.run_story_bulk_import_guard",
             AsyncMock(return_value=_ok_mutation_result()),
         ), patch(
@@ -99,6 +102,9 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "services.story_engine_import_service.get_story_engine_project",
             AsyncMock(return_value=SimpleNamespace()),
+        ), patch(
+            "services.story_engine_import_service._resolve_import_branch_id",
+            AsyncMock(return_value=uuid4()),
         ), patch(
             "services.story_engine_import_service.run_story_bulk_import_guard",
             AsyncMock(return_value=_ok_mutation_result()),
@@ -159,6 +165,9 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
             "services.story_engine_import_service.get_story_engine_project",
             AsyncMock(return_value=SimpleNamespace()),
         ), patch(
+            "services.story_engine_import_service._resolve_import_branch_id",
+            AsyncMock(return_value=uuid4()),
+        ), patch(
             "services.story_engine_import_service.run_story_bulk_import_guard",
             AsyncMock(return_value=_ok_mutation_result()),
         ), patch(
@@ -216,6 +225,9 @@ class StoryEngineImportServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "services.story_engine_import_service.get_story_engine_project",
             AsyncMock(return_value=SimpleNamespace()),
+        ), patch(
+            "services.story_engine_import_service._resolve_import_branch_id",
+            AsyncMock(return_value=uuid4()),
         ), patch(
             "services.story_engine_import_service.run_story_bulk_import_guard",
             AsyncMock(return_value=blocked_result),

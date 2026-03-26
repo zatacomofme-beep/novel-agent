@@ -127,6 +127,9 @@ Meaning:
 - `story-room` 已经是写手前台的真实主入口
 - 它一边消费 Story Engine 工作流，一边把正文落入正式 `Chapter` 主链
 - 它现在只暴露写手必要信息，完整 review/comment/checkpoint 仍保留在独立章节编辑器
+- workspace 返回里已经补入 `knowledge_provenance`，后台可以按实体维度给出来源章节、关联设定和最近变更摘要，前台暂时仍保持黑盒
+- `realtime-guard` 与 `final-optimize` 现在都会返回 `workflow_timeline`
+- `chapter-stream` 的每条 NDJSON 事件现在都会带 `workflow_event`，终止事件会补齐完整 `workflow_timeline`
 
 ### Story Bible Workspace
 
@@ -169,6 +172,15 @@ Correct branch item upsert shape:
   }
 }
 ```
+
+Story knowledge mutation responses now also include:
+
+- `entity_locator`
+
+Meaning:
+
+- 保存 / 删除设定后，后台会返回稳定锚点（`section_key / entity_id / entity_key / label / branch_id`）
+- 这为后续“设定卡片定位”“正文与设定双向回跳”提供了统一坐标
 
 Primary sources:
 - `backend/schemas/project.py`

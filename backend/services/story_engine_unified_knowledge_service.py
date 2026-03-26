@@ -36,7 +36,7 @@ from services.project_service import (
     get_owned_project,
     upsert_story_bible_branch_item,
 )
-from services.story_engine_kb_service import create_entity, delete_entity, update_entity
+from services.story_engine_kb_service import create_entity, delete_entity, get_entity, update_entity
 from services.story_engine_workflow_service import run_story_knowledge_guard
 
 
@@ -156,6 +156,7 @@ async def save_story_knowledge(
     structured_spec = _get_structured_section_spec(section_key)
     if structured_spec is not None:
         validated_payload: dict[str, Any]
+        saved_entity: Any
         if entity_id:
             validated_payload = structured_spec.update_schema.model_validate(item).model_dump(
                 exclude_unset=True
@@ -186,7 +187,7 @@ async def save_story_knowledge(
             _raise_when_story_knowledge_guard_blocks(guard_result, action_label=guard_operation)
 
         if entity_id:
-            await update_entity(
+            saved_entity = await update_entity(
                 session,
                 project_id=project_id,
                 user_id=user_id,
@@ -196,7 +197,7 @@ async def save_story_knowledge(
                 source_workflow=source_workflow,
             )
         else:
-            await create_entity(
+            saved_entity = await create_entity(
                 session,
                 project_id=project_id,
                 user_id=user_id,
@@ -212,9 +213,14 @@ async def save_story_knowledge(
                 else "这条设定已保存，并沿用批量导入预检结果。"
             )
             if not guard_result["warning_count"]
-            else (
-                f"这条设定已保存，但还带出 {guard_result['warning_count']} 条连续性提醒，"
-                "最好顺手修一下。"
+                else (
+                    f"这条设定已保存，但还带出 {guard_result['warning_count']} 条连续性提醒，"
+                    "最好顺手修一下。"
+                ),
+            entity_locator=_build_structured_entity_locator(
+                section_key=section_key,
+                entity=saved_entity,
+                branch_id=branch_id,
             ),
         )
 
@@ -279,8 +285,13 @@ async def save_story_knowledge(
         )
         if not guard_result["warning_count"]
         else (
-            f"这条主设定已保存，但还带出 {guard_result['warning_count']} 条连续性提醒，"
-            "最好顺手修一下。"
+                f"这条主设定已保存，但还带出 {guard_result['warning_count']} 条连续性提醒，"
+                "最好顺手修一下。"
+            ),
+        entity_locator=_build_story_bible_entity_locator(
+            section_key=section_key,
+            item=validated_item,
+            branch_id=resolved_branch_id,
         ),
     )
 
@@ -310,6 +321,14 @@ async def delete_story_knowledge(
 
     structured_spec = _get_structured_section_spec(section_key)
     if structured_spec is not None:
+        current_entity = await get_entity(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            entity_type=structured_spec.entity_type,
+            entity_id=_parse_entity_uuid(entity_id, action_label="删除"),
+            permission=PROJECT_PERMISSION_EDIT,
+        )
         await delete_entity(
             session,
             project_id=project_id,
@@ -325,6 +344,11 @@ async def delete_story_knowledge(
             else (
                 f"这条设定已删除，但还带出 {guard_result['warning_count']} 条后续影响提醒，"
                 "最好尽快补一下。"
+            ),
+            entity_locator=_build_structured_entity_locator(
+                section_key=section_key,
+                entity=current_entity,
+                branch_id=branch_id,
             ),
         )
 
@@ -357,6 +381,13 @@ async def delete_story_knowledge(
             f"这条主设定已删除，但还带出 {guard_result['warning_count']} 条后续影响提醒，"
             "最好尽快补一下。"
         ),
+        entity_locator={
+            "section_key": section_key,
+            "entity_key": entity_id,
+            "entity_id": None,
+            "label": None,
+            "branch_id": str(_require_branch_id(branch_id, action_label="删除")),
+        },
     )
 
 
@@ -394,6 +425,7 @@ def _build_story_knowledge_mutation_response(
     guard_result: dict[str, Any],
     *,
     action_completed_message: str,
+    entity_locator: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "passed": bool(guard_result.get("passed", True)),
@@ -402,4 +434,120 @@ def _build_story_knowledge_mutation_response(
         "alerts": list(guard_result.get("alerts") or []),
         "blocking_issue_count": int(guard_result.get("blocking_issue_count") or 0),
         "warning_count": int(guard_result.get("warning_count") or 0),
+        "entity_locator": entity_locator,
     }
+
+
+def _build_structured_entity_locator(
+    *,
+    section_key: str,
+    entity: Any,
+    branch_id: UUID | None,
+) -> dict[str, Any]:
+    entity_id = _resolve_structured_entity_id(section_key, entity)
+    label = _resolve_structured_entity_label(section_key, entity)
+    return {
+        "section_key": section_key,
+        "entity_key": _resolve_structured_entity_key(
+            section_key=section_key,
+            entity_id=entity_id,
+            label=label,
+            fallback=_resolve_story_bible_entity_key(_serialize_structured_entity_locator(entity)),
+        ),
+        "entity_id": entity_id,
+        "label": label,
+        "branch_id": str(branch_id) if branch_id is not None else None,
+    }
+
+
+def _build_story_bible_entity_locator(
+    *,
+    section_key: str,
+    item: dict[str, Any],
+    branch_id: UUID,
+) -> dict[str, Any]:
+    return {
+        "section_key": section_key,
+        "entity_key": _resolve_story_bible_entity_key(item),
+        "entity_id": str(item.get("id")) if item.get("id") is not None else None,
+        "label": _resolve_story_bible_entity_label(item),
+        "branch_id": str(branch_id),
+    }
+
+
+def _resolve_structured_entity_id(section_key: str, entity: Any) -> str | None:
+    field_map = {
+        "characters": "character_id",
+        "foreshadows": "foreshadow_id",
+        "items": "item_id",
+        "world_rules": "rule_id",
+        "timeline_events": "event_id",
+        "outlines": "outline_id",
+        "chapter_summaries": "summary_id",
+    }
+    field = field_map.get(section_key)
+    if field is None:
+        return None
+    value = getattr(entity, field, None)
+    return str(value) if value is not None else None
+
+
+def _resolve_structured_entity_label(section_key: str, entity: Any) -> str | None:
+    field_map = {
+        "characters": "name",
+        "foreshadows": "content",
+        "items": "name",
+        "world_rules": "rule_name",
+        "timeline_events": "core_event",
+        "outlines": "title",
+        "chapter_summaries": "content",
+    }
+    field = field_map.get(section_key)
+    if field is None:
+        return None
+    value = getattr(entity, field, None)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _serialize_structured_entity_locator(entity: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for field in ("id", "key", "name", "title", "content", "rule_name", "core_event"):
+        value = getattr(entity, field, None)
+        if value is not None:
+            payload[field] = value
+    return payload
+
+
+def _resolve_structured_entity_key(
+    *,
+    section_key: str,
+    entity_id: str | None,
+    label: str | None,
+    fallback: str | None,
+) -> str | None:
+    if fallback:
+        return fallback
+    if entity_id:
+        return f"id:{entity_id}"
+    if not label:
+        return None
+    field_map = {
+        "world_rules": "rule_name",
+        "timeline_events": "core_event",
+    }
+    field = field_map.get(section_key, "name")
+    return f"{field}:{label}"
+
+
+def _resolve_story_bible_entity_label(item: dict[str, Any]) -> str | None:
+    for field in ("name", "title", "content", "rule_name", "key"):
+        value = item.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None

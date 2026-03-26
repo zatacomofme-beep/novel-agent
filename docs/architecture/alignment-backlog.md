@@ -106,27 +106,38 @@
 
 - 兼容读取仍然保留，主要用于历史数据、导出和旧测试夹具，不再是主链写入策略
 
+### 10. Story Bible 关联与溯源已完成第一版增强
+
+已修复：
+
+- `story-engine/workspace` 已开始返回 `knowledge_provenance`，按实体汇总来源章节、最近工作流、入向/出向关联
+- 关联覆盖了人物关系、伏笔挂钩、物品归属/地点、势力首领/成员/地盘、剧情线关注对象、时间线地点/人物状态等关键链路
+- 已应用的章节总结设定更新会被沉到对应实体的 provenance 上，后续做“设定回跳最近影响章节”时不需要再回扫整章正文
+- 统一保存/删除接口已经开始返回 `entity_locator`，后续前端可以直接拿它做稳定定位，不必再自己猜实体身份
+
+补充：
+
+- 这一步还是第一版摘要层，不是完整 citation graph
+- 但已经把“后面要做双向定位时需要哪些稳定坐标”先补齐了
+
+## 已完成收口
+
+### 11. 章节工作流事件化与可观测性增强已完成第一版
+
+已修复：
+
+- `chapter-stream` 现在会给 `start / plan / chunk / guard / done` 每一步补上统一 `workflow_event`
+- 终止事件会附带完整 `workflow_timeline`，可以直接做流式回放和失败点定位
+- `realtime-guard` 已开始返回标准化时间线，能稳定表达“开始校验 / 守护结论 / 修法生成 / 裁决停写”
+- `final-optimize` 已补上轮次级时间线，并把 `kb_updates_normalized / chapter_summary_persisted / final_optimize_completed` 这些真正落库节点也纳入观测
+- 对应回归已经覆盖 `chapter stream / realtime guard / final optimize` 三条主链
+
+补充：
+
+- 这一步仍然是 service-response 级别的第一版观测
+- 还没有把章节工作流继续沉到独立 `task_runs / task_events` 持久任务轨里
+
 ## 仍待处理
-
-### P1: Story Bible 的溯源与引用关系还不够强
-
-现象：
-
-- 当前 `items / factions` 的主存储语义已经原生化
-- 但正文引用、设定引用、分支差异来源、章节总结回写来源还没有形成统一的溯源关系层
-
-影响：
-
-- 当前前后端联调已经顺畅，领域存储也已经基本干净
-- 但后续如果要做“正文引用某条设定时可回跳来源”“为什么这一条设定在分支里变了”这类能力，现有数据还不够可追踪
-
-相关代码：
-
-- `frontend/app/dashboard/projects/[projectId]/bible/page.tsx`
-- `frontend/app/dashboard/projects/[projectId]/generations/items/page.tsx`
-- `frontend/app/dashboard/projects/[projectId]/generations/factions/page.tsx`
-- `backend/schemas/project.py`
-- `backend/services/project_service.py`
 
 ### P2: story-room 还没有完全吞下旧审校工作台
 
@@ -148,10 +159,10 @@
 
 ## 建议修复顺序
 
-1. 先继续做 Story Bible 关联与溯源增强
-2. 再决定旧章节编辑器哪些能力继续保留，哪些迁入 `story-room`
+1. 先继续收口 `story-room` 与旧章节编辑器的能力边界
+2. 再决定评论、检查点、片段改写、回滚这些深度能力哪些继续保留独立页，哪些彻底迁入 `story-room`
 
 ## 为什么这个顺序最合理
 
-- 第一项现在不再是 API 契约或存储纯化问题，而是要把设定关系与来源链补齐
-- 第二项虽然不直接改业务功能，但已经开始影响测试、导入和开发体验
+- 章节工作流的事件链已经完成第一版收口，当前更值得处理的是“写手主工作台是否真的吞下全部主流程”
+- 旧编辑器仍然承载一部分深度能力，如果不继续并轨，前台体验和维护成本都会长期分裂

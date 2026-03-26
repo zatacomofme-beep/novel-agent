@@ -311,6 +311,29 @@ class StoryEngineProjectInfo(ORMModel):
     tone: Optional[str] = None
 
 
+class StoryKnowledgeRelationRead(ORMModel):
+    relation_type: str
+    section_key: str
+    entity_key: str
+    entity_id: Optional[str] = None
+    label: str
+    detail: Optional[str] = None
+
+
+class StoryKnowledgeProvenanceRead(ORMModel):
+    section_key: str
+    entity_key: str
+    entity_id: Optional[str] = None
+    label: str
+    scope_origin: str
+    last_source_workflow: Optional[str] = None
+    last_action: Optional[str] = None
+    last_updated_at: Optional[datetime] = None
+    recent_chapters: list[int] = Field(default_factory=list)
+    inbound_relations: list[StoryKnowledgeRelationRead] = Field(default_factory=list)
+    outbound_relations: list[StoryKnowledgeRelationRead] = Field(default_factory=list)
+
+
 class StoryEngineWorkspaceRead(ORMModel):
     project: StoryEngineProjectInfo
     outlines: list[StoryOutlineRead] = Field(default_factory=list)
@@ -324,6 +347,7 @@ class StoryEngineWorkspaceRead(ORMModel):
     latest_guardian_alerts: list[dict] = Field(default_factory=list)
     latest_final_package: Optional[dict] = None
     story_bible: Optional[StoryBibleRead] = None
+    knowledge_provenance: list[StoryKnowledgeProvenanceRead] = Field(default_factory=list)
 
 
 class StoryKnowledgeUpsertRequest(ORMModel):
@@ -345,6 +369,7 @@ class StoryKnowledgeMutationResponse(ORMModel):
     alerts: list["StoryEngineIssueRead"] = Field(default_factory=list)
     blocking_issue_count: int = 0
     warning_count: int = 0
+    entity_locator: Optional[dict] = None
 
 
 class StoryEngineRoleCatalogRead(ORMModel):
@@ -463,6 +488,25 @@ class StoryEngineDeliberationRoundRead(ORMModel):
     entries: list[StoryEngineDeliberationEntryRead] = Field(default_factory=list)
 
 
+class StoryEngineWorkflowEventRead(ORMModel):
+    workflow_id: str
+    workflow_type: str
+    sequence: int = Field(ge=1)
+    stage: str
+    status: Literal["started", "completed", "paused", "skipped", "failed"]
+    label: str
+    message: Optional[str] = None
+    chapter_number: Optional[int] = None
+    chapter_title: Optional[str] = None
+    branch_id: Optional[UUID] = None
+    round_number: Optional[int] = Field(default=None, ge=1)
+    paragraph_index: Optional[int] = Field(default=None, ge=1)
+    paragraph_total: Optional[int] = Field(default=None, ge=1)
+    agent_keys: list[str] = Field(default_factory=list)
+    details: dict = Field(default_factory=dict)
+    emitted_at: datetime
+
+
 class OutlineStressTestRequest(ORMModel):
     branch_id: Optional[UUID] = None
     idea: Optional[str] = Field(default=None, min_length=1)
@@ -514,6 +558,7 @@ class RealtimeGuardResponse(ORMModel):
     alerts: list[StoryEngineIssueRead] = Field(default_factory=list)
     repair_options: list[str] = Field(default_factory=list)
     arbitration_note: Optional[str] = None
+    workflow_timeline: list[StoryEngineWorkflowEventRead] = Field(default_factory=list)
 
 
 class FinalOptimizeRequest(ORMModel):
@@ -537,6 +582,7 @@ class FinalOptimizeResponse(ORMModel):
     remaining_issue_count: int = 0
     ready_for_publish: bool = False
     quality_summary: Optional[str] = None
+    workflow_timeline: list[StoryEngineWorkflowEventRead] = Field(default_factory=list)
 
 
 class StoryKnowledgeSuggestionResolveRequest(ORMModel):
@@ -578,6 +624,7 @@ class ChapterStreamEventRead(ORMModel):
     paragraph_total: Optional[int] = None
     guard_result: Optional[RealtimeGuardResponse] = None
     metadata: dict = Field(default_factory=dict)
+    workflow_event: Optional[StoryEngineWorkflowEventRead] = None
 
 
 class StoryOutlineImportItem(ORMModel):

@@ -159,8 +159,8 @@
 | ID | 任务 | 状态 | 优先级 | 说明 | 关键文件 |
 | --- | --- | --- | --- | --- | --- |
 | `E1-01` | `items / factions` 底层领域模型原生化 | `已完成（第一版）` | `P1` | 公开 API 已对齐，运行时已改为原生优先，wrapper 只保留历史兼容读取/迁移 | `backend/services/project_service.py` `backend/models/story_engine.py` |
-| `E1-02` | Story Bible 关联与溯源能力增强 | `待开始` | `P1` | 为后续正文-设定双向定位打底 | `backend/services/story_engine_kb_service.py` `backend/services/story_engine_unified_knowledge_service.py` |
-| `E1-03` | 章节工作流事件化与可观测性增强 | `待开始` | `P2` | 主链能用，但事件与任务观测还可以更完整 | `backend/services/story_engine_workflow_service.py` |
+| `E1-02` | Story Bible 关联与溯源能力增强 | `已完成（第一版）` | `P1` | 工作区已能返回设定关联/来源摘要，并为后续双向定位提供稳定锚点 | `backend/services/story_engine_kb_service.py` `backend/services/story_engine_unified_knowledge_service.py` |
+| `E1-03` | 章节工作流事件化与可观测性增强 | `已完成（第一版）` | `P2` | 主链能用，但事件与任务观测还可以更完整 | `backend/services/story_engine_workflow_service.py` |
 
 ### `E1-01` 当前进度
 
@@ -168,6 +168,20 @@
 - 已完成（第一版）：`get_owned_project(..., with_relations=True)` 现在会在读取时自动把项目级 `world_settings` wrapper 迁移到 `project_items / project_factions`，并清理旧 wrapper 行。
 - 已完成（第一版）：分支 `Story Bible` 快照会在读取时被 canonical 化为原生 section delta，不再继续把 `item/faction` 混在 `world_settings` 里。
 - 已完成（第一版）：回滚链路也会先做 snapshot canonical 化，避免旧版本恢复后把 branch payload 再次写回 legacy wrapper 形态。
+
+### `E1-02` 当前进度
+
+- 已完成（第一版）：`story-engine/workspace` 现在会额外返回 `knowledge_provenance`，为每条可见设定整理 `scope_origin / last_source_workflow / last_action / recent_chapters / inbound_relations / outbound_relations`。
+- 已完成（第一版）：设定关联已经覆盖人物关系、伏笔挂钩、物品归属/地点、势力首领/成员/地盘、剧情线聚焦对象、时间线地点/人物状态等关键连续性链路。
+- 已完成（第一版）：章节总结里“已应用的设定更新”会回写到对应实体的 provenance 上，后续做“从设定回跳最近影响章节”时不需要再重拆历史数据。
+- 已完成（第一版）：统一保存/删除接口现在会返回 `entity_locator`，把 `section_key / entity_id / entity_key / label / branch_id` 一起带回，便于后续前端做稳定定位。
+
+### `E1-03` 当前进度
+
+- 已完成（第一版）：`chapter-stream` 的 `start / plan / chunk / guard / done` 事件现在都带统一 `workflow_event`，终止事件会附带完整 `workflow_timeline`，便于回放和失败定位。
+- 已完成（第一版）：`realtime-guard` 现在会返回标准化时间线，明确区分“开始校验 / 守护结论 / 修法生成 / 裁决停写”四个阶段。
+- 已完成（第一版）：`final-optimize` 现在会回传轮次级时间线，覆盖每轮守护、逻辑、节奏、文风、锚定、仲裁，以及 `kb_updates_normalized / chapter_summary_persisted / final_optimize_completed` 等落库节点。
+- 已完成（第一版）：相关回归已补齐 `chapter stream / realtime guard / final optimize` 三条链，当前章节工作流的事件契约已经有稳定测试兜底。
 
 ---
 
@@ -197,6 +211,7 @@
 7. `P1-02` 实体生成并入统一任务链
 8. `E1-01` `items / factions` 底层领域模型原生化
 9. `E1-02` Story Bible 关联与溯源能力增强
+10. `E1-03` 章节工作流事件化与可观测性增强
 
 ---
 
@@ -209,4 +224,4 @@
 - 后台工程链路继续并轨，减少“已能调用但未进入统一任务链”的分叉实现
 - 领域模型与事件流继续纯化，为后续长期维护、观测和移动端适配打底
 
-按当前任务表，`E1-01` 已完成第一版收口。下一项应严格进入 `E1-02`，开始处理 Story Bible 的关联与溯源能力增强，不再回头新增写手前台分叉入口。
+按当前任务表，`E1-03` 也已完成第一版收口。到这里，写手主链与章节工作流的核心工程纯化项已经走完一轮，后续如果继续严格沿表推进，应转入 `P1-03 / P1-04 / P1-05` 这些“可后做但不阻塞主链”的产品深化项，而不是回头新增分叉入口。

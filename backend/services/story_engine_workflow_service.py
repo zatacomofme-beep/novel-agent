@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional, TypedDict
 from uuid import UUID, uuid4
 
@@ -238,6 +239,7 @@ async def run_realtime_guard(
     model_routing: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
+    workflow_id = _build_workflow_id("realtime_guard")
     resolved_outline = await _resolve_stream_outline_text(
         session=session,
         project_id=project_id,
@@ -267,12 +269,18 @@ async def run_realtime_guard(
         result = await graph.ainvoke(initial_state)
     else:
         result = await _run_realtime_guard_fallback(initial_state)
+    workflow_timeline = _build_realtime_guard_workflow_timeline(
+        workflow_id=workflow_id,
+        state=initial_state,
+        result=result,
+    )
     return {
         "passed": not result["alerts"],
         "should_pause": result["should_pause"],
         "alerts": result["alerts"],
         "repair_options": result["repair_options"],
         "arbitration_note": result["arbitration_note"],
+        "workflow_timeline": workflow_timeline,
     }
 
 
@@ -744,6 +752,208 @@ def _build_final_deliberation_round(
         "resolution": resolution,
         "entries": entries,
     }
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _build_workflow_id(workflow_type: str) -> str:
+    return f"{workflow_type}:{uuid4().hex}"
+
+
+def _append_workflow_event(
+    timeline: list[dict[str, Any]],
+    *,
+    workflow_id: str,
+    workflow_type: str,
+    stage: str,
+    status: str,
+    label: str,
+    message: Optional[str] = None,
+    chapter_number: Optional[int] = None,
+    chapter_title: Optional[str] = None,
+    branch_id: Optional[UUID] = None,
+    round_number: Optional[int] = None,
+    paragraph_index: Optional[int] = None,
+    paragraph_total: Optional[int] = None,
+    agent_keys: Optional[list[str]] = None,
+    details: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    event = {
+        "workflow_id": workflow_id,
+        "workflow_type": workflow_type,
+        "sequence": len(timeline) + 1,
+        "stage": stage,
+        "status": status,
+        "label": label,
+        "message": message,
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "branch_id": branch_id,
+        "round_number": round_number,
+        "paragraph_index": paragraph_index,
+        "paragraph_total": paragraph_total,
+        "agent_keys": list(agent_keys or []),
+        "details": dict(details or {}),
+        "emitted_at": _utcnow(),
+    }
+    timeline.append(event)
+    return event
+
+
+def _clone_workflow_timeline(timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(item) for item in timeline]
+
+
+def _build_report_workflow_details(report: dict[str, Any]) -> dict[str, Any]:
+    raw_output = dict(report.get("raw_output") or {})
+    issues = list(report.get("issues") or [])
+    return {
+        "summary": str(report.get("summary") or "").strip() or None,
+        "issue_count": len(issues),
+        "issue_titles": [
+            str(item.get("title") or "").strip()
+            for item in issues[:3]
+            if str(item.get("title") or "").strip()
+        ],
+        "proposed_action_count": len(report.get("proposed_actions") or []),
+        "provider": raw_output.get("provider"),
+        "model": raw_output.get("model"),
+        "used_fallback": raw_output.get("used_fallback"),
+    }
+
+
+def _build_anchor_workflow_details(anchor_payload: dict[str, Any]) -> dict[str, Any]:
+    chapter_summary = dict(anchor_payload.get("chapter_summary") or {})
+    kb_updates = list(anchor_payload.get("kb_updates") or [])
+    return {
+        "summary_excerpt": _truncate_deliberation_text(chapter_summary.get("content"), 120),
+        "core_progress_count": len(chapter_summary.get("core_progress") or []),
+        "kb_update_count": len(kb_updates),
+        "kb_update_titles": [
+            str(item.get("title") or item.get("name") or item.get("content") or "").strip()
+            for item in kb_updates[:3]
+            if str(item.get("title") or item.get("name") or item.get("content") or "").strip()
+        ],
+    }
+
+
+def _count_blocking_alerts(alerts: list[dict[str, Any]]) -> int:
+    return len(
+        [
+            item
+            for item in alerts
+            if str(item.get("severity") or "").strip().lower() in {"critical", "high"}
+        ]
+    )
+
+
+def _build_realtime_guard_workflow_timeline(
+    *,
+    workflow_id: str,
+    state: RealtimeGuardState,
+    result: RealtimeGuardState,
+) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    alerts = list(result.get("alerts") or [])
+    blocking_alert_count = _count_blocking_alerts(alerts)
+    repair_options = list(result.get("repair_options") or [])
+
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="realtime_guard",
+        stage="guard_initialized",
+        status="started",
+        label="开始实时校验",
+        chapter_number=state.get("chapter_number"),
+        chapter_title=state.get("chapter_title"),
+        branch_id=state.get("branch_id"),
+        details={
+            "draft_length": len(str(state.get("draft_text") or "")),
+            "latest_paragraph_length": len(str(state.get("latest_paragraph") or "")),
+            "outline_available": bool(str(state.get("current_outline") or "").strip()),
+            "recent_chapter_count": len(state.get("recent_chapters") or []),
+        },
+    )
+
+    guardian_report = dict(result.get("guardian_report") or {})
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="realtime_guard",
+        stage="guardian_review",
+        status="completed",
+        label="设定守护完成校验",
+        chapter_number=state.get("chapter_number"),
+        chapter_title=state.get("chapter_title"),
+        branch_id=state.get("branch_id"),
+        agent_keys=["guardian"],
+        details={
+            **_build_report_workflow_details(guardian_report),
+            "alert_count": len(alerts),
+            "blocking_alert_count": blocking_alert_count,
+        },
+    )
+
+    if alerts:
+        commercial_report = dict(result.get("commercial_report") or {})
+        _append_workflow_event(
+            timeline,
+            workflow_id=workflow_id,
+            workflow_type="realtime_guard",
+            stage="commercial_repair",
+            status="completed",
+            label="修正方案已生成",
+            chapter_number=state.get("chapter_number"),
+            chapter_title=state.get("chapter_title"),
+            branch_id=state.get("branch_id"),
+            agent_keys=["commercial"],
+            details={
+                **_build_report_workflow_details(commercial_report),
+                "repair_option_count": len(repair_options),
+            },
+        )
+    else:
+        _append_workflow_event(
+            timeline,
+            workflow_id=workflow_id,
+            workflow_type="realtime_guard",
+            stage="commercial_repair",
+            status="skipped",
+            label="当前无需补修",
+            chapter_number=state.get("chapter_number"),
+            chapter_title=state.get("chapter_title"),
+            branch_id=state.get("branch_id"),
+            agent_keys=["commercial"],
+            details={
+                "repair_option_count": 0,
+                "reason": "no_alerts",
+            },
+        )
+
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="realtime_guard",
+        stage="guard_arbitration",
+        status="paused" if bool(result.get("should_pause")) else "completed",
+        label="实时裁决完成",
+        message=str(result.get("arbitration_note") or "").strip() or None,
+        chapter_number=state.get("chapter_number"),
+        chapter_title=state.get("chapter_title"),
+        branch_id=state.get("branch_id"),
+        agent_keys=["arbitrator"],
+        details={
+            "passed": not alerts,
+            "should_pause": bool(result.get("should_pause")),
+            "alert_count": len(alerts),
+            "blocking_alert_count": blocking_alert_count,
+            "repair_option_count": len(repair_options),
+        },
+    )
+    return timeline
 
 
 def _serialize_story_api_entities(
@@ -1601,6 +1811,25 @@ async def run_chapter_stream_generate(
     fallback_paragraphs: list[int] = []
     failover_paragraphs: list[int] = []
     failover_details: list[dict[str, Any]] = []
+    workflow_id = _build_workflow_id("chapter_stream")
+    workflow_timeline: list[dict[str, Any]] = []
+
+    def _build_stream_metadata(
+        metadata: dict[str, Any],
+        workflow_event: dict[str, Any],
+        *,
+        include_timeline: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            **metadata,
+            "workflow_id": workflow_id,
+            "workflow_type": "chapter_stream",
+            "workflow_sequence": workflow_event["sequence"],
+            "workflow_timeline_count": len(workflow_timeline),
+        }
+        if include_timeline:
+            payload["workflow_timeline"] = _clone_workflow_timeline(workflow_timeline)
+        return payload
 
     def _record_stream_generation_result(
         paragraph_index: int,
@@ -1734,6 +1963,27 @@ async def run_chapter_stream_generate(
             model_routing=model_routing,
         )
 
+    start_workflow_event = _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="chapter_stream",
+        stage="stream_started",
+        status="started",
+        label="开始顺正文",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
+        paragraph_total=paragraph_total,
+        details={
+            "resume_mode": resume_mode,
+            "resume_from_paragraph": starting_paragraph if resume_mode else None,
+            "rewritten_paragraph_index": rewritten_paragraph_index,
+            "target_paragraph_count": target_paragraph_count,
+            "target_word_count": target_word_count,
+            "existing_paragraph_count": len(running_paragraphs),
+        },
+    )
     yield {
         "event": "start",
         "message": (
@@ -1745,20 +1995,44 @@ async def run_chapter_stream_generate(
         ),
         "text": running_text or None,
         "paragraph_index": min(max(starting_paragraph - 1, 0), paragraph_total),
-        "metadata": {
-            "chapter_number": chapter_number,
-            "chapter_title": chapter_title,
-            "target_paragraph_count": target_paragraph_count,
-            "target_word_count": target_word_count,
-            "status": "resumed" if resume_mode else "started",
-            "resume_from_paragraph": starting_paragraph if resume_mode else None,
-            "rewritten_paragraph_index": rewritten_paragraph_index,
-            "repair_instruction": normalized_repair_instruction,
-        },
+        "metadata": _build_stream_metadata(
+            {
+                "chapter_number": chapter_number,
+                "chapter_title": chapter_title,
+                "target_paragraph_count": target_paragraph_count,
+                "target_word_count": target_word_count,
+                "status": "resumed" if resume_mode else "started",
+                "resume_from_paragraph": starting_paragraph if resume_mode else None,
+                "rewritten_paragraph_index": rewritten_paragraph_index,
+                "repair_instruction": normalized_repair_instruction,
+            },
+            start_workflow_event,
+        ),
+        "workflow_event": start_workflow_event,
     }
 
     if preflight_guard_result and preflight_guard_result["should_pause"]:
         paused_at = rewritten_paragraph_index or min(max(starting_paragraph - 1, 1), paragraph_total)
+        guard_workflow_event = _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="chapter_stream",
+            stage="stream_guard_paused",
+            status="paused",
+            label="续写前守护拦截",
+            message=str(preflight_guard_result.get("arbitration_note") or "").strip() or None,
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            paragraph_index=paused_at,
+            paragraph_total=paragraph_total,
+            agent_keys=["guardian", "commercial", "arbitrator"],
+            details={
+                "alert_count": len(preflight_guard_result.get("alerts") or []),
+                "repair_option_count": len(preflight_guard_result.get("repair_options") or []),
+                "guard_timeline_count": len(preflight_guard_result.get("workflow_timeline") or []),
+            },
+        )
         yield {
             "event": "guard",
             "message": "当前修正还没完全避开硬冲突，我先继续停在这里。",
@@ -1766,26 +2040,72 @@ async def run_chapter_stream_generate(
             "paragraph_index": paused_at,
             "paragraph_total": paragraph_total,
             "guard_result": preflight_guard_result,
-            "metadata": _build_stream_pause_metadata(
-                beats=beats,
-                paused_at_paragraph=paused_at,
-                paragraph_total=paragraph_total,
-                current_beat=beats[paused_at - 1] if 1 <= paused_at <= paragraph_total else None,
+            "metadata": _build_stream_metadata(
+                _build_stream_pause_metadata(
+                    beats=beats,
+                    paused_at_paragraph=paused_at,
+                    paragraph_total=paragraph_total,
+                    current_beat=beats[paused_at - 1] if 1 <= paused_at <= paragraph_total else None,
+                ),
+                guard_workflow_event,
+                include_timeline=True,
             ),
+            "workflow_event": guard_workflow_event,
         }
         return
 
     if starting_paragraph > paragraph_total:
+        done_workflow_event = _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="chapter_stream",
+            stage="stream_completed",
+            status="completed",
+            label="正文续写完成",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            paragraph_index=paragraph_total,
+            paragraph_total=paragraph_total,
+            details={
+                "generated_length": len(running_text),
+                "resume_mode": resume_mode,
+                "rewritten_paragraph_index": rewritten_paragraph_index,
+                "no_remaining_paragraphs": True,
+            },
+        )
         yield {
             "event": "done",
             "message": "当前冲突已经修平，这一章也顺到可收口状态了。",
             "text": running_text,
             "paragraph_index": paragraph_total,
             "paragraph_total": paragraph_total,
-            "metadata": _build_stream_done_metadata(),
+            "metadata": _build_stream_metadata(
+                _build_stream_done_metadata(),
+                done_workflow_event,
+                include_timeline=True,
+            ),
+            "workflow_event": done_workflow_event,
         }
         return
 
+    plan_workflow_event = _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="chapter_stream",
+        stage="plan_prepared",
+        status="completed",
+        label="本章推进计划已展开",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        paragraph_index=min(max(starting_paragraph - 1, 0), paragraph_total),
+        paragraph_total=paragraph_total,
+        details={
+            "remaining_beat_count": len(beats[starting_paragraph - 1 :]),
+            "resume_mode": resume_mode,
+        },
+    )
     yield {
         "event": "plan",
         "message": (
@@ -1795,13 +2115,17 @@ async def run_chapter_stream_generate(
         ),
         "paragraph_index": min(max(starting_paragraph - 1, 0), paragraph_total),
         "paragraph_total": paragraph_total,
-        "metadata": {
-            "beats": beats[starting_paragraph - 1 :],
-            "all_beats": beats,
-            "outline_excerpt": outline_text[:240] if outline_text else None,
-            "style_hint": style_hint,
-            "resume_mode": resume_mode,
-        },
+        "metadata": _build_stream_metadata(
+            {
+                "beats": beats[starting_paragraph - 1 :],
+                "all_beats": beats,
+                "outline_excerpt": outline_text[:240] if outline_text else None,
+                "style_hint": style_hint,
+                "resume_mode": resume_mode,
+            },
+            plan_workflow_event,
+        ),
+        "workflow_event": plan_workflow_event,
     }
 
     for paragraph_index in range(starting_paragraph, paragraph_total + 1):
@@ -1835,6 +2159,28 @@ async def run_chapter_stream_generate(
         paragraph = paragraph_result.content.strip()
         running_paragraphs.append(paragraph)
         running_text = _join_stream_paragraphs(running_paragraphs)
+        chunk_workflow_event = _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="chapter_stream",
+            stage="paragraph_generated",
+            status="completed",
+            label=f"第 {paragraph_index} 段已生成",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            paragraph_index=paragraph_index,
+            paragraph_total=paragraph_total,
+            agent_keys=["stream_writer"],
+            details={
+                "beat": beat,
+                "provider": paragraph_result.provider,
+                "model": paragraph_result.model,
+                "used_fallback": paragraph_result.used_fallback,
+                "selected_role": paragraph_metadata.get("stream_selected_role"),
+                "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
+            },
+        )
         yield {
             "event": "chunk",
             "message": f"正在写第 {paragraph_index}/{paragraph_total} 段。",
@@ -1842,16 +2188,20 @@ async def run_chapter_stream_generate(
             "text": running_text,
             "paragraph_index": paragraph_index,
             "paragraph_total": paragraph_total,
-            "metadata": {
-                "beat": beat,
-                "provider": paragraph_result.provider,
-                "model": paragraph_result.model,
-                "used_fallback": paragraph_result.used_fallback,
-                "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
-                "failover_attempts": paragraph_metadata.get("stream_failover_attempts") or [],
-                "selected_role": paragraph_metadata.get("stream_selected_role"),
-                "resume_mode": resume_mode,
-            },
+            "metadata": _build_stream_metadata(
+                {
+                    "beat": beat,
+                    "provider": paragraph_result.provider,
+                    "model": paragraph_result.model,
+                    "used_fallback": paragraph_result.used_fallback,
+                    "failover_triggered": bool(paragraph_metadata.get("stream_failover_triggered")),
+                    "failover_attempts": paragraph_metadata.get("stream_failover_attempts") or [],
+                    "selected_role": paragraph_metadata.get("stream_selected_role"),
+                    "resume_mode": resume_mode,
+                },
+                chunk_workflow_event,
+            ),
+            "workflow_event": chunk_workflow_event,
         }
 
         guard_result = await run_realtime_guard(
@@ -1869,6 +2219,26 @@ async def run_chapter_stream_generate(
             model_routing=model_routing,
         )
         if guard_result["should_pause"]:
+            guard_workflow_event = _append_workflow_event(
+                workflow_timeline,
+                workflow_id=workflow_id,
+                workflow_type="chapter_stream",
+                stage="stream_guard_paused",
+                status="paused",
+                label=f"第 {paragraph_index} 段触发守护拦截",
+                message=str(guard_result.get("arbitration_note") or "").strip() or None,
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                paragraph_index=paragraph_index,
+                paragraph_total=paragraph_total,
+                agent_keys=["guardian", "commercial", "arbitrator"],
+                details={
+                    "alert_count": len(guard_result.get("alerts") or []),
+                    "repair_option_count": len(guard_result.get("repair_options") or []),
+                    "guard_timeline_count": len(guard_result.get("workflow_timeline") or []),
+                },
+            )
             yield {
                 "event": "guard",
                 "message": "发现设定冲突，已经先替你停住了。",
@@ -1876,22 +2246,52 @@ async def run_chapter_stream_generate(
                 "paragraph_index": paragraph_index,
                 "paragraph_total": paragraph_total,
                 "guard_result": guard_result,
-                "metadata": _build_stream_pause_metadata(
-                    beats=beats,
-                    paused_at_paragraph=paragraph_index,
-                    paragraph_total=paragraph_total,
-                    current_beat=beat,
+                "metadata": _build_stream_metadata(
+                    _build_stream_pause_metadata(
+                        beats=beats,
+                        paused_at_paragraph=paragraph_index,
+                        paragraph_total=paragraph_total,
+                        current_beat=beat,
+                    ),
+                    guard_workflow_event,
+                    include_timeline=True,
                 ),
+                "workflow_event": guard_workflow_event,
             }
             return
 
+    done_workflow_event = _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="chapter_stream",
+        stage="stream_completed",
+        status="completed",
+        label="正文生成完成",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        paragraph_index=paragraph_total,
+        paragraph_total=paragraph_total,
+        details={
+            "generated_length": len(running_text),
+            "resume_mode": resume_mode,
+            "provider_model_pairs": provider_model_pairs,
+            "fallback_paragraphs": fallback_paragraphs,
+            "failover_paragraphs": failover_paragraphs,
+        },
+    )
     yield {
         "event": "done",
         "message": "本章顺到这里了，可以继续手写，也可以直接做终稿优化。",
         "text": running_text,
         "paragraph_index": paragraph_total,
         "paragraph_total": paragraph_total,
-        "metadata": _build_stream_done_metadata(),
+        "metadata": _build_stream_metadata(
+            _build_stream_done_metadata(),
+            done_workflow_event,
+            include_timeline=True,
+        ),
+        "workflow_event": done_workflow_event,
     }
 
 
@@ -1908,7 +2308,7 @@ async def run_final_optimize(
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
     model_routing = resolve_story_engine_model_routing(project)
-    result, convergence_meta = await _run_final_verify_until_converged(
+    result, convergence_meta, workflow_timeline = await _run_final_verify_until_converged(
         session=session,
         project_id=project_id,
         user_id=user_id,
@@ -1925,6 +2325,23 @@ async def run_final_optimize(
     )
     result["anchor_payload"]["kb_updates"] = normalized_kb_updates
     result["anchor_payload"]["chapter_summary"]["kb_update_suggestions"] = normalized_kb_updates
+    workflow_id = (
+        str(workflow_timeline[0].get("workflow_id")) if workflow_timeline else _build_workflow_id("final_optimize")
+    )
+    _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="kb_updates_normalized",
+        status="completed",
+        label="设定更新建议已标准化",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        details={
+            "kb_update_count": len(normalized_kb_updates),
+        },
+    )
     summary = await _upsert_chapter_summary(
         session=session,
         project_id=project_id,
@@ -1932,6 +2349,40 @@ async def run_final_optimize(
         branch_id=branch_id,
         chapter_number=chapter_number,
         payload=result["anchor_payload"]["chapter_summary"],
+    )
+    _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="chapter_summary_persisted",
+        status="completed",
+        label="章节总结已入库",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        details={
+            "summary_id": summary.get("summary_id"),
+            "summary_version": summary.get("version"),
+            "kb_update_count": len(normalized_kb_updates),
+        },
+    )
+    _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="final_optimize_completed",
+        status="completed" if convergence_meta["ready_for_publish"] else "paused",
+        label="终稿收口已完成",
+        message=convergence_meta["quality_summary"],
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        details={
+            "consensus_rounds": convergence_meta["consensus_rounds"],
+            "consensus_reached": convergence_meta["consensus_reached"],
+            "remaining_issue_count": convergence_meta["remaining_issue_count"],
+            "ready_for_publish": convergence_meta["ready_for_publish"],
+        },
     )
     return {
         "final_draft": result["final_package"]["final_draft"],
@@ -1952,6 +2403,7 @@ async def run_final_optimize(
         "remaining_issue_count": convergence_meta["remaining_issue_count"],
         "ready_for_publish": convergence_meta["ready_for_publish"],
         "quality_summary": convergence_meta["quality_summary"],
+        "workflow_timeline": workflow_timeline,
     }
 
 
@@ -2019,6 +2471,96 @@ def _build_final_quality_summary(
     return f"这一章已经收口 {consensus_rounds} 轮，但还剩 {remaining_issue_count} 个问题没有完全压平，建议先再修一轮。"
 
 
+def _append_final_verify_round_trace(
+    timeline: list[dict[str, Any]],
+    *,
+    workflow_id: str,
+    chapter_number: int,
+    chapter_title: Optional[str],
+    branch_id: Optional[UUID],
+    round_number: int,
+    result: FinalVerifyState,
+    resolution: str,
+) -> None:
+    report_specs = [
+        ("guardian_review", "设定守护完成校验", "guardian_report", "guardian"),
+        ("logic_review", "逻辑校验完成", "logic_report", "logic_debunker"),
+        ("commercial_review", "节奏校验完成", "commercial_report", "commercial"),
+        ("style_review", "文风校验完成", "style_report", "style_guardian"),
+    ]
+    for stage, label, report_key, agent_key in report_specs:
+        report = dict(result.get(report_key) or {})
+        _append_workflow_event(
+            timeline,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            stage=stage,
+            status="completed",
+            label=label,
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            round_number=round_number,
+            agent_keys=[agent_key],
+            details=_build_report_workflow_details(report),
+        )
+
+    anchor_payload = dict(result.get("anchor_payload") or {})
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="anchor_summary_prepared",
+        status="completed",
+        label="章节总结与设定更新已整理",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        round_number=round_number,
+        agent_keys=["anchor"],
+        details=_build_anchor_workflow_details(anchor_payload),
+    )
+
+    final_package = dict(result.get("final_package") or {})
+    arbitrator_report = dict(final_package.get("arbitrator_report") or {})
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="final_arbitration",
+        status="completed",
+        label="统一裁决已生成",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        round_number=round_number,
+        agent_keys=["arbitrator"],
+        details={
+            **_build_report_workflow_details(arbitrator_report),
+            "revision_note_count": len(final_package.get("revision_notes") or []),
+            "final_draft_length": len(str(final_package.get("final_draft") or "").strip()),
+        },
+    )
+
+    _append_workflow_event(
+        timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="round_resolution",
+        status="completed",
+        label=f"第 {round_number} 轮结论已收口",
+        message=resolution,
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        round_number=round_number,
+        details={
+            "resolution": resolution,
+            "remaining_issue_count": len(_collect_final_verify_issues(result)),
+        },
+    )
+
+
 def _get_outline_debate_max_rounds() -> int:
     settings = get_settings()
     return max(1, settings.story_engine_outline_max_debate_rounds)
@@ -2040,15 +2582,49 @@ async def _run_final_verify_until_converged(
     draft_text: str,
     style_sample: Optional[str],
     model_routing: dict[str, dict[str, Any]],
-) -> tuple[FinalVerifyState, dict[str, Any]]:
+) -> tuple[FinalVerifyState, dict[str, Any], list[dict[str, Any]]]:
     current_draft = draft_text
     previous_issue_signature: Optional[tuple[str, ...]] = None
     latest_result: Optional[FinalVerifyState] = None
     completed_rounds = 0
     deliberation_rounds: list[dict[str, Any]] = []
     max_rounds = _get_final_verify_max_rounds()
+    workflow_id = _build_workflow_id("final_optimize")
+    workflow_timeline: list[dict[str, Any]] = []
+
+    _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="final_optimize_started",
+        status="started",
+        label="开始终稿深度收口",
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        details={
+            "draft_length": len(str(draft_text or "")),
+            "style_sample_length": len(str(style_sample or "")),
+            "max_rounds": max_rounds,
+        },
+    )
 
     for round_index in range(1, max_rounds + 1):
+        _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            stage="review_round_started",
+            status="started",
+            label=f"开始第 {round_index} 轮收口",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            round_number=round_index,
+            details={
+                "draft_length": len(str(current_draft or "")),
+            },
+        )
         state: FinalVerifyState = {
             "session": session,
             "project_id": project_id,
@@ -2076,6 +2652,16 @@ async def _run_final_verify_until_converged(
                     resolution=round_resolution,
                 )
             )
+            _append_final_verify_round_trace(
+                workflow_timeline,
+                workflow_id=workflow_id,
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                round_number=round_index,
+                result=latest_result,
+                resolution=round_resolution,
+            )
             break
         if previous_issue_signature == current_signature:
             round_resolution = "这一轮和上一轮保留的问题一致，继续修改也不会明显收敛，先停在当前裁决。"
@@ -2085,6 +2671,16 @@ async def _run_final_verify_until_converged(
                     result=latest_result,
                     resolution=round_resolution,
                 )
+            )
+            _append_final_verify_round_trace(
+                workflow_timeline,
+                workflow_id=workflow_id,
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                round_number=round_index,
+                result=latest_result,
+                resolution=round_resolution,
             )
             break
 
@@ -2101,6 +2697,16 @@ async def _run_final_verify_until_converged(
                     resolution=round_resolution,
                 )
             )
+            _append_final_verify_round_trace(
+                workflow_timeline,
+                workflow_id=workflow_id,
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                branch_id=branch_id,
+                round_number=round_index,
+                result=latest_result,
+                resolution=round_resolution,
+            )
             break
         round_resolution = "按这一轮仲裁方案改一版，再回来看还有没有残留问题。"
         deliberation_rounds.append(
@@ -2110,6 +2716,16 @@ async def _run_final_verify_until_converged(
                 resolution=round_resolution,
             )
         )
+        _append_final_verify_round_trace(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            round_number=round_index,
+            result=latest_result,
+            resolution=round_resolution,
+        )
         current_draft = next_draft
 
     if latest_result is None:
@@ -2117,6 +2733,27 @@ async def _run_final_verify_until_converged(
 
     if not latest_result.get("output_finalized"):
         latest_result = await _finalize_final_verify_output(latest_result)
+        _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            stage="final_output_finalized",
+            status="completed",
+            label="终稿输出已定稿",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            round_number=completed_rounds if completed_rounds > 0 else None,
+            agent_keys=["anchor", "arbitrator"],
+            details={
+                "final_draft_length": len(
+                    str(latest_result.get("final_package", {}).get("final_draft") or "").strip()
+                ),
+                "kb_update_count": len(
+                    latest_result.get("anchor_payload", {}).get("kb_updates") or []
+                ),
+            },
+        )
         if deliberation_rounds:
             latest_resolution = str(deliberation_rounds[-1].get("resolution") or "").strip()
             deliberation_rounds[-1] = _build_final_deliberation_round(
@@ -2139,6 +2776,24 @@ async def _run_final_verify_until_converged(
             remaining_issue_count=len(remaining_issues),
         ),
     }
+    _append_workflow_event(
+        workflow_timeline,
+        workflow_id=workflow_id,
+        workflow_type="final_optimize",
+        stage="final_verify_concluded",
+        status="completed" if consensus_reached else "paused",
+        label="终稿校验阶段已结束",
+        message=convergence_meta["quality_summary"],
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        branch_id=branch_id,
+        details={
+            "consensus_rounds": completed_rounds,
+            "consensus_reached": consensus_reached,
+            "remaining_issue_count": len(remaining_issues),
+            "ready_for_publish": consensus_reached,
+        },
+    )
     latest_result["final_package"] = {
         **dict(latest_result.get("final_package") or {}),
         **convergence_meta,
@@ -2150,7 +2805,7 @@ async def _run_final_verify_until_converged(
             **convergence_meta,
         },
     }
-    return latest_result, convergence_meta
+    return latest_result, convergence_meta, workflow_timeline
 
 
 async def _finalize_final_verify_output(result: FinalVerifyState) -> FinalVerifyState:

@@ -100,10 +100,12 @@ class StoryEngineChapterStreamServiceTests(unittest.IsolatedAsyncioTestCase):
         guard_event = next(item for item in events if item["event"] == "guard")
         self.assertEqual(guard_event["paragraph_index"], 1)
         self.assertEqual(guard_event["paragraph_total"], 2)
+        self.assertEqual(guard_event["workflow_event"]["stage"], "stream_guard_paused")
         self.assertEqual(guard_event["metadata"]["paused_at_paragraph"], 1)
         self.assertEqual(guard_event["metadata"]["next_paragraph_index"], 2)
         self.assertEqual(guard_event["metadata"]["current_beat"], "开场推进")
         self.assertEqual(guard_event["metadata"]["remaining_beats"], ["结尾钩子"])
+        self.assertEqual(guard_event["metadata"]["workflow_timeline"][-1]["stage"], "stream_guard_paused")
         self.assertEqual(
             guard_event["guard_result"]["repair_options"],
             ["补出主角对水的本能恐惧，再安排他硬着头皮下水。"],
@@ -325,14 +327,17 @@ class StoryEngineChapterStreamServiceTests(unittest.IsolatedAsyncioTestCase):
         done_event = next(item for item in events if item["event"] == "done")
 
         self.assertTrue(chunk_event["metadata"]["failover_triggered"])
+        self.assertEqual(chunk_event["workflow_event"]["stage"], "paragraph_generated")
         self.assertEqual(chunk_event["metadata"]["selected_role"], "commercial")
         self.assertEqual(
             chunk_event["metadata"]["failover_attempts"][0]["model"],
             "gpt-5.4",
         )
         self.assertTrue(done_event["metadata"]["any_fallback"])
+        self.assertEqual(done_event["workflow_event"]["stage"], "stream_completed")
         self.assertEqual(done_event["metadata"]["fallback_paragraphs"], [2])
         self.assertEqual(done_event["metadata"]["failover_paragraphs"], [1, 2])
+        self.assertEqual(done_event["metadata"]["workflow_timeline"][-1]["stage"], "stream_completed")
         self.assertEqual(
             done_event["metadata"]["provider_model_pairs"],
             ["openai-compatible:deepseek-v3.2", "local-fallback:heuristic-v1"],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
@@ -83,6 +84,24 @@ ENTITY_REGISTRY: dict[str, StoryEntityRegistry] = {
 
 
 vector_store = StoryEngineChromaService()
+
+WORKSPACE_PROVENANCE_SECTION_KEYS = (
+    "characters",
+    "foreshadows",
+    "items",
+    "locations",
+    "factions",
+    "plot_threads",
+    "world_rules",
+    "timeline_events",
+)
+STRUCTURED_PROVENANCE_ENTITY_TYPES = {
+    "characters": "characters",
+    "foreshadows": "foreshadows",
+    "items": "items",
+    "world_rules": "world_rules",
+    "timeline_events": "timeline_events",
+}
 
 
 async def get_story_engine_project(
@@ -511,6 +530,17 @@ async def build_workspace(
         user_id=user_id,
         branch_id=branch_id,
     )
+    knowledge_provenance = await _build_workspace_knowledge_provenance(
+        session,
+        project_id=project_id,
+        characters=characters,
+        foreshadows=foreshadows,
+        items=items,
+        world_rules=world_rules,
+        timeline_events=timeline_events,
+        chapter_summaries=chapter_summaries,
+        story_bible=story_bible,
+    )
     return {
         "project": {
             "project_id": project.id,
@@ -530,6 +560,7 @@ async def build_workspace(
         "latest_guardian_alerts": [],
         "latest_final_package": None,
         "story_bible": story_bible,
+        "knowledge_provenance": knowledge_provenance,
     }
 
 
@@ -602,6 +633,651 @@ async def _build_workspace_story_bible(
         branch_id=target_branch.id,
     )
     return story_bible.model_dump(mode="json")
+
+
+async def _build_workspace_knowledge_provenance(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    characters: list[StoryCharacter],
+    foreshadows: list[StoryForeshadow],
+    items: list[StoryItem],
+    world_rules: list[StoryWorldRule],
+    timeline_events: list[StoryTimelineMapEvent],
+    chapter_summaries: list[StoryChapterSummary],
+    story_bible: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    story_bible_payload = story_bible if isinstance(story_bible, dict) else {}
+    section_override_lookup = _build_story_bible_override_lookup(story_bible_payload)
+    scope_kind = str((story_bible_payload.get("scope") or {}).get("scope_kind") or "project")
+
+    section_sources: dict[str, list[Any]] = {
+        "characters": list(characters),
+        "foreshadows": list(foreshadows),
+        "items": list(items),
+        "locations": list(story_bible_payload.get("locations") or []),
+        "factions": list(story_bible_payload.get("factions") or []),
+        "plot_threads": list(story_bible_payload.get("plot_threads") or []),
+        "world_rules": list(world_rules),
+        "timeline_events": list(timeline_events),
+    }
+
+    nodes: dict[str, dict[str, Any]] = {}
+    for section_key in WORKSPACE_PROVENANCE_SECTION_KEYS:
+        for item in section_sources.get(section_key, []):
+            node = _build_provenance_node(
+                section_key=section_key,
+                item=item,
+                scope_kind=scope_kind,
+                override_entity_keys=section_override_lookup.get(section_key, set()),
+            )
+            if node is not None:
+                nodes[node["_node_key"]] = node
+
+    if not nodes:
+        return []
+
+    await _attach_latest_version_metadata(
+        session,
+        project_id=project_id,
+        nodes=nodes,
+    )
+    indexes = _build_provenance_indexes(nodes)
+    _attach_workspace_relations(section_sources=section_sources, nodes=nodes, indexes=indexes)
+    _attach_chapter_summary_provenance(
+        chapter_summaries=chapter_summaries,
+        nodes=nodes,
+        indexes=indexes,
+    )
+
+    def sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        section_order = WORKSPACE_PROVENANCE_SECTION_KEYS.index(item["section_key"])
+        return section_order, str(item["label"])
+
+    serialized_nodes: list[dict[str, Any]] = []
+    for node in sorted(nodes.values(), key=sort_key):
+        serialized_nodes.append(
+            {
+                "section_key": node["section_key"],
+                "entity_key": node["entity_key"],
+                "entity_id": node["entity_id"],
+                "label": node["label"],
+                "scope_origin": node["scope_origin"],
+                "last_source_workflow": node.get("last_source_workflow"),
+                "last_action": node.get("last_action"),
+                "last_updated_at": node.get("last_updated_at"),
+                "recent_chapters": sorted(node["recent_chapters"]),
+                "inbound_relations": node["inbound_relations"],
+                "outbound_relations": node["outbound_relations"],
+            }
+        )
+    return serialized_nodes
+
+
+def _build_story_bible_override_lookup(story_bible: dict[str, Any]) -> dict[str, set[str]]:
+    scope = story_bible.get("scope") if isinstance(story_bible, dict) else {}
+    details = scope.get("section_override_details") if isinstance(scope, dict) else []
+    lookup: dict[str, set[str]] = defaultdict(set)
+    if not isinstance(details, list):
+        return {}
+    for section in details:
+        if not isinstance(section, dict):
+            continue
+        section_key = str(section.get("section_key") or "").strip()
+        if not section_key:
+            continue
+        for item in section.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            entity_key = str(item.get("entity_key") or "").strip()
+            if entity_key:
+                lookup[section_key].add(entity_key)
+    return dict(lookup)
+
+
+def _build_provenance_node(
+    *,
+    section_key: str,
+    item: Any,
+    scope_kind: str,
+    override_entity_keys: set[str],
+) -> dict[str, Any] | None:
+    entity_key = _resolve_provenance_entity_key(section_key, item)
+    label = _resolve_provenance_label(section_key, item)
+    if not entity_key or not label:
+        return None
+
+    entity_uuid = _resolve_provenance_entity_uuid(section_key, item)
+    scope_origin = "project"
+    if section_key in {"locations", "factions", "plot_threads"} and scope_kind == "branch":
+        scope_origin = "branch_override" if entity_key in override_entity_keys else "project_inherited"
+
+    recent_chapters: set[int] = set()
+    if section_key == "foreshadows":
+        for field in ("chapter_planted", "chapter_planned_reveal"):
+            value = _read_item_value(item, field)
+            if isinstance(value, int) and value > 0:
+                recent_chapters.add(value)
+    elif section_key == "timeline_events":
+        chapter_number = _read_item_value(item, "chapter_number")
+        if isinstance(chapter_number, int) and chapter_number > 0:
+            recent_chapters.add(chapter_number)
+
+    return {
+        "_node_key": f"{section_key}::{entity_key}",
+        "_entity_uuid": entity_uuid,
+        "section_key": section_key,
+        "entity_key": entity_key,
+        "entity_id": str(entity_uuid) if entity_uuid is not None else None,
+        "label": label,
+        "scope_origin": scope_origin,
+        "last_source_workflow": None,
+        "last_action": None,
+        "last_updated_at": None,
+        "recent_chapters": recent_chapters,
+        "inbound_relations": [],
+        "outbound_relations": [],
+        "_inbound_seen": set(),
+        "_outbound_seen": set(),
+    }
+
+
+async def _attach_latest_version_metadata(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    nodes: dict[str, dict[str, Any]],
+) -> None:
+    entity_ids: set[UUID] = {
+        node["_entity_uuid"]
+        for node in nodes.values()
+        if node.get("_entity_uuid") is not None
+        and node["section_key"] in STRUCTURED_PROVENANCE_ENTITY_TYPES
+    }
+    if not entity_ids:
+        return
+
+    statement = (
+        select(StoryKnowledgeVersion)
+        .where(
+            StoryKnowledgeVersion.project_id == project_id,
+            StoryKnowledgeVersion.entity_id.in_(entity_ids),
+            StoryKnowledgeVersion.entity_type.in_(tuple(STRUCTURED_PROVENANCE_ENTITY_TYPES.values())),
+        )
+        .order_by(StoryKnowledgeVersion.created_at.desc())
+    )
+    result = await session.execute(statement)
+    latest_records: dict[tuple[str, UUID], StoryKnowledgeVersion] = {}
+    for record in result.scalars().all():
+        key = (record.entity_type, record.entity_id)
+        if key not in latest_records:
+            latest_records[key] = record
+
+    for node in nodes.values():
+        entity_type = STRUCTURED_PROVENANCE_ENTITY_TYPES.get(node["section_key"])
+        entity_uuid = node.get("_entity_uuid")
+        if entity_type is None or entity_uuid is None:
+            continue
+        record = latest_records.get((entity_type, entity_uuid))
+        if record is None:
+            continue
+        node["last_source_workflow"] = record.source_workflow
+        node["last_action"] = record.action
+        node["last_updated_at"] = record.created_at
+
+
+def _build_provenance_indexes(
+    nodes: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    by_label: dict[str, dict[str, str]] = defaultdict(dict)
+    by_entity_id: dict[str, dict[str, str]] = defaultdict(dict)
+    by_entity_key: dict[str, dict[str, str]] = defaultdict(dict)
+
+    for node_key, node in nodes.items():
+        section_key = node["section_key"]
+        normalized_label = _normalize_relation_label(node["label"])
+        if normalized_label:
+            by_label[section_key][normalized_label] = node_key
+        if node.get("entity_id"):
+            by_entity_id[section_key][str(node["entity_id"])] = node_key
+        by_entity_key[section_key][node["entity_key"]] = node_key
+
+    return {
+        "by_label": dict(by_label),
+        "by_entity_id": dict(by_entity_id),
+        "by_entity_key": dict(by_entity_key),
+    }
+
+
+def _attach_workspace_relations(
+    *,
+    section_sources: dict[str, list[Any]],
+    nodes: dict[str, dict[str, Any]],
+    indexes: dict[str, dict[str, dict[str, str]]],
+) -> None:
+    for character in section_sources.get("characters", []):
+        source_node_key = _find_node_key_for_item("characters", character, indexes)
+        if source_node_key is None:
+            continue
+        for relation in _read_item_value(character, "relationships") or []:
+            if not isinstance(relation, dict):
+                continue
+            target_node_key = _resolve_target_node_key(
+                section_key="characters",
+                entity_id=relation.get("target_id"),
+                entity_key=None,
+                label=relation.get("target_name"),
+                indexes=indexes,
+            )
+            _link_provenance_nodes(
+                nodes,
+                source_node_key=source_node_key,
+                target_node_key=target_node_key,
+                relation_type=str(relation.get("relation") or relation.get("type") or "relationship"),
+                detail=str(relation.get("note") or relation.get("description") or "").strip() or None,
+            )
+
+    for foreshadow in section_sources.get("foreshadows", []):
+        source_node_key = _find_node_key_for_item("foreshadows", foreshadow, indexes)
+        if source_node_key is None:
+            continue
+        for target_name in _read_item_value(foreshadow, "related_characters") or []:
+            _link_by_label(
+                nodes,
+                indexes=indexes,
+                source_node_key=source_node_key,
+                target_section="characters",
+                label=target_name,
+                relation_type="related_character",
+            )
+        for target_name in _read_item_value(foreshadow, "related_items") or []:
+            _link_by_label(
+                nodes,
+                indexes=indexes,
+                source_node_key=source_node_key,
+                target_section="items",
+                label=target_name,
+                relation_type="related_item",
+            )
+
+    for item in section_sources.get("items", []):
+        source_node_key = _find_node_key_for_item("items", item, indexes)
+        if source_node_key is None:
+            continue
+        _link_by_label(
+            nodes,
+            indexes=indexes,
+            source_node_key=source_node_key,
+            target_section="characters",
+            label=_read_item_value(item, "owner"),
+            relation_type="owner",
+        )
+        _link_by_label(
+            nodes,
+            indexes=indexes,
+            source_node_key=source_node_key,
+            target_section="locations",
+            label=_read_item_value(item, "location"),
+            relation_type="located_at",
+        )
+
+    for event in section_sources.get("timeline_events", []):
+        source_node_key = _find_node_key_for_item("timeline_events", event, indexes)
+        if source_node_key is None:
+            continue
+        _link_by_label(
+            nodes,
+            indexes=indexes,
+            source_node_key=source_node_key,
+            target_section="locations",
+            label=_read_item_value(event, "location"),
+            relation_type="happens_at",
+        )
+        for state in _read_item_value(event, "character_states") or []:
+            if not isinstance(state, dict):
+                continue
+            _link_by_label(
+                nodes,
+                indexes=indexes,
+                source_node_key=source_node_key,
+                target_section="characters",
+                label=state.get("name") or state.get("character_name") or state.get("character"),
+                relation_type="tracks_character_state",
+            )
+
+    for faction in section_sources.get("factions", []):
+        source_node_key = _find_node_key_for_item("factions", faction, indexes)
+        if source_node_key is None:
+            continue
+        _link_by_label(
+            nodes,
+            indexes=indexes,
+            source_node_key=source_node_key,
+            target_section="characters",
+            label=_read_item_value(faction, "leader"),
+            relation_type="leader",
+        )
+        for member in _read_item_value(faction, "members") or []:
+            _link_by_label(
+                nodes,
+                indexes=indexes,
+                source_node_key=source_node_key,
+                target_section="characters",
+                label=member,
+                relation_type="member",
+            )
+        _link_by_label(
+            nodes,
+            indexes=indexes,
+            source_node_key=source_node_key,
+            target_section="locations",
+            label=_read_item_value(faction, "territory"),
+            relation_type="territory",
+        )
+
+    for plot_thread in section_sources.get("plot_threads", []):
+        source_node_key = _find_node_key_for_item("plot_threads", plot_thread, indexes)
+        if source_node_key is None:
+            continue
+        data = _read_item_value(plot_thread, "data")
+        if not isinstance(data, dict):
+            continue
+        for field in ("focus_characters", "main_characters", "characters", "related_characters"):
+            for name in data.get(field) or []:
+                _link_by_label(
+                    nodes,
+                    indexes=indexes,
+                    source_node_key=source_node_key,
+                    target_section="characters",
+                    label=name,
+                    relation_type="focus_character",
+                )
+        for field in ("locations", "key_locations", "related_locations"):
+            for name in data.get(field) or []:
+                _link_by_label(
+                    nodes,
+                    indexes=indexes,
+                    source_node_key=source_node_key,
+                    target_section="locations",
+                    label=name,
+                    relation_type="focus_location",
+                )
+
+
+def _attach_chapter_summary_provenance(
+    *,
+    chapter_summaries: list[StoryChapterSummary],
+    nodes: dict[str, dict[str, Any]],
+    indexes: dict[str, dict[str, dict[str, str]]],
+) -> None:
+    for summary in chapter_summaries:
+        chapter_number = getattr(summary, "chapter_number", None)
+        if not isinstance(chapter_number, int) or chapter_number <= 0:
+            continue
+        for raw_suggestion in getattr(summary, "kb_update_suggestions", []) or []:
+            if not isinstance(raw_suggestion, dict):
+                continue
+            if str(raw_suggestion.get("status") or "").strip().lower() != "applied":
+                continue
+            section_key = _normalize_workspace_section_key(
+                raw_suggestion.get("applied_entity_type") or raw_suggestion.get("entity_type")
+            )
+            if section_key is None:
+                continue
+            target_node_key = _resolve_target_node_key(
+                section_key=section_key,
+                entity_id=raw_suggestion.get("applied_entity_id"),
+                entity_key=raw_suggestion.get("applied_entity_key"),
+                label=raw_suggestion.get("applied_entity_label")
+                or raw_suggestion.get("name")
+                or raw_suggestion.get("title")
+                or raw_suggestion.get("content")
+                or raw_suggestion.get("rule_name")
+                or raw_suggestion.get("core_event"),
+                indexes=indexes,
+            )
+            if target_node_key is None:
+                continue
+            nodes[target_node_key]["recent_chapters"].add(chapter_number)
+            _append_external_relation(
+                nodes[target_node_key],
+                direction="inbound",
+                signature=f"chapter-summary::{chapter_number}::{raw_suggestion.get('suggestion_id')}",
+                relation={
+                    "relation_type": "applied_update",
+                    "section_key": "chapter_summaries",
+                    "entity_key": f"chapter:{chapter_number}",
+                    "entity_id": str(getattr(summary, "summary_id", "")) or None,
+                    "label": f"第{chapter_number}章总结",
+                    "detail": "这条设定由章节总结里的更新建议落库。",
+                },
+            )
+
+
+def _find_node_key_for_item(
+    section_key: str,
+    item: Any,
+    indexes: dict[str, dict[str, dict[str, str]]],
+) -> str | None:
+    return _resolve_target_node_key(
+        section_key=section_key,
+        entity_id=_resolve_provenance_entity_uuid(section_key, item),
+        entity_key=_resolve_provenance_entity_key(section_key, item),
+        label=_resolve_provenance_label(section_key, item),
+        indexes=indexes,
+    )
+
+
+def _resolve_target_node_key(
+    *,
+    section_key: str,
+    entity_id: Any,
+    entity_key: Any,
+    label: Any,
+    indexes: dict[str, dict[str, dict[str, str]]],
+) -> str | None:
+    if entity_id is not None:
+        key = indexes.get("by_entity_id", {}).get(section_key, {}).get(str(entity_id))
+        if key is not None:
+            return key
+    if entity_key is not None:
+        key = indexes.get("by_entity_key", {}).get(section_key, {}).get(str(entity_key))
+        if key is not None:
+            return key
+    normalized_label = _normalize_relation_label(label)
+    if normalized_label:
+        return indexes.get("by_label", {}).get(section_key, {}).get(normalized_label)
+    return None
+
+
+def _link_by_label(
+    nodes: dict[str, dict[str, Any]],
+    *,
+    indexes: dict[str, dict[str, dict[str, str]]],
+    source_node_key: str,
+    target_section: str,
+    label: Any,
+    relation_type: str,
+) -> None:
+    target_node_key = _resolve_target_node_key(
+        section_key=target_section,
+        entity_id=None,
+        entity_key=None,
+        label=label,
+        indexes=indexes,
+    )
+    _link_provenance_nodes(
+        nodes,
+        source_node_key=source_node_key,
+        target_node_key=target_node_key,
+        relation_type=relation_type,
+        detail=None,
+    )
+
+
+def _link_provenance_nodes(
+    nodes: dict[str, dict[str, Any]],
+    *,
+    source_node_key: str | None,
+    target_node_key: str | None,
+    relation_type: str,
+    detail: str | None,
+) -> None:
+    if source_node_key is None or target_node_key is None or source_node_key == target_node_key:
+        return
+    source_node = nodes.get(source_node_key)
+    target_node = nodes.get(target_node_key)
+    if source_node is None or target_node is None:
+        return
+
+    outbound_signature = (
+        relation_type,
+        target_node["section_key"],
+        target_node["entity_key"],
+        detail or "",
+    )
+    if outbound_signature not in source_node["_outbound_seen"]:
+        source_node["_outbound_seen"].add(outbound_signature)
+        source_node["outbound_relations"].append(
+            {
+                "relation_type": relation_type,
+                "section_key": target_node["section_key"],
+                "entity_key": target_node["entity_key"],
+                "entity_id": target_node["entity_id"],
+                "label": target_node["label"],
+                "detail": detail,
+            }
+        )
+
+    inbound_signature = (
+        relation_type,
+        source_node["section_key"],
+        source_node["entity_key"],
+        detail or "",
+    )
+    if inbound_signature not in target_node["_inbound_seen"]:
+        target_node["_inbound_seen"].add(inbound_signature)
+        target_node["inbound_relations"].append(
+            {
+                "relation_type": relation_type,
+                "section_key": source_node["section_key"],
+                "entity_key": source_node["entity_key"],
+                "entity_id": source_node["entity_id"],
+                "label": source_node["label"],
+                "detail": detail,
+            }
+        )
+
+
+def _append_external_relation(
+    node: dict[str, Any],
+    *,
+    direction: str,
+    signature: str,
+    relation: dict[str, Any],
+) -> None:
+    seen_key = "_inbound_seen" if direction == "inbound" else "_outbound_seen"
+    target_key = "inbound_relations" if direction == "inbound" else "outbound_relations"
+    if signature in node[seen_key]:
+        return
+    node[seen_key].add(signature)
+    node[target_key].append(relation)
+
+
+def _resolve_provenance_entity_uuid(section_key: str, item: Any) -> UUID | None:
+    if isinstance(item, dict):
+        raw_value = item.get("id")
+    elif section_key == "characters":
+        raw_value = getattr(item, "character_id", None)
+    elif section_key == "foreshadows":
+        raw_value = getattr(item, "foreshadow_id", None)
+    elif section_key == "items":
+        raw_value = getattr(item, "item_id", None)
+    elif section_key == "world_rules":
+        raw_value = getattr(item, "rule_id", None)
+    elif section_key == "timeline_events":
+        raw_value = getattr(item, "event_id", None)
+    else:
+        raw_value = getattr(item, "id", None)
+    if isinstance(raw_value, UUID):
+        return raw_value
+    try:
+        return UUID(str(raw_value)) if raw_value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_provenance_entity_key(section_key: str, item: Any) -> str | None:
+    candidates: tuple[str, ...]
+    if section_key == "world_rules":
+        candidates = ("rule_id", "rule_name")
+    elif section_key == "timeline_events":
+        candidates = ("event_id", "core_event")
+    elif section_key == "foreshadows":
+        candidates = ("foreshadow_id", "content")
+    else:
+        candidates = ("id", "key", "name", "title", "content")
+
+    for field in candidates:
+        value = _read_item_value(item, field)
+        if value is None:
+            continue
+        value_text = str(value).strip()
+        if value_text:
+            return f"{field}:{value_text}"
+    return None
+
+
+def _resolve_provenance_label(section_key: str, item: Any) -> str | None:
+    if section_key == "world_rules":
+        fields = ("rule_name",)
+    elif section_key == "timeline_events":
+        fields = ("core_event",)
+    elif section_key == "foreshadows":
+        fields = ("content",)
+    else:
+        fields = ("name", "title", "key")
+    for field in fields:
+        value = _read_item_value(item, field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _read_item_value(item: Any, field: str) -> Any:
+    if isinstance(item, dict):
+        return item.get(field)
+    return getattr(item, field, None)
+
+
+def _normalize_relation_label(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _normalize_workspace_section_key(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "character": "characters",
+        "characters": "characters",
+        "foreshadow": "foreshadows",
+        "foreshadows": "foreshadows",
+        "item": "items",
+        "items": "items",
+        "location": "locations",
+        "locations": "locations",
+        "faction": "factions",
+        "factions": "factions",
+        "plot_thread": "plot_threads",
+        "plot_threads": "plot_threads",
+        "world_rule": "world_rules",
+        "world_rules": "world_rules",
+        "timeline": "timeline_events",
+        "timeline_event": "timeline_events",
+        "timeline_events": "timeline_events",
+    }
+    return aliases.get(normalized)
 
 
 def build_character_graph(characters: list[StoryCharacter]) -> dict[str, Any]:
