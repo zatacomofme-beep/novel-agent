@@ -50,7 +50,12 @@ from services.story_engine_settings_service import (
     get_story_engine_guardian_consensus_config,
     resolve_story_engine_model_routing,
 )
-from services.task_service import create_task_event, create_task_run, update_task_run
+from services.task_service import (
+    create_task_event,
+    create_task_run,
+    get_task_run_by_task_id,
+    update_task_run,
+)
 from tasks.schemas import TaskState
 from tasks.state_store import task_state_store
 
@@ -155,9 +160,10 @@ async def run_outline_stress_test(
     tone: Optional[str],
     target_chapter_count: int,
     target_total_words: int,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
-    workflow_id = _build_workflow_id("outline_stress_test")
+    workflow_id = workflow_id or _build_workflow_id("outline_stress_test")
     task_state = await _create_workflow_task_state(
         session,
         workflow_id=workflow_id,
@@ -1141,6 +1147,36 @@ async def _create_workflow_task_state(
 ) -> Optional[TaskState]:
     if not _supports_workflow_task_persistence(session):
         return None
+
+    existing_task_run = None
+    try:
+        existing_task_run = await get_task_run_by_task_id(
+            session,
+            workflow_id,
+            user_id=user_id,
+        )
+    except AttributeError:
+        existing_task_run = None
+    if existing_task_run is not None:
+        task_state = TaskState.from_task_run(existing_task_run)
+        next_result = dict(existing_task_run.result or {})
+        next_result.update(_to_jsonable_payload(initial_result or {}))
+        task_state.status = "running"
+        task_state.progress = max(int(task_state.progress or 0), 5)
+        task_state.message = initial_message
+        task_state.result = next_result
+        task_state.error = None
+        task_state.project_id = project_id
+        task_state.chapter_id = chapter_id
+        task_state.chapter_number = chapter_number
+        task_state_store.set(task_state)
+        await update_task_run(
+            session,
+            task_state=task_state,
+            commit=False,
+        )
+        await session.commit()
+        return task_state
 
     task_state = TaskState(
         task_id=workflow_id,
@@ -3150,6 +3186,7 @@ async def run_final_optimize(
     chapter_title: Optional[str],
     draft_text: str,
     style_sample: Optional[str],
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     project = await get_story_engine_project(session, project_id, user_id)
     model_routing = resolve_story_engine_model_routing(project)
@@ -3159,7 +3196,7 @@ async def run_final_optimize(
         user_id=user_id,
         chapter_id=chapter_id,
     )
-    workflow_id = _build_workflow_id("final_optimize")
+    workflow_id = workflow_id or _build_workflow_id("final_optimize")
     task_state = await _create_workflow_task_state(
         session,
         workflow_id=workflow_id,

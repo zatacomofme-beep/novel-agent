@@ -7,6 +7,29 @@
 
 ---
 
+## 自动化入口
+
+`P3-01` 第一版已经补上固定 smoke 命令，优先使用下面这组入口：
+
+- `cd frontend && npm run smoke:story-engine:mainline`
+  覆盖“创建项目 -> 三级大纲 -> 正文生成 -> 正式落章 -> 终稿收口 -> 下一章候选”的 API 主链。
+- `cd frontend && npm run smoke:story-engine:branch`
+  覆盖“新分线 / 新分卷 / 支线章节 / 支线设定隔离”的作用域链路。
+- `cd frontend && npm run smoke:story-engine:cloud`
+  覆盖“云端续写稿写入 / 读取 / 删除”的写作保护后端链路。
+- `cd frontend && npm run smoke:story-engine`
+  顺序执行上面三条，作为当前推荐的一键 smoke 入口。
+
+当前说明：
+
+- 上面这组自动化入口已经包含固定数据和固定断言，适合作为每轮主链改动后的第一道回归。
+- 脚本、断言测试、文档现在共用同一套 smoke 夹具与场景常量，不再各自写一份。
+- 测试账号前缀支持统一策略：默认使用 `story-engine-smoke`，也可以通过 `STORY_ENGINE_SMOKE_EMAIL_PREFIX` 或 `--email-prefix` 覆盖。
+- 如需把结果接入 CI 或留档，可追加 `--summary-file /绝对或相对路径/result.json` 输出固定格式总结。
+- 浏览器本机稿恢复、真正断网输入、刷新后恢复提示这类前端本地态链路，当前仍保留在下面的人工 smoke 里；后续浏览器级自动化再单独补。
+
+---
+
 ## 使用规则
 
 - 按顺序执行，不跳步骤。

@@ -9,7 +9,11 @@
     "lint": "next lint",
     "type-check": "rm -f tsconfig.tsbuildinfo && tsc --noEmit --incremental false",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "smoke:story-engine": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario all",
+    "smoke:story-engine:mainline": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario mainline",
+    "smoke:story-engine:branch": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario branch-scope",
+    "smoke:story-engine:cloud": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario cloud-draft"
   },
   "dependencies": {
     "next": "14.2.15",

@@ -261,6 +261,7 @@ async def bulk_import_story_payload(
     replace_existing_sections: list[str],
     branch_id: UUID | None = None,
     model_preset_key: str | None = None,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     await get_story_engine_project(session, project_id, user_id)
     resolved_branch_id = await _resolve_import_branch_id(
@@ -269,7 +270,7 @@ async def bulk_import_story_payload(
         user_id=user_id,
         branch_id=branch_id,
     )
-    workflow_id = _build_workflow_id("bulk_import")
+    workflow_id = workflow_id or _build_workflow_id("bulk_import")
     payload_snapshot = payload.model_dump(mode="json")
     input_counts = _build_import_section_counts(payload_snapshot)
     task_state = await _create_workflow_task_state(

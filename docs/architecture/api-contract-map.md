@@ -118,10 +118,13 @@ Backend:
 - `GET /api/v1/projects/{project_id}/story-engine/workspace`
 - `GET /api/v1/projects/{project_id}/story-engine/import-templates`
 - `POST /api/v1/projects/{project_id}/story-engine/imports/bulk`
+- `POST /api/v1/projects/{project_id}/story-engine/imports/bulk/start`
 - `POST /api/v1/projects/{project_id}/story-engine/workflows/outline-stress-test`
+- `POST /api/v1/projects/{project_id}/story-engine/workflows/outline-stress-test/start`
 - `POST /api/v1/projects/{project_id}/story-engine/workflows/realtime-guard`
 - `POST /api/v1/projects/{project_id}/story-engine/workflows/chapter-stream`
 - `POST /api/v1/projects/{project_id}/story-engine/workflows/final-optimize`
+- `POST /api/v1/projects/{project_id}/story-engine/workflows/final-optimize/start`
 - `GET /api/v1/projects/{project_id}/story-engine/search`
 - `GET /api/v1/projects/{project_id}/story-engine/cloud-drafts`
 - `GET /api/v1/projects/{project_id}/story-engine/cloud-drafts/{draft_snapshot_id}`

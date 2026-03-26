@@ -106,9 +106,35 @@ from services.story_engine_workflow_service import (
     run_outline_stress_test,
     run_realtime_guard,
 )
+from tasks.schemas import TaskState
+from tasks.story_engine_workflows import (
+    dispatch_bulk_import_task,
+    dispatch_final_optimize_task,
+    dispatch_outline_stress_task,
+    enqueue_bulk_import_task,
+    enqueue_final_optimize_task,
+    enqueue_outline_stress_task,
+)
 
 
 router = APIRouter()
+
+
+def _resolve_story_engine_import_payload(
+    payload: StoryBulkImportRequest,
+) -> tuple[StoryBulkImportPayload, dict[str, Any] | None]:
+    import_payload = payload.payload
+    template: dict[str, Any] | None = None
+    if import_payload is None and payload.template_key:
+        template = get_import_template(payload.template_key)
+        import_payload = template["payload"]
+    if import_payload is None:
+        raise AppError(
+            code="story_engine.import_payload_required",
+            message="请先选择一个起盘模板，或贴入完整设定包。",
+            status_code=400,
+        )
+    return StoryBulkImportPayload.model_validate(import_payload), template
 
 
 @router.get(
@@ -387,23 +413,13 @@ async def story_engine_bulk_import(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> StoryBulkImportResponse:
-    import_payload = payload.payload
-    template: dict[str, Any] | None = None
-    if import_payload is None and payload.template_key:
-        template = get_import_template(payload.template_key)
-        import_payload = template["payload"]
-    if import_payload is None:
-        raise AppError(
-            code="story_engine.import_payload_required",
-            message="请先选择一个起盘模板，或贴入完整设定包。",
-            status_code=400,
-        )
+    import_payload, template = _resolve_story_engine_import_payload(payload)
 
     result = await bulk_import_story_payload(
         session,
         project_id=project_id,
         user_id=current_user.id,
-        payload=StoryBulkImportPayload.model_validate(import_payload),
+        payload=import_payload,
         branch_id=payload.branch_id,
         replace_existing_sections=payload.replace_existing_sections,
         model_preset_key=(
@@ -413,6 +429,37 @@ async def story_engine_bulk_import(
         ),
     )
     return StoryBulkImportResponse.model_validate(result)
+
+
+@router.post(
+    "/projects/{project_id}/story-engine/imports/bulk/start",
+    response_model=TaskState,
+)
+async def story_engine_bulk_import_start(
+    project_id: UUID,
+    payload: StoryBulkImportRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> TaskState:
+    await get_story_engine_project(session, project_id, current_user.id)
+    import_payload, template = _resolve_story_engine_import_payload(payload)
+    task_state = await enqueue_bulk_import_task(
+        project_id=str(project_id),
+        user_id=str(current_user.id),
+        payload=import_payload.model_dump(mode="json"),
+        replace_existing_sections=payload.replace_existing_sections,
+        branch_id=payload.branch_id,
+        model_preset_key=(
+            str(template.get("recommended_model_preset_key") or "").strip()
+            if payload.apply_template_model_routing and template is not None
+            else None
+        ),
+    )
+    return await dispatch_bulk_import_task(
+        task_id=task_state.task_id,
+        project_id=str(project_id),
+        user_id=str(current_user.id),
+    )
 
 
 @router.post(
@@ -460,6 +507,29 @@ async def story_engine_outline_stress_test(
         target_total_words=payload.target_total_words or 1_000_000,
     )
     return OutlineStressTestResponse.model_validate(result)
+
+
+@router.post(
+    "/projects/{project_id}/story-engine/workflows/outline-stress-test/start",
+    response_model=TaskState,
+)
+async def story_engine_outline_stress_test_start(
+    project_id: UUID,
+    payload: OutlineStressTestRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> TaskState:
+    await get_story_engine_project(session, project_id, current_user.id)
+    task_state = await enqueue_outline_stress_task(
+        project_id=str(project_id),
+        user_id=str(current_user.id),
+        payload=payload.model_dump(mode="json"),
+    )
+    return await dispatch_outline_stress_task(
+        task_id=task_state.task_id,
+        project_id=str(project_id),
+        user_id=str(current_user.id),
+    )
 
 
 @router.post(
@@ -552,6 +622,29 @@ async def story_engine_final_optimize(
         style_sample=payload.style_sample,
     )
     return FinalOptimizeResponse.model_validate(result)
+
+
+@router.post(
+    "/projects/{project_id}/story-engine/workflows/final-optimize/start",
+    response_model=TaskState,
+)
+async def story_engine_final_optimize_start(
+    project_id: UUID,
+    payload: FinalOptimizeRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> TaskState:
+    await get_story_engine_project(session, project_id, current_user.id)
+    task_state = await enqueue_final_optimize_task(
+        project_id=str(project_id),
+        user_id=str(current_user.id),
+        payload=payload.model_dump(mode="json"),
+    )
+    return await dispatch_final_optimize_task(
+        task_id=task_state.task_id,
+        project_id=str(project_id),
+        user_id=str(current_user.id),
+    )
 
 
 @router.post(

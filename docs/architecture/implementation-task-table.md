@@ -374,10 +374,17 @@
 
 | ID | 任务 | 状态 | 优先级 | 目标 | 关键文件 |
 | --- | --- | --- | --- | --- | --- |
-| `P3-01` | 主链自动化回归落地 | `待开始` | `P0` | 把现有人工 smoke 清单沉成固定命令、固定数据和固定断言，后续每次改主链都能直接跑 | `docs/architecture/current-priority-checklist.md` `backend/scripts/story_engine_live_smoke.py` `frontend/package.json` `backend/tests` |
+| `P3-01` | 主链自动化回归落地 | `已完成（第一版）` | `P0` | 把现有人工 smoke 清单沉成固定命令、固定数据和固定断言，后续每次改主链都能直接跑 | `docs/architecture/current-priority-checklist.md` `backend/scripts/story_engine_live_smoke.py` `frontend/package.json` `backend/tests` |
 | `P3-02` | 工作台最近过程实时推送 | `待开始` | `P0` | 让 `story-room` 和 Dashboard 不再主要靠轮询刷新，而是更即时地看到“刚发生了什么 / 卡在哪一步” | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` `backend/api/ws.py` `backend/realtime/task_events.py` |
 | `P3-03` | 长流程失败恢复与重试收口 | `待开始` | `P0` | 让导入设定、测大纲漏洞、终稿收口等长流程在失败/中断后可恢复、可重试、可继续查看结果 | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `backend/services/story_engine_import_service.py` `backend/services/story_engine_workflow_service.py` `backend/services/task_service.py` |
 | `P3-04` | `story-room` 首屏减载与按阶段懒加载 | `待开始` | `P0` | 把大工作台改成按阶段拉取和缓存，减少首次进入、切章、切分线时的等待和卡顿 | `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `backend/api/v1/story_engine.py` `backend/services/story_engine_kb_service.py` `backend/services/task_service.py` |
+
+### `P3-01` 当前进度
+
+- 已完成（第一版）：`backend/scripts/story_engine_live_smoke.py` 已改成多场景 smoke 入口，支持 `mainline / branch-scope / cloud-draft / all` 四种固定执行方式。
+- 已完成（第一版）：每个 smoke 场景都已经内置固定数据和断言，不再只是把接口串起来执行一遍；失败时会直接以断言错误退出。
+- 已完成（第一版）：前端 `package.json` 已补齐 `npm run smoke:story-engine*` 一组固定命令，后续不需要再手敲长命令。
+- 已完成（第一版）：[current-priority-checklist.md](/Users/libenshi/Desktop/novels/docs/architecture/current-priority-checklist.md) 已补“自动化入口”与覆盖边界说明，同时新增了 smoke 断言的后端测试文件。
 
 ### 第二版可以后做
 
@@ -391,10 +398,24 @@
 
 | ID | 任务 | 状态 | 优先级 | 说明 | 关键文件 |
 | --- | --- | --- | --- | --- | --- |
-| `E3-01` | Story Engine 长流程异步任务化 | `待开始` | `P1` | 把大纲压力测试、批量导入、终稿收口从同步请求进一步收口到后台任务派发，减少超时和前台阻塞 | `backend/tasks/celery_app.py` `backend/services/story_engine_workflow_service.py` `backend/services/story_engine_import_service.py` `backend/api/v1/story_engine.py` |
+| `E3-01` | Story Engine 长流程异步任务化 | `已完成（第一版）` | `P1` | 把大纲压力测试、批量导入、终稿收口从同步请求进一步收口到后台任务派发，减少超时和前台阻塞 | `backend/tasks/celery_app.py` `backend/tasks/story_engine_workflows.py` `backend/services/story_engine_workflow_service.py` `backend/services/story_engine_import_service.py` `backend/api/v1/story_engine.py` |
 | `E3-02` | 任务事件订阅层统一 | `待开始` | `P1` | 把已有 `task_events`、WebSocket、前台轮询入口统一成一套更稳定的订阅层，减少页面各自拼装 | `backend/realtime/task_events.py` `backend/api/ws.py` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` `frontend/app/dashboard/page.tsx` |
 | `E3-03` | `story-room workspace` 契约拆分与缓存 | `待开始` | `P1` | 把现在偏大的 workspace 读法拆成主数据 + 分阶段数据 + 轻量缓存，减少重复拉全量 | `backend/api/v1/story_engine.py` `backend/services/story_engine_kb_service.py` `frontend/types/api.ts` `frontend/app/dashboard/projects/[projectId]/story-room/page.tsx` |
-| `E3-04` | 自动化 smoke 数据夹具与脚本统一 | `待开始` | `P1` | 把手工 smoke、后端 live smoke、前端测试入口统一命名、统一命令、统一测试账号策略 | `backend/scripts/story_engine_live_smoke.py` `backend/tests` `frontend/package.json` `docs/architecture/current-priority-checklist.md` |
+| `E3-04` | 自动化 smoke 数据夹具与脚本统一 | `已完成（第一版）` | `P1` | 把手工 smoke、后端 live smoke、前端测试入口统一命名、统一命令、统一测试账号策略 | `backend/scripts/story_engine_live_smoke.py` `backend/scripts/story_engine_smoke_support.py` `backend/tests` `frontend/package.json` `docs/architecture/current-priority-checklist.md` |
+
+### `E3-01` 当前进度
+
+- 已完成（第一版）：已新增 `backend/tasks/story_engine_workflows.py`，把大纲压力测试、批量导入、终稿收口三条长流程补成统一的异步排队与派发能力，并保留 Celery 不可用时的本地异步兜底。
+- 已完成（第一版）：后端已新增 `/imports/bulk/start`、`/workflows/outline-stress-test/start`、`/workflows/final-optimize/start` 三个异步入口，返回统一 `TaskState`，可以直接接现有任务详情、事件和项目回放接口。
+- 已完成（第一版）：`run_outline_stress_test / bulk_import_story_payload / run_final_optimize` 现在支持复用外部传入的 `workflow_id`，异步派发时不会重复创建任务记录，任务轨迹能从排队一路串到最终结果。
+- 已完成（第一版）：相关后端回归已补到任务派发层和工作流复用层，后续进入 `E3-02` 做订阅层统一时，不需要再重做这三条长流程的任务基础设施。
+
+### `E3-04` 当前进度
+
+- 已完成（第一版）：已新增 `backend/scripts/story_engine_smoke_support.py`，把 smoke 场景常量、固定夹具、断言规则和测试账号策略收成一套共享支持模块。
+- 已完成（第一版）：`story_engine_live_smoke.py` 与后端断言测试现在共用同一套 support 逻辑，不再把固定文本、场景枚举、断言条件散在多个文件里。
+- 已完成（第一版）：live smoke 已支持 `--email-prefix` 与 `--summary-file`，并与 `STORY_ENGINE_SMOKE_EMAIL_PREFIX` 环境变量对齐，方便本地联调和后续 CI 留档。
+- 已完成（第一版）：smoke 文档已同步补上统一账号策略与总结文件出口，后续再扩场景时只需要改 support 模块和对应场景实现。
 
 ### 第二版暂不做
 
@@ -420,11 +441,11 @@
 
 ### 第二版当前判断
 
-当前最合理的下一步不是继续往产品里加新按钮，而是先把“已经能用”的主链变成“每次改完都能快速验证、长流程断了也能接着跑、工作台过程更实时”的稳定版本。
+当前最合理的下一步不是继续往产品里加新按钮，而是继续把“已经能用”的主链做成“回归更快、执行更稳、过程更可观察”的稳定版本。
 
-所以第二版的第一个实际执行点应该是：
+`P3-01`、`E3-04` 和 `E3-01` 已经完成第一版，所以第二版的下一个实际执行点应该切到：
 
-- 先完成 `P3-01`，把主链自动化回归固定下来
-- 然后立刻补 `E3-04`，把 smoke 的脚本、数据夹具和命令入口统一
+- 先进入 `E3-02`，把事件订阅层收成统一入口，为实时回放和失败恢复打底
+- 然后继续推进 `P3-02`，把 Dashboard 和 `story-room` 的最近过程升级成更即时的推送体验
 
-只有这两步先落地，后面继续改实时推送、异步任务化和性能分层时，回归成本才不会持续抬高。
+只有这两步继续落地，后面再改实时推送、失败恢复和性能分层时，回归成本才不会持续抬高。
