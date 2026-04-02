@@ -3,13 +3,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from celery.contrib.testing.worker import start_worker
-
 from tasks.celery_app import celery_app
 from tasks.chapter_generation import process_generation_task_celery
 from tasks.schemas import TaskState
 
 
+@unittest.skipUnless(__import__("inspect").getfile(__import__("celery", fromlist=["Celery"]), default=False), "celery not installed")
 class CelerySmokeTests(unittest.TestCase):
     def test_chapter_generation_task_executes_through_worker(self) -> None:
         original_broker = celery_app.conf.broker_url

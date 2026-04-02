@@ -57,7 +57,7 @@ class ChapterGateSummary:
     latest_canon_issue_count: int = 0
     latest_canon_blocking_issue_count: int = 0
     latest_canon_summary: Optional[str] = None
-    final_ready: bool = True
+    final_ready: bool = False
     final_gate_status: str = FINAL_GATE_STATUS_READY
     final_gate_reason: Optional[str] = None
 

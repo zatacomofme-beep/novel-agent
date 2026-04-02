@@ -36,8 +36,8 @@ CHAPTER_PLAN_TEMPLATE = """你是长篇小说章节架构师。请为以下章�
 ## 时间线节点
 {timeline_beats_text}
 
-## 伏笔信息
-{foreshadowing_text}
+## 活跃伏笔追踪（Open Threads）
+{open_threads_text}
 
 ## 风格指导
 {style_guidance}
@@ -99,6 +99,7 @@ class ArchitectAgent(BaseAgent):
         plot_threads = context_brief.get("active_plot_threads") or []
         timeline_beats = context_brief.get("timeline_beats") or []
         foreshadowing = context_brief.get("foreshadowing_items") or []
+        open_threads = context_brief.get("open_threads") or []
 
         characters_text = self._format_named_entries(
             characters,
@@ -136,6 +137,8 @@ class ArchitectAgent(BaseAgent):
             limit=3,
         )
 
+        open_threads_text = self._format_open_threads(open_threads)
+
         pacing_preference = str(style_preferences.get("pacing_preference") or "balanced")
         dialogue_preference = str(style_preferences.get("dialogue_preference") or "balanced")
         tension_preference = str(style_preferences.get("tension_preference") or "balanced")
@@ -170,7 +173,7 @@ class ArchitectAgent(BaseAgent):
             locations_text=locations_text,
             plot_threads_text=plot_threads_text,
             timeline_beats_text=timeline_beats_text,
-            foreshadowing_text=foreshadowing_text,
+            open_threads_text=open_threads_text,
             style_guidance=style_guidance,
             narrative_mode=narrative_mode_display,
             pacing_preference=pacing_display,
@@ -494,6 +497,26 @@ class ArchitectAgent(BaseAgent):
             "narration_heavy": "叙述主导",
             "balanced": "均衡",
         }.get(dialogue_preference, "均衡")
+
+    def _format_open_threads(self, open_threads: list[Any]) -> str:
+        if not open_threads:
+            return "- 暂无活跃伏笔"
+        lines = []
+        for t in open_threads[:5]:
+            if isinstance(t, dict):
+                entity_ref = str(t.get("entity_ref", ""))[:40]
+                chapter = t.get("planted_chapter", "?")
+                status = t.get("status", "open")
+                priority = t.get("payoff_priority", 0.0)
+                tags = ", ".join(t.get("potential_tags", [])[:2])
+                lines.append(
+                    f"- 【第{chapter}章】{entity_ref} "
+                    f"[优先级:{priority:.1f}] [标签:{tags}] "
+                    f"[状态:{status}]"
+                )
+            else:
+                lines.append(f"- 伏笔: {str(t)[:40]}")
+        return "\n".join(lines) if lines else "- 暂无活跃伏笔"
 
     def _label_from_item(
         self,

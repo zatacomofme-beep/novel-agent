@@ -69,6 +69,16 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+async def metrics():
+    try:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from fastapi.responses import Response
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    except ImportError:
+        return {"error": "prometheus_client not installed"}
+
+
 @app.get("/ready")
 async def ready() -> dict[str, str]:
     return {"status": "ready", "api_prefix": settings().api_v1_prefix}

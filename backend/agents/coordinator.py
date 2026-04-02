@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from bus.protocol import AgentResponse
@@ -8,11 +9,14 @@ from core.config import get_settings
 from agents.architect import ArchitectAgent
 from agents.approver import ApproverAgent
 from agents.base import AgentRunContext, BaseAgent
+from agents.beta_reader import BetaReaderAgent
 from agents.canon_guardian import CanonGuardianAgent
+from agents.chaos_agent import ChaosAgent
 from agents.critic import CriticAgent
 from agents.debate import DebateAgent
 from agents.editor import EditorAgent
 from agents.librarian import LibrarianAgent
+from agents.linguistic_checker import LinguisticCheckerAgent
 from agents.writer import WriterAgent
 from services.truth_layer_service import build_truth_layer_context
 
@@ -43,6 +47,9 @@ class CoordinatorAgent(BaseAgent):
         )
         self.editor = EditorAgent()
         self.approver = ApproverAgent()
+        self.linguistic_checker = LinguisticCheckerAgent()
+        self.beta_reader = BetaReaderAgent()
+        self.chaos_agent = ChaosAgent()
 
     async def _run(
         self,
@@ -62,6 +69,15 @@ class CoordinatorAgent(BaseAgent):
 
         context_brief = librarian_response.data["context_brief"]
         context_bundle = librarian_response.data["context_bundle"]
+
+        open_threads = payload.get("open_threads", [])
+        if open_threads:
+            context_brief = {**context_brief, "open_threads": open_threads}
+
+        social_topology = payload.get("social_topology", {})
+        if social_topology:
+            context_brief = {**context_brief, "social_topology": social_topology}
+
         architect_response = await self.architect.run(
             context,
             {
@@ -81,6 +97,7 @@ class CoordinatorAgent(BaseAgent):
                 "context_brief": context_brief,
                 "context_bundle": context_bundle,
                 "chapter_plan": chapter_plan,
+                "resume_from": payload.get("resume_from"),
             },
         )
         if not writer_response.success:
@@ -88,6 +105,59 @@ class CoordinatorAgent(BaseAgent):
 
         content = writer_response.data["content"]
         outline = writer_response.data["outline"]
+
+        beta_response = await self.beta_reader.run(
+            context,
+            {
+                "content": content,
+                "genre": payload.get("genre", "general"),
+                "target_audience": payload.get("target_audience", "adult"),
+                "tension_data": payload.get("tension_data", {}),
+                "beta_history": payload.get("beta_history", []),
+                "persona_archetype": payload.get("persona_archetype", "idealist"),
+                "chapter_number": payload.get("chapter_number"),
+            },
+        )
+        beta_feedback = beta_response.data if beta_response.success else {}
+
+        pre_canon_response = await self.canon_guardian.run(
+            context,
+            {
+                "story_bible": payload["story_bible"],
+                "content": content,
+                "chapter_number": payload.get("chapter_number"),
+                "chapter_title": payload.get("chapter_title"),
+                "project_id": payload.get("project_id"),
+            },
+        )
+        if pre_canon_response.success and isinstance(pre_canon_response.data, dict):
+            pre_canon_report = pre_canon_response.data.get("canon_report", {})
+            pre_blocking = pre_canon_report.get("blocking_issue_count", 0) if isinstance(pre_canon_report, dict) else 0
+            if pre_blocking > 0:
+                pre_review = {
+                    "needs_revision": True,
+                    "issues": pre_canon_report.get("issues", []) if isinstance(pre_canon_report, dict) else [],
+                    "ai_taste_score": 0.3,
+                    "overall_score": 0.3,
+                }
+                return AgentResponse(
+                    success=True,
+                    data={
+                        "content": content,
+                        "final_review": pre_review,
+                        "initial_review": pre_review,
+                        "final_canon_report": pre_canon_report,
+                        "initial_canon_report": pre_canon_report,
+                        "rounds_completed": 0,
+                        "initial_truth_layer_context": {},
+                        "final_truth_layer_context": {},
+                        "revision_plans": [],
+                        "debate_summaries": [],
+                    },
+                    confidence=0.3,
+                    reasoning="Canon pre-check caught blocking issues before revision loop",
+                )
+
         integrity_report = (
             payload.get("story_bible_integrity_report")
             if isinstance(payload.get("story_bible_integrity_report"), dict)
@@ -102,6 +172,7 @@ class CoordinatorAgent(BaseAgent):
             context_brief=context_brief,
             context_bundle=context_bundle,
             integrity_report=integrity_report,
+            beta_feedback=beta_feedback,
         )
 
         content = revision_loop_result["content"]
@@ -182,7 +253,7 @@ class CoordinatorAgent(BaseAgent):
                 "revision_rounds_completed": revision_rounds_completed,
                 "trace": context.trace,
             },
-            confidence=0.79 + (0.05 * min(revision_rounds_completed, 3)),
+            confidence=0.92 - (0.05 * min(revision_rounds_completed, 3)),
             reasoning=f"协调 librarian、writer、canon_guardian、critic 等角色，形成 {revision_rounds_completed} 轮可追踪的章节生成、自检与规范校验流程。",
         )
 
@@ -195,6 +266,7 @@ class CoordinatorAgent(BaseAgent):
         context_brief: dict[str, Any],
         context_bundle: dict[str, Any],
         integrity_report: dict[str, Any] | None,
+        beta_feedback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         content = initial_content
         all_debate_summaries: list[dict[str, Any]] = []
@@ -211,8 +283,10 @@ class CoordinatorAgent(BaseAgent):
             canon_report=None,
         )
         final_truth_layer_context = initial_truth_layer_context
+        chaos_data: dict[str, Any] = {}
+        tension_data: dict[str, Any] = {}
 
-        for round_num in range(1, self.max_revision_rounds + 2):
+        for round_num in range(1, self.max_revision_rounds + 1):
             canon_response = await self.canon_guardian.run(
                 context,
                 {
@@ -258,17 +332,23 @@ class CoordinatorAgent(BaseAgent):
                 initial_canon_report = canon_report
                 initial_truth_layer_context = round_truth_layer_context
 
+            if revision_plan:
+                all_revision_plans.append(revision_plan)
+
             if not review.get("needs_revision", False):
                 final_review = review
+                final_truth_layer_context = round_truth_layer_context
                 break
 
             ai_taste_score = review.get("ai_taste_score", 1.0)
             if ai_taste_score >= (1.0 - self.min_ai_taste_threshold):
                 final_review = review
+                final_truth_layer_context = round_truth_layer_context
                 break
 
             if round_num > self.max_revision_rounds:
                 final_review = review
+                final_truth_layer_context = round_truth_layer_context
                 break
 
             debate_response = await self.debate.run(
@@ -293,8 +373,6 @@ class CoordinatorAgent(BaseAgent):
             revision_plan = debate_data.get("revision_plan")
             debate_summary = debate_data.get("debate_summary")
 
-            if revision_plan:
-                all_revision_plans.append(revision_plan)
             if debate_summary:
                 all_debate_summaries.append(debate_summary)
 
@@ -312,6 +390,8 @@ class CoordinatorAgent(BaseAgent):
                     "truth_layer_context": round_truth_layer_context,
                     "debate_summary": debate_summary,
                     "revision_round": round_num,
+                    "chaos_interventions": review.get("chaos_interventions", []),
+                    "beta_feedback": beta_feedback,
                 },
             )
             if not editor_response.success:
@@ -320,6 +400,46 @@ class CoordinatorAgent(BaseAgent):
 
             content = editor_response.data["content"]
             current_revision_plan = revision_plan
+
+            if round_num == 1:
+                characters = context_brief.get("characters", [])
+                if characters:
+                    linguistic_response = await self.linguistic_checker.run(
+                        context,
+                        {
+                            "content": content,
+                            "characters": characters,
+                            "profiles": context_brief.get("linguistic_profiles", []),
+                        },
+                    )
+                    if linguistic_response.success and linguistic_response.data:
+                        linguistic_issues = linguistic_response.data.get("issues", [])
+                        if linguistic_issues:
+                            review["issues"].extend(linguistic_issues)
+                            review["linguistic_issues"] = linguistic_issues
+
+                chaos_response = await self.chaos_agent.run(
+                    context,
+                    {
+                        "content": content,
+                        "chapter_plan": chapter_plan,
+                        "existing_threads": context_brief.get("open_threads", []),
+                        "characters": characters,
+                        "story_bible": payload.get("story_bible", {}),
+                    },
+                )
+                if chaos_response.success and chaos_response.data:
+                    chaos_data = chaos_response.data
+                    review["chaos_interventions"] = chaos_data.get("chaos_interventions", [])
+
+                from services.tension_sensor_service import tension_sensor_service
+                tension_score = tension_sensor_service.compute_tension_from_text(content)
+                tension_data = {
+                    "tension_score": tension_score,
+                    "tension_level": tension_sensor_service.classify_tension_level(tension_score),
+                    "chaos_score": chaos_data.get("overall_chaos_score", 0.5),
+                }
+
             rounds_completed += 1
 
             if debate_data.get("final_verdict") == "no_issues":
@@ -341,6 +461,8 @@ class CoordinatorAgent(BaseAgent):
             "rounds_completed": rounds_completed,
             "initial_truth_layer_context": initial_truth_layer_context,
             "final_truth_layer_context": final_truth_layer_context,
+            "chaos_data": chaos_data,
+            "tension_data": tension_data,
         }
 
     def _empty_canon_report(self, payload: dict[str, Any]) -> dict[str, Any]:

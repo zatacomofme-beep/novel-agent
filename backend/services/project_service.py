@@ -551,6 +551,13 @@ async def get_story_bible(
     *,
     branch_id: Optional[UUID] = None,
 ) -> StoryBibleRead:
+    from services.cache_service import cache_service
+
+    cache_key = f"story_bible:{project_id}:{branch_id or 'main'}"
+    cached = await cache_service.get(cache_key)
+    if cached is not None:
+        return StoryBibleRead.model_validate(cached)
+
     project = await get_owned_project(
         session,
         project_id,
@@ -558,11 +565,13 @@ async def get_story_bible(
         with_relations=True,
         permission=PROJECT_PERMISSION_READ,
     )
-    return await build_story_bible_payload(
+    result = await build_story_bible_payload(
         session,
         project,
         branch_id=branch_id,
     )
+    await cache_service.set(cache_key, result.model_dump(mode="json"), ttl=300)
+    return result
 
 
 async def build_story_bible_payload(
@@ -1974,11 +1983,13 @@ async def upsert_story_bible_branch_item(
         actor_user_id,
         with_relations=True,
     )
-    return await build_story_bible_payload(
+    result = await build_story_bible_payload(
         session,
         refreshed,
         branch_id=branch.id,
     )
+    await _invalidate_project_story_bible_cache(project.id)
+    return result
 
 
 async def delete_story_bible_branch_item(
@@ -2045,11 +2056,13 @@ async def delete_story_bible_branch_item(
         actor_user_id,
         with_relations=True,
     )
-    return await build_story_bible_payload(
+    result = await build_story_bible_payload(
         session,
         refreshed,
         branch_id=branch.id,
     )
+    await _invalidate_project_story_bible_cache(project.id)
+    return result
 
 
 async def create_project_volume(
@@ -2271,11 +2284,13 @@ async def replace_story_bible(
             actor_user_id,
             with_relations=True,
         )
-        return await build_story_bible_payload(
+        result = await build_story_bible_payload(
             session,
             refreshed,
             branch_id=branch.id,
         )
+        await _invalidate_project_story_bible_cache(project.id)
+        return result
 
     await _replace_related_items(
         session,
@@ -2431,10 +2446,17 @@ async def replace_story_bible(
         actor_user_id,
         with_relations=True,
     )
-    return await build_story_bible_payload(
+    result = await build_story_bible_payload(
         session,
         refreshed,
     )
+    await _invalidate_project_story_bible_cache(project.id)
+    return result
+
+
+async def _invalidate_project_story_bible_cache(project_id: UUID) -> None:
+    from services.cache_service import cache_service
+    await cache_service.invalidate_cache_type("story_bible", str(project_id))
 
 
 async def _invalidate_story_bible_related_chapter_evaluations(

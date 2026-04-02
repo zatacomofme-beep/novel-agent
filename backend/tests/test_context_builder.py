@@ -102,6 +102,8 @@ class ContextBuilderTests(unittest.IsolatedAsyncioTestCase):
         with patch("memory.context_builder.vector_store.search", new=search_mock):
             bundle = await build_context_bundle(
                 story_bible,
+                None,
+                project_id=str(story_bible.project_id),
                 chapter_number=7,
                 chapter_title="黑钟再鸣",
             )

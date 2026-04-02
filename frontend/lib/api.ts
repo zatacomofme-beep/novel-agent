@@ -181,3 +181,50 @@ export async function downloadWithAuth(
   anchor.remove();
   window.URL.revokeObjectURL(objectUrl);
 }
+
+export interface SnapshotResponse {
+  id: string;
+  version_number: number;
+  content: string;
+  action_type: string;
+  trigger_agent: string | null;
+  revision_round: number | null;
+  content_length: number;
+  created_at: string;
+}
+
+export interface UndoRedoStatus {
+  can_undo: boolean;
+  can_redo: boolean;
+  current_version: number;
+  total_versions: number;
+}
+
+export async function getChapterUndoRedoStatus(chapterId: string): Promise<UndoRedoStatus> {
+  return apiFetchWithAuth<UndoRedoStatus>(
+    `/api/v1/chapters/${chapterId}/history/status`
+  );
+}
+
+export async function listChapterSnapshots(
+  chapterId: string,
+  limit = 20
+): Promise<SnapshotResponse[]> {
+  return apiFetchWithAuth<SnapshotResponse[]>(
+    `/api/v1/chapters/${chapterId}/history/snapshots?limit=${limit}`
+  );
+}
+
+export async function undoChapter(chapterId: string): Promise<{ success: boolean; snapshot?: SnapshotResponse; message?: string }> {
+  return apiFetchWithAuth(
+    `/api/v1/chapters/${chapterId}/history/undo`,
+    { method: "POST" }
+  );
+}
+
+export async function redoChapter(chapterId: string): Promise<{ success: boolean; snapshot?: SnapshotResponse; message?: string }> {
+  return apiFetchWithAuth(
+    `/api/v1/chapters/${chapterId}/history/redo`,
+    { method: "POST" }
+  );
+}

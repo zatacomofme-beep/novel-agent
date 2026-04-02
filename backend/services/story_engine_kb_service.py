@@ -20,7 +20,7 @@ from models.story_engine import (
     StoryTimelineMapEvent,
     StoryWorldRule,
 )
-from services.chroma_service import StoryEngineChromaService
+from services.story_engine_vector_store import vector_store
 from services.project_service import (
     PROJECT_PERMISSION_EDIT,
     PROJECT_PERMISSION_READ,
@@ -82,8 +82,6 @@ ENTITY_REGISTRY: dict[str, StoryEntityRegistry] = {
     ),
 }
 
-
-vector_store = StoryEngineChromaService()
 
 WORKSPACE_PROVENANCE_SECTION_KEYS = (
     "characters",

@@ -34,18 +34,50 @@ class AgentRunContext:
 
 
 class BaseAgent:
+    DEFAULT_MAX_RETRIES = 2
+    DEFAULT_BASE_DELAY = 1.0
+
     def __init__(
         self,
         name: str,
         role: str,
         *,
         bus: Optional[InMemoryMessageBus] = None,
+        max_retries: int | None = None,
     ) -> None:
         self.name = name
         self.role = role
         self.bus = bus or message_bus
+        self.max_retries = max_retries if max_retries is not None else self.DEFAULT_MAX_RETRIES
 
     async def run(
+        self,
+        context: AgentRunContext,
+        payload: dict[str, Any],
+    ) -> AgentResponse:
+        last_error: str | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await self._run_with_tracing(context, payload)
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                if attempt < self.max_retries:
+                    import asyncio
+                    delay = self.DEFAULT_BASE_DELAY * (2 ** attempt)
+                    await asyncio.sleep(delay)
+
+        fallback_response = await self._fallback(context, payload, last_error)
+        if fallback_response is not None:
+            return fallback_response
+        return AgentResponse(
+            success=False,
+            data=None,
+            error=last_error or "unknown",
+            confidence=0.0,
+            reasoning=f"{self.name} failed after {self.max_retries + 1} attempts",
+        )
+
+    async def _run_with_tracing(
         self,
         context: AgentRunContext,
         payload: dict[str, Any],
@@ -78,6 +110,14 @@ class BaseAgent:
                 priority=Priority.HIGH,
             )
         return response
+
+    async def _fallback(
+        self,
+        context: AgentRunContext,
+        payload: dict[str, Any],
+        error: str | None,
+    ) -> AgentResponse | None:
+        return None
 
     async def _run(
         self,

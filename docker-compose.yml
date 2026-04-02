@@ -28,13 +28,21 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
-  chroma:
-    image: chromadb/chroma:0.5.23
-    container_name: novel-agent-chroma
+  neo4j:
+    image: neo4j:5.18
+    container_name: novel-agent-neo4j
     ports:
-      - "8001:8000"
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+      - APOC_EXPORT_FILE_ENABLED=true
+      - APOC_GRAPH_LOADER_ENABLED=true
     volumes:
-      - chroma-data:/chroma/chroma
+      - neo4j-data:/data
+      - ./infrastructure/neo4j/conf:/conf
+      - ./infrastructure/neo4j/import:/import
 
   backend:
     build:
@@ -56,7 +64,7 @@ services:
       - postgres
       - redis
       - qdrant
-      - chroma
+      - neo4j
 
   celery_worker:
     build:
@@ -76,7 +84,6 @@ services:
       - postgres
       - redis
       - qdrant
-      - chroma
 
   frontend:
     build:
@@ -104,4 +111,4 @@ volumes:
   postgres-data:
   redis-data:
   qdrant-data:
-  chroma-data:
+  neo4j-data:

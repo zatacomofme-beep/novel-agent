@@ -16,25 +16,30 @@ class LibrarianAgent(BaseAgent):
         context: AgentRunContext,
         payload: dict,
     ) -> AgentResponse:
+        from db.session import AsyncSessionLocal
+
         story_bible: StoryBibleContext = payload["story_bible"]
-        context_bundle = await build_context_bundle(
-            story_bible,
-            chapter_number=payload.get("chapter_number", 1),
-            chapter_title=payload.get("chapter_title"),
-        )
-        brief = {
-            "project_title": story_bible.title,
-            "genre": story_bible.genre,
-            "theme": story_bible.theme,
-            "tone": story_bible.tone,
-            "characters": [item["name"] for item in story_bible.characters[:8]],
-            "locations": [item["name"] for item in story_bible.locations[:6]],
-            "active_plot_threads": [item["title"] for item in story_bible.plot_threads[:6]],
-            "timeline_beats": [item["title"] for item in story_bible.timeline_events[:6]],
-            "foreshadowing_items": [
-                item["content"] for item in story_bible.foreshadowing[:4]
-            ],
-        }
+        async with AsyncSessionLocal() as session:
+            context_bundle = await build_context_bundle(
+                story_bible,
+                session,
+                project_id=str(story_bible.project_id),
+                chapter_number=payload.get("chapter_number", 1),
+                chapter_title=payload.get("chapter_title"),
+            )
+            brief = {
+                "project_title": story_bible.title,
+                "genre": story_bible.genre,
+                "theme": story_bible.theme,
+                "tone": story_bible.tone,
+                "characters": [item["name"] for item in story_bible.characters[:8]],
+                "locations": [item["name"] for item in story_bible.locations[:6]],
+                "active_plot_threads": [item["title"] for item in story_bible.plot_threads[:6]],
+                "timeline_beats": [item["title"] for item in story_bible.timeline_events[:6]],
+                "foreshadowing_items": [
+                    item["content"] for item in story_bible.foreshadowing[:4]
+                ],
+            }
         return AgentResponse(
             success=True,
             data={

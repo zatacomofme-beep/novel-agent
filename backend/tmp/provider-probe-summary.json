@@ -1,0 +1,223 @@
+{
+  "base_url": "http://127.0.0.1:8000/api/v1",
+  "scenario": "all",
+  "account_email": null,
+  "provider_probe_only": true,
+  "provider_probes_skipped": false,
+  "routing_snapshot": {
+    "default_preset_key": "balanced",
+    "default_preset_label": "均衡稳稿",
+    "guardian_consensus": {
+      "enabled": true,
+      "shadow_model": "gemini-3.1-pro-preview",
+      "shadow_reasoning_effort": "high",
+      "outline_enabled": true,
+      "realtime_enabled": true,
+      "final_enabled": true
+    },
+    "default_routing": {
+      "outline": {
+        "model": "claude-opus-4-6",
+        "reasoning_effort": "high"
+      },
+      "guardian": {
+        "model": "gpt-5.4",
+        "reasoning_effort": "high"
+      },
+      "logic_debunker": {
+        "model": "claude-opus-4-6",
+        "reasoning_effort": "high"
+      },
+      "commercial": {
+        "model": "deepseek-v3.2",
+        "reasoning_effort": "medium"
+      },
+      "style_guardian": {
+        "model": "gemini-3.1-pro-preview",
+        "reasoning_effort": "medium"
+      },
+      "anchor": {
+        "model": "gpt-5.4",
+        "reasoning_effort": "medium"
+      },
+      "arbitrator": {
+        "model": "gpt-5.4",
+        "reasoning_effort": "high"
+      },
+      "stream_writer": {
+        "model": "claude-opus-4-6",
+        "reasoning_effort": "high"
+      }
+    },
+    "available_model_ids": [
+      "gpt-5.4",
+      "gemini-3.1-pro-preview",
+      "claude-opus-4-6",
+      "deepseek-v3.2"
+    ]
+  },
+  "provider_probe_summary": {
+    "total_models": 4,
+    "remote_success_count": 3,
+    "fallback_count": 1,
+    "status_counts": {
+      "remote_success": 3,
+      "fallback": 1
+    },
+    "error_counts": {
+      "auth": 1
+    },
+    "selected_providers": [
+      "openai-compatible"
+    ],
+    "actual_providers": [
+      "local-fallback",
+      "openai-compatible"
+    ],
+    "api_modes": [
+      "chat_completions",
+      "responses"
+    ],
+    "remote_success_models": [
+      "claude-opus-4-6",
+      "deepseek-v3.2",
+      "gemini-3.1-pro-preview"
+    ],
+    "fallback_models": [
+      "gpt-5.4"
+    ],
+    "all_remote_success": false
+  },
+  "provider_live_probes": [
+    {
+      "requested_model": "claude-opus-4-6",
+      "label": "Claude Opus 4.6",
+      "expected_provider": "openai-compatible",
+      "selected_provider": "openai-compatible",
+      "actual_provider": "openai-compatible",
+      "actual_model": "claude-opus-4-6",
+      "api_mode": "chat_completions",
+      "reasoning_effort": "high",
+      "route_roles": [
+        "outline",
+        "logic_debunker",
+        "stream_writer"
+      ],
+      "recommended_roles": [
+        "logic_debunker"
+      ],
+      "remote_success": true,
+      "used_fallback": false,
+      "probe_status": "remote_success",
+      "remote_status": null,
+      "attempt": 1,
+      "latency_seconds": 11.86,
+      "error_type": null,
+      "status_code": null,
+      "error_message": null,
+      "output_preview": "已收到探活请求，Story Engine 模型联通正常。"
+    },
+    {
+      "requested_model": "deepseek-v3.2",
+      "label": "DeepSeek V3.2",
+      "expected_provider": "openai-compatible",
+      "selected_provider": "openai-compatible",
+      "actual_provider": "openai-compatible",
+      "actual_model": "deepseek-v3.2",
+      "api_mode": "chat_completions",
+      "reasoning_effort": "medium",
+      "route_roles": [
+        "commercial"
+      ],
+      "recommended_roles": [
+        "commercial",
+        "stream_writer"
+      ],
+      "remote_success": true,
+      "used_fallback": false,
+      "probe_status": "remote_success",
+      "remote_status": null,
+      "attempt": 1,
+      "latency_seconds": 2.62,
+      "error_type": null,
+      "status_code": null,
+      "error_message": null,
+      "output_preview": "探活请求已收到。"
+    },
+    {
+      "requested_model": "gemini-3.1-pro-preview",
+      "label": "Gemini 3.1 Pro Preview",
+      "expected_provider": "openai-compatible",
+      "selected_provider": "openai-compatible",
+      "actual_provider": "openai-compatible",
+      "actual_model": "gemini-3.1-pro-preview",
+      "api_mode": "chat_completions",
+      "reasoning_effort": "medium",
+      "route_roles": [
+        "style_guardian"
+      ],
+      "recommended_roles": [
+        "style_guardian"
+      ],
+      "remote_success": true,
+      "used_fallback": false,
+      "probe_status": "remote_success",
+      "remote_status": null,
+      "attempt": 1,
+      "latency_seconds": 6.04,
+      "error_type": null,
+      "status_code": null,
+      "error_message": null,
+      "output_preview": "已收到探活"
+    },
+    {
+      "requested_model": "gpt-5.4",
+      "label": "GPT 5.4",
+      "expected_provider": "openai-compatible",
+      "selected_provider": "openai-compatible",
+      "actual_provider": "local-fallback",
+      "actual_model": "heuristic-v1",
+      "api_mode": "responses",
+      "reasoning_effort": "high",
+      "route_roles": [
+        "guardian",
+        "anchor",
+        "arbitrator"
+      ],
+      "recommended_roles": [
+        "outline",
+        "guardian",
+        "anchor",
+        "arbitrator",
+        "stream_writer"
+      ],
+      "remote_success": false,
+      "used_fallback": true,
+      "probe_status": "fallback",
+      "remote_status": null,
+      "attempt": null,
+      "latency_seconds": 2.05,
+      "error_type": "auth",
+      "status_code": 403,
+      "error_message": "Error code: 403 - {'error': {'message': 'user quota is not enough (request id: 20260327065544767228938CvJTjvX5)', 'type': 'new_api_error', 'param': '', 'code': 'local:insufficient_quota'}}",
+      "output_preview": "__story_engine_probe_fallback__:gpt-5.4"
+    }
+  ],
+  "workflow_failover_summary": {
+    "mainline": {
+      "stream_provider_model_pairs": [],
+      "stream_any_fallback": false,
+      "stream_fallback_paragraphs": [],
+      "stream_failover_paragraphs": [],
+      "stream_failover_details": [],
+      "stream_providers_used": [],
+      "stream_models_used": [],
+      "outline_agent_models": [],
+      "final_agent_models": [],
+      "final_revision_provider": null,
+      "final_revision_model": null,
+      "final_revision_used_fallback": null
+    }
+  },
+  "results": {}
+}

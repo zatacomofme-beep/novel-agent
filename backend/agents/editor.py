@@ -24,6 +24,7 @@ class EditorAgent(BaseAgent):
         style_guidance = payload.get("style_guidance") or ""
         style_preferences = payload.get("style_preferences") or {}
         truth_layer_context = payload.get("truth_layer_context") or {}
+        chaos_interventions: list[dict[str, Any]] = payload.get("chaos_interventions") or []
 
         generation = await model_gateway.generate_text(
             GenerationRequest(
@@ -31,7 +32,8 @@ class EditorAgent(BaseAgent):
                 prompt=(
                     f"Issues={issues} | Context={context_brief} | "
                     f"RevisionPlan={revision_plan} | TruthLayer={truth_layer_context} | "
-                    f"StyleGuidance={style_guidance}"
+                    f"StyleGuidance={style_guidance} | "
+                    f"ChaosInterventions={chaos_interventions}"
                 ),
                 metadata={"agent": self.name},
             ),
@@ -42,6 +44,7 @@ class EditorAgent(BaseAgent):
                 revision_plan,
                 style_preferences,
                 truth_layer_context,
+                chaos_interventions,
             ),
         )
         revised = generation.content
@@ -51,6 +54,11 @@ class EditorAgent(BaseAgent):
             data={
                 "content": revised,
                 "applied_revision_plan": revision_plan,
+                "chaos_interventions_applied": [
+                    {"type": i.get("type"), "location": i.get("location"), "description": i.get("description")}
+                    for i in chaos_interventions
+                    if i.get("canon_safe", False) is True
+                ],
                 "generation": {
                     "provider": generation.provider,
                     "model": generation.model,
@@ -70,12 +78,23 @@ class EditorAgent(BaseAgent):
         revision_plan: dict[str, Any],
         style_preferences: dict[str, Any],
         truth_layer_context: dict[str, Any],
+        chaos_interventions: list[dict[str, Any]] | None = None,
     ) -> str:
         revised = content
         priorities = revision_plan.get("priorities")
         banned_patterns = style_preferences.get("banned_patterns") or []
         chapter_revision_targets = truth_layer_context.get("chapter_revision_targets") or []
         story_bible_followups = truth_layer_context.get("story_bible_followups") or []
+        safe_interventions = [
+            i for i in (chaos_interventions or [])
+            if i.get("canon_safe", False) is True
+        ]
+        if safe_interventions:
+            intervention_notes = [
+                f"[{i.get('type','unknown')} at {i.get('location','?')}] {i.get('description','')}"
+                for i in safe_interventions[:3]
+            ]
+            revised += "\n\n编辑注（Chaos 干预）:" + " ".join(intervention_notes)
         if isinstance(priorities, list):
             for priority in priorities[:3]:
                 if not isinstance(priority, dict):

@@ -45,4 +45,16 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    task_queues={
+        "critical": {"exchange": "critical", "routing_key": "critical"},
+        "high": {"exchange": "high", "routing_key": "high"},
+        "normal": {"exchange": "normal", "routing_key": "normal"},
+        "low": {"exchange": "low", "routing_key": "low"},
+    },
+    task_routes={
+        "chapter_generation.process": {"queue": "critical", "routing_key": "critical"},
+        "entity_generation.process": {"queue": "high", "routing_key": "high"},
+        "story_engine_workflows.*": {"queue": "normal", "routing_key": "normal"},
+    },
+    task_default_queue="normal",
 )

@@ -350,3 +350,42 @@ async def chapter_export(
         ),
         filename=build_chapter_export_filename(project.title, chapter, export_format),
     )
+
+
+@router.post("/chapters/{chapter_id}/beta-reader")
+async def get_beta_reader_feedback(
+    chapter_id: UUID,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    from agents.beta_reader import BetaReaderAgent
+    from agents.base import AgentRunContext
+
+    chapter = await get_owned_chapter(
+        session,
+        chapter_id,
+        current_user.id,
+        permission=PROJECT_PERMISSION_READ,
+    )
+
+    beta_reader = BetaReaderAgent()
+    context = AgentRunContext(
+        chapter_id=str(chapter_id),
+        project_id=str(chapter.project_id),
+        task_id=f"beta-{chapter_id}",
+        payload={},
+    )
+
+    result = await beta_reader.run(
+        context,
+        {
+            "content": body.get("content", ""),
+            "genre": body.get("genre", "fantasy"),
+            "target_audience": body.get("target_audience", "adult"),
+        },
+    )
+
+    if not result.success:
+        return {"success": False, "error": result.error}
+    return {"success": True, "beta_feedback": result.data}

@@ -98,6 +98,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         gateway = ModelGateway()
         gateway.openai_api_key = None
         gateway.anthropic_api_key = None
+        gateway.gateway_api_key = None
 
         result = await gateway.generate_text(
             GenerationRequest(task_name="writer.draft", prompt="hello"),

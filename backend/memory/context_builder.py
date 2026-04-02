@@ -1,16 +1,34 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
-from typing import Optional
+from typing import Any, Optional
 
 from memory.story_bible import StoryBibleContext
 from memory.vector_store import RetrievedItem, vector_store
+from memory.l2_episodic import L2EpisodicMemory, ChapterEpisode
+
+
+def _episode_to_dict(episode: ChapterEpisode) -> dict[str, Any]:
+    return {
+        "type": "episode",
+        "chapter_number": episode.chapter_number,
+        "summary": episode.summary,
+        "key_events": episode.key_events,
+        "characters": episode.characters,
+        "locations": episode.locations,
+        "emotional_tone": episode.emotional_tone,
+        "themes": episode.themes,
+        "open_threads": episode.open_threads,
+        "word_count": episode.word_count,
+        "importance_score": episode.importance_score,
+    }
 
 
 async def build_context_bundle(
     story_bible: StoryBibleContext,
+    session: "AsyncSession",
     *,
+    project_id: str,
     chapter_number: int,
     chapter_title: Optional[str],
     token_budget: int = 2800,
@@ -91,6 +109,17 @@ async def build_context_bundle(
         item for batch in retrieval_batches for item in batch
     ]
 
+    l2 = L2EpisodicMemory(session)
+    try:
+        recent_episodes = await l2.get_recent_episodes(
+            project_id=story_bible.project_id,
+            before_chapter=chapter_number,
+            limit=5,
+        )
+        episode_dicts = [_episode_to_dict(ep) for ep in recent_episodes]
+    except Exception:
+        episode_dicts = []
+
     ranked = sorted(retrieved, key=lambda item: item.score, reverse=True)
     selected_items: list[dict[str, Any]] = []
     consumed = 0
@@ -106,6 +135,14 @@ async def build_context_bundle(
             continue
         selected_items.append(serialized)
         consumed += estimated_cost
+
+    episode_budget = int(token_budget * 0.15)
+    for ep_dict in episode_dicts:
+        ep_size = len(str(ep_dict))
+        if consumed + ep_size > token_budget:
+            break
+        selected_items.append(ep_dict)
+        consumed += ep_size
 
     return {
         "query": query,

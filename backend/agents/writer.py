@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Optional
 
 from bus.protocol import AgentResponse
 from agents.model_gateway import GenerationRequest, model_gateway
@@ -9,6 +9,8 @@ from agents.base import AgentRunContext, BaseAgent
 
 
 class WriterAgent(BaseAgent):
+    DEFAULT_SEGMENTS = 4
+
     def __init__(self) -> None:
         super().__init__(name="writer", role="draft_author")
 
@@ -26,34 +28,80 @@ class WriterAgent(BaseAgent):
         context_brief = payload["context_brief"]
         style_guidance = payload.get("style_guidance") or ""
         style_preferences = payload.get("style_preferences") or {}
-        generation = await model_gateway.generate_text(
-            GenerationRequest(
-                task_name="writer.draft",
-                prompt=(
-                    f"Project={project_title} | Chapter={chapter_number} | Title={chapter_title} | "
-                    f"Genre={genre} | Tone={tone} | Plan={chapter_plan} | "
-                    f"StyleGuidance={style_guidance}"
-                ),
-                metadata={"agent": self.name},
-            ),
-            fallback=lambda: self._build_content(
-                chapter_number=chapter_number,
-                chapter_title=chapter_title,
-                project_title=project_title,
-                genre=genre,
-                tone=tone,
-                context_brief=context_brief,
-                chapter_plan=chapter_plan,
-                style_preferences=style_preferences,
-            ),
+        resume_from: Optional[dict[str, Any]] = payload.get("resume_from")
+        save_checkpoint: Optional[Callable[..., Any]] = payload.get("save_checkpoint")
+        segments_total = payload.get("segments_total", self.DEFAULT_SEGMENTS)
+
+        segments_completed = 0
+        accumulated_content = ""
+
+        if resume_from:
+            accumulated_content = resume_from.get("generated_content", "")
+            segments_completed = resume_from.get("segments_completed", 0)
+
+        segment_prompts = self._build_segment_prompts(
+            chapter_plan=chapter_plan,
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            project_title=project_title,
+            genre=genre,
+            tone=tone,
+            context_brief=context_brief,
+            style_guidance=style_guidance,
+            style_preferences=style_preferences,
+            segments_total=segments_total,
         )
-        content = generation.content
+
+        for seg_idx in range(segments_completed, segments_total):
+            segment_prompt = segment_prompts[seg_idx]
+            if accumulated_content and seg_idx > 0:
+                segment_prompt = (
+                    f"承接此前已完成的内容：\n\n{accumulated_content}\n\n"
+                    f"请继续撰写下一部分，保持相同的叙事语气和风格。\n\n"
+                    f"{segment_prompt}"
+                )
+
+            generation = await model_gateway.generate_text(
+                GenerationRequest(
+                    task_name=f"writer.draft.segment.{seg_idx + 1}",
+                    prompt=segment_prompt,
+                    metadata={"agent": self.name, "segment": seg_idx + 1},
+                ),
+                fallback=lambda cp=chapter_plan, cn=chapter_number, ct=chapter_title,
+                           pt=project_title, g=genre, t=tone,
+                           cb=context_brief, sp=style_preferences:
+                          WriterAgent._build_segment_content_static(
+                              cp, cn, ct, pt, g, t, cb, sp,
+                          ),
+            )
+            segment_content = generation.content.strip()
+            accumulated_content = f"{accumulated_content}\n\n{segment_content}".strip()
+
+            if save_checkpoint:
+                await save_checkpoint(
+                    chapter_id=payload.get("chapter_id"),
+                    user_id=payload.get("user_id"),
+                    chapter_version_number=payload.get("chapter_version_number", 1),
+                    title=chapter_title,
+                    generation_payload={
+                        "chapter_plan": chapter_plan,
+                        "genre": genre,
+                        "tone": tone,
+                        "context_brief": context_brief,
+                        "style_preferences": style_preferences,
+                        "segments_total": segments_total,
+                    },
+                    generated_content=accumulated_content,
+                    progress=int(((seg_idx + 1) / segments_total) * 100),
+                    segments_completed=seg_idx + 1,
+                    segments_total=segments_total,
+                )
 
         return AgentResponse(
             success=True,
             data={
                 "outline": chapter_plan,
-                "content": content,
+                "content": accumulated_content,
                 "generation": {
                     "provider": generation.provider,
                     "model": generation.model,
@@ -63,6 +111,123 @@ class WriterAgent(BaseAgent):
             },
             confidence=0.74,
             reasoning="基于章节规划和 Story Bible 摘要生成正文草稿，优先保证本章目标、场景锚点和情绪曲线可读。",
+        )
+
+    def _build_segment_prompts(
+        self,
+        *,
+        chapter_plan: dict[str, Any],
+        chapter_number: int,
+        chapter_title: str,
+        project_title: str,
+        genre: str,
+        tone: str,
+        context_brief: dict[str, Any],
+        style_guidance: str,
+        style_preferences: dict[str, Any],
+        segments_total: int,
+    ) -> list[str]:
+        characters = context_brief.get("characters") or ["主角"]
+        locations = context_brief.get("locations") or ["未知地点"]
+        plot_threads = context_brief.get("active_plot_threads") or ["主线推进"]
+        objective = chapter_plan.get("objective", "推进故事")
+        narrative_mode = str(style_preferences.get("narrative_mode") or "close_third")
+        pacing = str(style_preferences.get("pacing_preference") or "balanced")
+        sensory = str(style_preferences.get("sensory_density") or "focused")
+        seg_prompts = []
+        seg_labels = ["开篇", "发展", "高潮", "收尾"]
+        for i in range(segments_total):
+            label = seg_labels[i] if i < len(seg_labels) else f"第{i + 1}部分"
+            seg_prompts.append(
+                f"Project={project_title} | Chapter={chapter_number} | Title={chapter_title}\n"
+                f"Genre={genre} | Tone={tone} | Segment={label} ({i + 1}/{segments_total})\n"
+                f"NarrativeMode={narrative_mode} | Pacing={pacing} | Sensory={sensory}\n"
+                f"Characters={characters} | Location={locations[0]}\n"
+                f"PlotThread={plot_threads[0]}\n"
+                f"ChapterObjective={objective}\n"
+                f"Plan={chapter_plan}\n"
+                f"StyleGuidance={style_guidance}"
+            )
+        return seg_prompts
+
+    def _build_segment_content(
+        self,
+        chapter_plan: dict[str, Any],
+        chapter_number: int,
+        chapter_title: str,
+        project_title: str,
+        genre: str,
+        tone: str,
+        context_brief: dict[str, Any],
+        style_preferences: dict[str, Any],
+    ) -> str:
+        characters = context_brief.get("characters") or ["主角"]
+        locations = context_brief.get("locations") or ["未知地点"]
+        narrative_mode = str(style_preferences.get("narrative_mode") or "close_third")
+        sensory = str(style_preferences.get("sensory_density") or "focused")
+        atmosphere = {
+            "minimal": "光线和风声都被压到最低，只留下最必要的危险信号。",
+            "immersive": "潮气、锈味和墙面回音一层层压上来，场景先于人物开口。",
+        }.get(sensory, "空气里的细节保持节制，但足够让危险感先一步落地。")
+
+        if narrative_mode == "first_person":
+            return (
+                f"{chapter_title}\n\n"
+                f"我在《{project_title}》的第 {chapter_number} 章回到{locations[0]}。"
+                f"{atmosphere}{genre}故事惯有的压力正沿着视线边缘逼近。"
+                f"我知道这一章真正要解决的是：{chapter_plan.get('objective', '推进主线')}"
+            )
+        if narrative_mode == "omniscient":
+            return (
+                f"{chapter_title}\n\n"
+                f"在《{project_title}》的第 {chapter_number} 章，{locations[0]} 比任何人物都更早意识到局势将要失衡。"
+                f"{atmosphere}{characters[0]}只是第一个被推上台面的承压者。"
+            )
+        return (
+            f"{chapter_title}\n\n"
+            f"在《{project_title}》的第 {chapter_number} 章里，{characters[0]}回到{locations[0]}。"
+            f"{atmosphere}{genre}故事惯有的危险感贴着墙面缓慢游走。"
+            f"叙事语气保持{tone}，每个细节都在逼近本章的核心目标：{chapter_plan.get('objective', '推进主线')}"
+        )
+
+    @staticmethod
+    def _build_segment_content_static(
+        chapter_plan: dict[str, Any],
+        chapter_number: int,
+        chapter_title: str,
+        project_title: str,
+        genre: str,
+        tone: str,
+        context_brief: dict[str, Any],
+        style_preferences: dict[str, Any],
+    ) -> str:
+        characters = context_brief.get("characters") or ["主角"]
+        locations = context_brief.get("locations") or ["未知地点"]
+        narrative_mode = str(style_preferences.get("narrative_mode") or "close_third")
+        sensory = str(style_preferences.get("sensory_density") or "focused")
+        atmosphere = {
+            "minimal": "光线和风声都被压到最低，只留下最必要的危险信号。",
+            "immersive": "潮气、锈味和墙面回音一层层压上来，场景先于人物开口。",
+        }.get(sensory, "空气里的细节保持节制，但足够让危险感先一步落地。")
+
+        if narrative_mode == "first_person":
+            return (
+                f"{chapter_title}\n\n"
+                f"我在《{project_title}》的第 {chapter_number} 章回到{locations[0]}。"
+                f"{atmosphere}{genre}故事惯有的压力正沿着视线边缘逼近。"
+                f"我知道这一章真正要解决的是：{chapter_plan.get('objective', '推进主线')}"
+            )
+        if narrative_mode == "omniscient":
+            return (
+                f"{chapter_title}\n\n"
+                f"在《{project_title}》的第 {chapter_number} 章，{locations[0]} 比任何人物都更早意识到局势将要失衡。"
+                f"{atmosphere}{characters[0]}只是第一个被推上台面的承压者。"
+            )
+        return (
+            f"{chapter_title}\n\n"
+            f"在《{project_title}》的第 {chapter_number} 章里，{characters[0]}回到{locations[0]}。"
+            f"{atmosphere}{genre}故事惯有的危险感贴着墙面缓慢游走。"
+            f"叙事语气保持{tone}，每个细节都在逼近本章的核心目标：{chapter_plan.get('objective', '推进主线')}"
         )
 
     def _build_content(

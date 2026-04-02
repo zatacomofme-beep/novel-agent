@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +15,8 @@ from models.project import Project
 from schemas.chapter import ChapterUpdate
 from schemas.evaluation import EvaluationReport
 from services.chapter_service import get_owned_chapter, update_chapter
+from services.checkpoint_service import CheckpointService
+from services.neo4j_service import Neo4jService
 from services.evaluation_service import evaluate_existing_chapter
 from services.preference_service import (
     build_style_guidance,
@@ -23,7 +26,45 @@ from services.preference_service import (
 )
 from services.project_generation_service import propose_story_bible_updates_from_generation
 from services.project_service import PROJECT_PERMISSION_EDIT
+from services.social_topology_service import SocialTopologyService
+from core.circuit_breaker import (
+    CircuitBreakerReason,
+    TokenCircuitBreaker,
+    token_circuit_breaker,
+)
+
+
+class CheckpointManager:
+    def __init__(self, session: AsyncSession) -> None:
+        self._svc = CheckpointService(session)
+
+    async def save(
+        self,
+        *,
+        chapter_id: str,
+        user_id: str,
+        chapter_version_number: int,
+        title: str,
+        generation_payload: dict[str, Any],
+        generated_content: str,
+        progress: int,
+        segments_completed: int,
+        segments_total: int,
+    ) -> None:
+        await self._svc.save_generation_checkpoint(
+            chapter_id=UUID(chapter_id),
+            user_id=UUID(user_id),
+            chapter_version_number=chapter_version_number,
+            title=title,
+            generation_payload=generation_payload,
+            generated_content=generated_content,
+            progress=progress,
+            segments_completed=segments_completed,
+            segments_total=segments_total,
+        )
 from services.truth_layer_service import build_truth_layer_context
+from services.foreshadowing_lifecycle_service import foreshadowing_lifecycle_service
+from models.open_thread import ThreadStatus
 
 
 class StoryBibleIntegrityError(RuntimeError):
@@ -105,9 +146,22 @@ async def build_generation_payload(
         "chapter_outline_seed": chapter_outline_seed,
     }
 
+    social_svc = SocialTopologyService()
+    try:
+        social_topology = await social_svc.build_social_topology(session, chapter.project_id)
+        base["social_topology"] = {
+            "centrality_scores": social_topology.centrality_scores or {},
+            "influence_graph": social_topology.influence_graph or {},
+            "social_dynamics": social_topology.social_dynamics or {},
+            "cluster_data": social_topology.cluster_data or {},
+        }
+    except Exception:
+        base["social_topology"] = {}
+
+    return base
+
 
 async def run_generation_pipeline(
-    session: AsyncSession,
     *,
     chapter_id: UUID,
     user_id: UUID,
@@ -130,6 +184,57 @@ async def run_generation_pipeline(
         raise StoryBibleIntegrityError(integrity_report)
     base_payload = await build_generation_payload(session, chapter.id, user_id)
 
+    open_threads = await foreshadowing_lifecycle_service.get_active_threads(
+        session,
+        project_id=chapter.project_id,
+        chapter_num=chapter.chapter_number,
+        lookback=10,
+    )
+    open_threads_data = [
+        {
+            "id": str(t.id),
+            "planted_chapter": t.planted_chapter,
+            "entity_ref": t.entity_ref,
+            "entity_type": t.entity_type,
+            "potential_tags": t.potential_tags or [],
+            "status": t.status,
+            "payoff_priority": t.payoff_priority,
+            "planted_content": t.planted_content,
+        }
+        for t in open_threads
+    ]
+
+    checkpoint_mgr = CheckpointManager(session)
+
+    neo4j_svc = Neo4jService()
+    causal_context: dict[str, Any] = {}
+    try:
+        prev_chapter = chapter.chapter_number - 1
+        if prev_chapter >= 1:
+            paths = await neo4j_svc.query_causal_paths(
+                chapter.project_id,
+                from_chapter=prev_chapter,
+                to_chapter=chapter.chapter_number,
+                max_hops=5,
+            )
+            causal_context["causal_paths"] = paths
+        influence = await neo4j_svc.compute_character_influence(chapter.project_id)
+        causal_context["character_influence"] = influence
+    except Exception:
+        causal_context = {}
+
+    latest_cp = await checkpoint_mgr._svc.get_latest_generation_checkpoint(chapter.id)
+    can_resume = latest_cp is not None and checkpoint_mgr._svc.can_resume(latest_cp)
+    resume_from: dict[str, Any] | None = None
+    if can_resume and latest_cp is not None:
+        resume_from = {
+            "checkpoint_id": str(latest_cp.id),
+            "generated_content": latest_cp.generated_content or "",
+            "segments_completed": latest_cp.segments_completed or 0,
+            "segments_total": latest_cp.segments_total or 0,
+            "chapter_version_number": latest_cp.chapter_version_number,
+        }
+
     coordinator = CoordinatorAgent()
     run_context = AgentRunContext(
         chapter_id=str(chapter.id),
@@ -143,6 +248,10 @@ async def run_generation_pipeline(
             **base_payload,
             "story_bible": story_bible,
             "story_bible_integrity_report": integrity_report.model_dump(mode="json"),
+            "open_threads": open_threads_data,
+            "causal_context": causal_context,
+            "resume_from": resume_from,
+            "save_checkpoint": checkpoint_mgr.save,
         },
     )
     if not response.success:
@@ -168,7 +277,44 @@ async def run_generation_pipeline(
         ),
         preference_learning_user_id=None,
     )
+
+    from memory.l2_episodic import L2EpisodicMemory
+    l2_mem = L2EpisodicMemory(session)
+    await l2_mem.save_episode(
+        project_id=updated_chapter.project_id,
+        chapter_id=updated_chapter.id,
+        chapter_number=updated_chapter.chapter_number,
+        summary=final_outline.get("summary", ""),
+        content=final_content,
+        key_events=[],
+        characters=[],
+        locations=[],
+        emotional_tone="neutral",
+        themes=[],
+        open_threads=[],
+        importance_score=0.6,
+    )
+
+    try:
+        await neo4j_svc.create_event_node(
+            project_id=updated_chapter.project_id,
+            chapter=updated_chapter.chapter_number,
+            name=final_outline.get("title", f"Chapter {updated_chapter.chapter_number}"),
+            summary=final_outline.get("summary", "")[:500],
+            event_type="chapter_event",
+        )
+    except Exception:
+        pass
+
     report = await evaluate_existing_chapter(session, updated_chapter, user_id)
+
+    await foreshadowing_lifecycle_service.scan_and_plant(
+        session,
+        project_id=updated_chapter.project_id,
+        chapter_num=updated_chapter.chapter_number,
+        content=final_content,
+    )
+
     project_for_followups = await session.get(Project, updated_chapter.project_id)
     if project_for_followups is not None:
         story_bible_followup_proposals = await propose_story_bible_updates_from_generation(
@@ -220,6 +366,7 @@ async def run_generation_pipeline(
         "revised": response.data.get("revised", False),
         "story_bible_followup_proposals": story_bible_followup_proposals,
         "story_bible_followup_proposal_count": len(story_bible_followup_proposals),
+        "cost_report": token_circuit_breaker.get_report(str(chapter.id)),
     }
 
 

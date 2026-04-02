@@ -24,6 +24,7 @@ class GenerationResult:
     content: str
     provider: str
     model: str
+    cost: float = 0.0
     used_fallback: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -70,12 +71,39 @@ class ModelGateway:
         *,
         fallback: Callable[[], str],
     ) -> GenerationResult:
+        from services.prompt_cache_service import prompt_cache_service
+
+        cached = await prompt_cache_service.get(
+            prefix=request.task_name,
+            prompt=request.prompt,
+            system_prompt=request.system_prompt,
+        )
+        if cached:
+            return GenerationResult(
+                content=cached,
+                provider="cache-hit",
+                model=self._resolve_model(request),
+                cost=0.0,
+                metadata={**self._base_metadata(request), "cache_hit": True},
+            )
+
         remote_error: Optional[GenerationErrorInfo] = None
+        remote_status: Optional[str] = None
         selected_provider = self._select_provider_compat(request)
         if self.is_remote_available():
             remote_result, remote_error = await self._try_remote_generation(request)
             if remote_result is not None:
+                await prompt_cache_service.set(
+                    prefix=request.task_name,
+                    prompt=request.prompt,
+                    system_prompt=request.system_prompt,
+                    content=remote_result.content,
+                )
                 return remote_result
+            if remote_error is not None:
+                remote_status = "failed"
+            else:
+                remote_status = "skipped_no_provider"
 
         metadata = self._base_metadata(request)
         metadata.update(
@@ -87,6 +115,8 @@ class ModelGateway:
         )
         if remote_error is not None:
             metadata["remote_error"] = remote_error.as_metadata()
+        elif remote_status is not None:
+            metadata["remote_status"] = remote_status
         elif not self.is_remote_available():
             metadata["remote_status"] = "skipped_no_provider"
 
@@ -94,6 +124,7 @@ class ModelGateway:
             content=fallback(),
             provider="local-fallback",
             model="heuristic-v1",
+            cost=0.0,
             used_fallback=True,
             metadata=metadata,
         )
@@ -127,6 +158,16 @@ class ModelGateway:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(_run_in_worker).result()
+
+    FALLBACK_CHAIN: dict[str, list[str]] = {
+        "claude-sonnet-4": ["claude-haiku-3", "gpt-4o"],
+        "claude-haiku-3": ["deepseek-v3", "gpt-4o-mini"],
+        "deepseek-v3": ["gpt-4o-mini"],
+        "gpt-4o": ["gpt-4o-mini"],
+        "gpt-4o-mini": [],
+        "claude-opus-3": ["claude-sonnet-4", "gpt-4o"],
+        "claude-sonnet-3-5": ["claude-sonnet-4", "gpt-4o"],
+    }
 
     async def _try_remote_generation(
         self,
@@ -164,8 +205,41 @@ class ModelGateway:
                 if attempt < self.max_retries and last_error.retryable:
                     await asyncio.sleep(min(1.5 * (attempt + 1), 5.0))
                     continue
-                return None, last_error
-        return None, None
+            except Exception as exc:  # pragma: no cover
+                last_error = self._classify_remote_error(
+                    provider=provider,
+                    exc=exc,
+                    attempt=attempt + 1,
+                )
+
+        fallback_models = self.FALLBACK_CHAIN.get(request.model or self.default_model, [])
+        for fallback_model in fallback_models:
+            try:
+                fallback_request = GenerationRequest(
+                    task_name=request.task_name,
+                    prompt=request.prompt,
+                    system_prompt=request.system_prompt,
+                    model=fallback_model,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                    metadata={**request.metadata, "original_model": request.model},
+                )
+                result = await self._generate_with_openai_compatible(fallback_request)
+                if result is not None:
+                    result.metadata = {
+                        **self._base_metadata(request),
+                        **result.metadata,
+                        "attempt": 1,
+                        "selected_provider": provider,
+                        "used_fallback": True,
+                        "fallback_from": request.model,
+                        "fallback_to": fallback_model,
+                    }
+                    return result, None
+            except Exception:  # noqa: BLE001
+                continue
+
+        return None, last_error
 
     def _should_use_anthropic(self) -> bool:
         if not self.anthropic_api_key:
@@ -193,6 +267,65 @@ class ModelGateway:
         if request is None:
             return self.default_model
         return request.model or self.default_model
+
+    def _route_to_tier(self, request: GenerationRequest) -> str:
+        task_name = request.task_name.lower()
+        if request.system_prompt and len(request.system_prompt) > 3000:
+            return "t2"
+        if any(kw in task_name for kw in ["outline", "structure", "plan"]):
+            return "t1"
+        if any(kw in task_name for kw in ["revision", "edit", "rewrite", "debate"]):
+            return "t2"
+        if any(kw in task_name for kw in ["linguistic", "canon", "consistency"]):
+            return "t2"
+        if any(kw in task_name for kw in ["librarian", "architect", "approver"]):
+            return "t1"
+        if any(kw in task_name for kw in ["chaos_analysis", "beta_reader", "writer.draft"]):
+            return "t2"
+        if any(kw in task_name for kw in ["tension", "social", "character_arc"]):
+            return "t2"
+        if request.max_tokens and request.max_tokens < 300:
+            return "t1"
+        if request.temperature and request.temperature > 0.7:
+            return "t3"
+        return "t2"
+
+    def _calculate_cost(
+        self,
+        usage: Any,
+        model: str,
+    ) -> float:
+        if usage is None:
+            return 0.0
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        model_lower = model.lower()
+
+        if "claude" in model_lower:
+            input_rate = 3.0 / 1_000_000
+            output_rate = 15.0 / 1_000_000
+        elif "gpt-4o" in model_lower:
+            input_rate = 2.5 / 1_000_000
+            output_rate = 10.0 / 1_000_000
+        elif "gpt-4o-mini" in model_lower:
+            input_rate = 0.15 / 1_000_000
+            output_rate = 0.6 / 1_000_000
+        elif "gpt-4-turbo" in model_lower:
+            input_rate = 10.0 / 1_000_000
+            output_rate = 30.0 / 1_000_000
+        elif "gpt-4" in model_lower:
+            input_rate = 30.0 / 1_000_000
+            output_rate = 60.0 / 1_000_000
+        elif "deepseek" in model_lower:
+            input_rate = 0.27 / 1_000_000
+            output_rate = 1.1 / 1_000_000
+        elif "text-embedding" in model_lower:
+            return input_tokens * 0.13 / 1_000_000
+        else:
+            input_rate = 1.0 / 1_000_000
+            output_rate = 2.0 / 1_000_000
+
+        return round(input_tokens * input_rate + output_tokens * output_rate, 6)
 
     def _select_provider_compat(
         self,
@@ -329,6 +462,8 @@ class ModelGateway:
             content = self._extract_chat_completion_text(response)
             if not content:
                 raise RuntimeError("OpenAI-compatible chat provider returned empty content.")
+            usage = getattr(response, "usage", None)
+            cost = self._calculate_cost(usage, self._resolve_model(request))
         else:
             request_kwargs = {
                 "model": self._resolve_model(request),
@@ -346,10 +481,13 @@ class ModelGateway:
             content = getattr(response, "output_text", "") or ""
             if not content:
                 raise RuntimeError("OpenAI-compatible provider returned empty output_text.")
+            usage = getattr(response, "usage", None)
+            cost = self._calculate_cost(usage, self._resolve_model(request))
         return GenerationResult(
             content=content,
             provider="openai-compatible",
             model=self._resolve_model(request),
+            cost=cost,
             metadata={
                 "base_url": self.gateway_base_url,
                 "api_mode": api_mode,
@@ -448,6 +586,7 @@ class ModelGateway:
             content=content,
             provider="anthropic",
             model=self._resolve_model(request),
+            cost=0.0,
             metadata={},
         )
 

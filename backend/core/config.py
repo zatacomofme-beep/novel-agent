@@ -26,23 +26,17 @@ class Settings(BaseSettings):
         default=5,
         alias="QDRANT_REQUEST_TIMEOUT_SECONDS",
     )
+    neo4j_url: str = Field(
+        default="bolt://localhost:7687",
+        alias="NEO4J_URL",
+    )
+    neo4j_auth: tuple[str, str] = Field(
+        default=("neo4j", "password"),
+        alias="NEO4J_AUTH",
+    )
     vector_embedding_dimensions: int = Field(
         default=128,
         alias="VECTOR_EMBEDDING_DIMENSIONS",
-    )
-    chroma_host: str = Field(default="chroma", alias="CHROMA_HOST")
-    chroma_port: int = Field(default=8001, alias="CHROMA_PORT")
-    chroma_collection_prefix: str = Field(
-        default="novel_story_engine",
-        alias="CHROMA_COLLECTION_PREFIX",
-    )
-    chroma_embedding_dimensions: int = Field(
-        default=256,
-        alias="CHROMA_EMBEDDING_DIMENSIONS",
-    )
-    chroma_request_timeout_seconds: int = Field(
-        default=10,
-        alias="CHROMA_REQUEST_TIMEOUT_SECONDS",
     )
     story_engine_default_embedding_model: str = Field(
         default="text-embedding-3-large",

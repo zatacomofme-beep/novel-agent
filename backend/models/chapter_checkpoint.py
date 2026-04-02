@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+CHECKPOINT_TYPE_GENERATION = "generation"
+CHECKPOINT_TYPE_APPROVAL = "approval"
 
 
 class ChapterCheckpoint(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -38,6 +41,11 @@ class ChapterCheckpoint(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    generation_payload: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB)
+    generated_content: Mapped[Optional[str]] = mapped_column(Text)
+    progress: Mapped[Optional[int]] = mapped_column(Integer)
+    segments_completed: Mapped[Optional[int]] = mapped_column(Integer)
+    segments_total: Mapped[Optional[int]] = mapped_column(Integer)
 
     chapter: Mapped["Chapter"] = relationship(back_populates="checkpoints")
     requester: Mapped["User"] = relationship(

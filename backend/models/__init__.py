@@ -5,6 +5,12 @@ from models.chapter_review_decision import ChapterReviewDecision
 from models.chapter_version import ChapterVersion
 from models.character import Character
 from models.evaluation import Evaluation
+from models.open_thread import (
+    OpenThread,
+    OpenThreadHistory,
+    ThreadStatus,
+    EntityType,
+)
 from models.foreshadowing import Foreshadowing
 from models.location import Location
 from models.preference_observation import PreferenceObservation
@@ -51,6 +57,10 @@ __all__ = [
     "Character",
     "Evaluation",
     "Foreshadowing",
+    "OpenThread",
+    "OpenThreadHistory",
+    "ThreadStatus",
+    "EntityType",
     "Location",
     "PreferenceObservation",
     "ProjectFaction",
