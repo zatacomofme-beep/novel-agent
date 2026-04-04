@@ -37,7 +37,9 @@ export default defineConfig({
   ],
   webServer: shouldStartFrontend
     ? {
-        command: `rm -rf .next && npm run dev -- --hostname 127.0.0.1 --port ${frontendPort}`,
+        command:
+          `node -e "try{require('fs').rmSync('.next',{recursive:true,force:true})}catch(e){}" ` +
+          `&& npm run dev -- --hostname 127.0.0.1 --port ${frontendPort}`,
         cwd: __dirname,
         url: frontendBaseURL,
         reuseExistingServer: !process.env.CI,

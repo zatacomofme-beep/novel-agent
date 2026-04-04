@@ -25,3 +25,8 @@ class Character(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     created_chapter: Mapped[Optional[int]] = mapped_column(Integer)
 
     project: Mapped["Project"] = relationship(back_populates="characters")
+    linguistic_profile: Mapped[Optional["CharacterLinguisticProfile"]] = relationship(
+        "CharacterLinguisticProfile",
+        back_populates="character",
+        uselist=False,
+    )

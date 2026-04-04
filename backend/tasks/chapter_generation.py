@@ -6,7 +6,10 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from db.session import AsyncSessionLocal
-from services.generation_service import StoryBibleIntegrityError, run_generation_pipeline
+from services.legacy_generation_service import (
+    StoryBibleIntegrityError,
+    run_generation_pipeline,
+)
 from services.task_service import (
     create_task_event,
     create_task_run,
@@ -16,6 +19,13 @@ from services.task_service import (
 from tasks.celery_app import celery_app
 from tasks.schemas import TaskState
 from tasks.state_store import task_state_store
+
+
+LEGACY_CHAPTER_GENERATION_METADATA = {
+    "legacy_entrypoint": True,
+    "entrypoint_surface": "legacy_chapter_pipeline",
+    "preferred_surface": "story_engine",
+}
 
 
 async def enqueue_chapter_generation_task(
@@ -35,6 +45,7 @@ async def enqueue_chapter_generation_task(
             "user_id": user_id,
             "project_id": project_id,
             "generation_payload": payload or {},
+            **LEGACY_CHAPTER_GENERATION_METADATA,
         },
     )
     task_state_store.set(task_state)
@@ -54,6 +65,7 @@ async def enqueue_chapter_generation_task(
             payload={
                 "phase": "enqueue",
                 "generation_payload": payload or {},
+                **LEGACY_CHAPTER_GENERATION_METADATA,
             },
             chapter_id=UUID(chapter_id),
             project_id=UUID(project_id),
@@ -127,7 +139,10 @@ def mark_task_succeeded(task_id: str, result: dict[str, Any]) -> TaskState:
     state.status = "succeeded"
     state.progress = 100
     state.message = "Generation pipeline completed."
-    state.result = result
+    state.result = {
+        **result,
+        **LEGACY_CHAPTER_GENERATION_METADATA,
+    }
     state.error = None
     return task_state_store.set(state)
 

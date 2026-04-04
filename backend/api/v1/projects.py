@@ -87,7 +87,7 @@ from services.project_bootstrap_service import (
     get_project_bootstrap_state,
     update_project_bootstrap_profile,
 )
-from services.project_generation_service import dispatch_next_project_chapter_generation
+from services.legacy_project_generation_service import dispatch_next_project_chapter_generation
 from services.project_entity_generation_service import dispatch_project_entity_generation
 from services.story_bible_version_service import (
     approve_pending_change,
@@ -236,6 +236,8 @@ async def project_bootstrap_generate(
 @router.post(
     "/{project_id}/generate-next-chapter",
     response_model=ProjectChapterGenerationDispatchRead,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def project_generate_next_chapter(
     project_id: UUID,

@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Legacy coordinator implementation.
+
+This agent remains only to support the compatibility generation pipeline.
+New product behavior should be implemented in Story Engine workflows instead of
+expanding this orchestrator.
+"""
+
 import asyncio
 from typing import Any
 

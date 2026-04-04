@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.story_agents import build_agent_report, export_agent_specs
+from core.circuit_breaker import token_circuit_breaker
 from core.config import get_settings
 from core.errors import AppError
 from models.story_engine import StoryChapterSummary, StoryOutline
@@ -25,6 +26,10 @@ from schemas.story_engine import (
     StoryWorldRuleRead,
 )
 from services.chapter_service import get_owned_chapter
+from services.checkpoint_service import CheckpointService
+from services.foreshadowing_lifecycle_service import foreshadowing_lifecycle_service
+from services.neo4j_service import neo4j_service
+from services.social_topology_service import social_topology_service
 from services.story_engine_kb_service import (
     build_workspace,
     create_entity,
@@ -2525,11 +2530,19 @@ async def run_chapter_stream_generate(
     )
     beats = _build_stream_beats(outline_text, target_paragraph_count=target_paragraph_count)
     style_hint = _build_style_hint(style_sample)
+    open_threads, social_topology, causal_context = await _load_stream_enrichment(
+        session,
+        project_id=project_id,
+        chapter_number=chapter_number,
+    )
     stream_context = _build_stream_context(
         workspace=workspace,
         recent_chapters=recent_chapters,
         chapter_number=chapter_number,
         chapter_title=chapter_title,
+        social_topology=social_topology,
+        causal_context=causal_context,
+        open_threads=open_threads,
     )
     paragraph_total = len(beats)
     resume_mode = resume_from_paragraph is not None
@@ -2545,6 +2558,10 @@ async def run_chapter_stream_generate(
     fallback_paragraphs: list[int] = []
     failover_paragraphs: list[int] = []
     failover_details: list[dict[str, Any]] = []
+    stream_cost_total = 0.0
+    stream_token_total = 0
+    breaker_tripped = False
+    breaker_reason: str | None = None
     workflow_id = _build_workflow_id("chapter_stream")
     workflow_timeline: list[dict[str, Any]] = []
     resolved_chapter_id = await _resolve_workflow_chapter_id(
@@ -2553,6 +2570,16 @@ async def run_chapter_stream_generate(
         user_id=user_id,
         chapter_id=chapter_id,
     )
+    existing_text, resume_from_paragraph, legacy_checkpoint_resume = await _load_legacy_checkpoint_resume(
+        session,
+        chapter_id=resolved_chapter_id,
+        existing_text=existing_text,
+        resume_from_paragraph=resume_from_paragraph,
+    )
+    resume_mode = resume_from_paragraph is not None
+    starting_paragraph = min(max(resume_from_paragraph or 1, 1), paragraph_total + 1)
+    running_paragraphs = _split_stream_paragraphs(existing_text)
+    running_text = _join_stream_paragraphs(running_paragraphs)
     task_state: Optional[TaskState] = None
 
     def _build_stream_metadata(
@@ -2576,10 +2603,28 @@ async def run_chapter_stream_generate(
         paragraph_index: int,
         result: Any,
     ) -> dict[str, Any]:
+        nonlocal stream_cost_total, stream_token_total, breaker_tripped, breaker_reason
         metadata = dict(getattr(result, "metadata", {}) or {})
         provider = str(getattr(result, "provider", "") or "").strip()
         model = str(getattr(result, "model", "") or "").strip()
         pair = f"{provider}:{model}" if provider or model else ""
+        paragraph_cost = float(getattr(result, "cost", 0.0) or 0.0)
+        estimated_tokens = max(
+            1,
+            len(str(getattr(result, "content", "") or "").strip()) // 2,
+        )
+
+        stream_cost_total += paragraph_cost
+        stream_token_total += estimated_tokens
+
+        breaker_result = token_circuit_breaker.check_and_record(
+            str(resolved_chapter_id or workflow_id),
+            tokens_used=estimated_tokens,
+            cost=paragraph_cost,
+        )
+        if breaker_result.should_break:
+            breaker_tripped = True
+            breaker_reason = breaker_result.reason
 
         if pair and pair not in provider_model_seen:
             provider_model_seen.add(pair)
@@ -2617,6 +2662,12 @@ async def run_chapter_stream_generate(
                     ],
                 }
             )
+        metadata["paragraph_cost"] = round(paragraph_cost, 6)
+        metadata["estimated_tokens"] = estimated_tokens
+        metadata["stream_cost_total"] = round(stream_cost_total, 6)
+        metadata["stream_token_total"] = stream_token_total
+        metadata["breaker_tripped"] = breaker_tripped
+        metadata["breaker_reason"] = breaker_reason
         return metadata
 
     def _build_stream_done_metadata() -> dict[str, Any]:
@@ -2632,6 +2683,12 @@ async def run_chapter_stream_generate(
             "provider_model_pairs": provider_model_pairs,
             "failover_paragraphs": failover_paragraphs,
             "failover_details": failover_details,
+            "stream_cost_total": round(stream_cost_total, 6),
+            "stream_token_total": stream_token_total,
+            "breaker_tripped": breaker_tripped,
+            "breaker_reason": breaker_reason,
+            "legacy_checkpoint_resume": legacy_checkpoint_resume,
+            "cost_report": token_circuit_breaker.get_report(str(resolved_chapter_id or workflow_id)),
         }
 
     async def _persist_stream_event(
@@ -2668,6 +2725,10 @@ async def run_chapter_stream_generate(
             "paragraph_total": paragraph_total,
             "provider_model_pairs": provider_model_pairs,
             "rewritten_paragraph_index": rewritten_paragraph_index,
+            "stream_cost_total": round(stream_cost_total, 6),
+            "stream_token_total": stream_token_total,
+            "breaker_tripped": breaker_tripped,
+            "breaker_reason": breaker_reason,
         }
         payload.update(extra)
         return payload
@@ -2719,6 +2780,9 @@ async def run_chapter_stream_generate(
             fallback=rewrite_fallback,
             model_routing=model_routing,
             repair_instruction=normalized_repair_instruction,
+            social_topology=social_topology,
+            causal_context=causal_context,
+            open_threads=open_threads,
         )
         _record_stream_generation_result(rewritten_paragraph_index, rewritten_result)
         running_paragraphs[rewritten_paragraph_index - 1] = rewritten_result.content.strip()
@@ -2782,6 +2846,7 @@ async def run_chapter_stream_generate(
                 "target_paragraph_count": target_paragraph_count,
                 "target_word_count": target_word_count,
                 "existing_paragraph_count": len(running_paragraphs),
+                "legacy_checkpoint_resume": legacy_checkpoint_resume,
             },
         )
         await _persist_stream_event(
@@ -2812,6 +2877,7 @@ async def run_chapter_stream_generate(
                     "resume_from_paragraph": starting_paragraph if resume_mode else None,
                     "rewritten_paragraph_index": rewritten_paragraph_index,
                     "repair_instruction": normalized_repair_instruction,
+                    "legacy_checkpoint_resume": legacy_checkpoint_resume,
                 },
                 start_workflow_event,
             ),
@@ -2963,6 +3029,51 @@ async def run_chapter_stream_generate(
         }
 
         for paragraph_index in range(starting_paragraph, paragraph_total + 1):
+            if breaker_tripped:
+                breaker_workflow_event = _append_workflow_event(
+                    workflow_timeline,
+                    workflow_id=workflow_id,
+                    workflow_type="chapter_stream",
+                    stage="stream_cost_guard_paused",
+                    status="paused",
+                    label="成本护栏已触发",
+                    message=breaker_reason,
+                    chapter_number=chapter_number,
+                    chapter_title=chapter_title,
+                    branch_id=branch_id,
+                    paragraph_index=max(paragraph_index - 1, 0),
+                    paragraph_total=paragraph_total,
+                    details={
+                        "stream_cost_total": round(stream_cost_total, 6),
+                        "stream_token_total": stream_token_total,
+                        "breaker_reason": breaker_reason,
+                    },
+                )
+                await _persist_stream_event(
+                    breaker_workflow_event,
+                    result_patch=_build_stream_task_result(
+                        "paused",
+                        current_paragraph_index=max(paragraph_index - 1, 0),
+                        should_pause=True,
+                        cost_report=token_circuit_breaker.get_report(str(resolved_chapter_id or workflow_id)),
+                    ),
+                    finalize=True,
+                )
+                yield {
+                    "event": "guard",
+                    "message": "当前流式起稿先停在这里，成本护栏已经触发。",
+                    "text": running_text,
+                    "paragraph_index": max(paragraph_index - 1, 0),
+                    "paragraph_total": paragraph_total,
+                    "metadata": _build_stream_metadata(
+                        _build_stream_done_metadata(),
+                        breaker_workflow_event,
+                        include_timeline=True,
+                    ),
+                    "workflow_event": breaker_workflow_event,
+                }
+                return
+
             beat = beats[paragraph_index - 1]
             fallback_paragraph = _compose_stream_paragraph(
                 beat=beat,
@@ -2988,6 +3099,9 @@ async def run_chapter_stream_generate(
                 fallback=fallback_paragraph,
                 model_routing=model_routing,
                 repair_instruction=normalized_repair_instruction if paragraph_index == starting_paragraph else None,
+                social_topology=social_topology,
+                causal_context=causal_context,
+                open_threads=open_threads,
             )
             paragraph_metadata = _record_stream_generation_result(paragraph_index, paragraph_result)
             paragraph = paragraph_result.content.strip()
@@ -3261,6 +3375,15 @@ async def run_final_optimize(
             chapter_number=chapter_number,
             payload=result["anchor_payload"]["chapter_summary"],
         )
+        side_effect_sync = await _sync_final_optimize_side_effects(
+            session=session,
+            project_id=project_id,
+            chapter_id=resolved_chapter_id,
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            final_draft=result["final_package"]["final_draft"],
+            chapter_summary=summary,
+        )
         _append_workflow_event(
             workflow_timeline,
             workflow_id=workflow_id,
@@ -3276,6 +3399,18 @@ async def run_final_optimize(
                 "summary_version": summary.get("version"),
                 "kb_update_count": len(normalized_kb_updates),
             },
+        )
+        _append_workflow_event(
+            workflow_timeline,
+            workflow_id=workflow_id,
+            workflow_type="final_optimize",
+            stage="final_side_effects_synced",
+            status="completed",
+            label="主线写回已同步",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            branch_id=branch_id,
+            details=side_effect_sync,
         )
         _append_workflow_event(
             workflow_timeline,
@@ -5019,6 +5154,68 @@ async def _upsert_chapter_summary(
     )
 
 
+async def _sync_final_optimize_side_effects(
+    *,
+    session: AsyncSession,
+    project_id: UUID,
+    chapter_id: UUID | None,
+    chapter_number: int,
+    chapter_title: str | None,
+    final_draft: str,
+    chapter_summary: dict[str, Any],
+) -> dict[str, Any]:
+    l2_synced = False
+    neo4j_synced = False
+
+    if chapter_id is not None:
+        try:
+            from memory.l2_episodic import L2EpisodicMemory
+
+            l2_mem = L2EpisodicMemory(session)
+            await l2_mem.save_episode(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                chapter_number=chapter_number,
+                summary=str(chapter_summary.get("content") or "").strip(),
+                content=final_draft,
+                key_events=list(chapter_summary.get("core_progress") or []),
+                characters=[
+                    str(item.get("change") or "").strip()
+                    for item in chapter_summary.get("character_changes") or []
+                    if isinstance(item, dict) and str(item.get("change") or "").strip()
+                ],
+                locations=[],
+                emotional_tone="neutral",
+                themes=[],
+                open_threads=[
+                    str(item.get("change") or "").strip()
+                    for item in chapter_summary.get("foreshadow_updates") or []
+                    if isinstance(item, dict) and str(item.get("change") or "").strip()
+                ],
+                importance_score=0.6,
+            )
+            l2_synced = True
+        except Exception:
+            l2_synced = False
+
+    try:
+        await neo4j_service.create_event_node(
+            project_id=project_id,
+            chapter=chapter_number,
+            name=chapter_title or f"Chapter {chapter_number}",
+            summary=str(chapter_summary.get("content") or "").strip()[:500],
+            event_type="chapter_event",
+        )
+        neo4j_synced = True
+    except Exception:
+        neo4j_synced = False
+
+    return {
+        "l2_episode_synced": l2_synced,
+        "neo4j_event_synced": neo4j_synced,
+    }
+
+
 def _build_summary_text(draft_text: str) -> str:
     normalized = " ".join(segment.strip() for segment in draft_text.splitlines() if segment.strip())
     summary = normalized[:220]
@@ -5570,6 +5767,9 @@ def _build_stream_context(
     recent_chapters: list[str],
     chapter_number: int,
     chapter_title: Optional[str],
+    social_topology: Optional[dict[str, Any]] = None,
+    causal_context: Optional[dict[str, Any]] = None,
+    open_threads: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     characters = workspace.get("characters", [])
     items = workspace.get("items", [])
@@ -5599,7 +5799,108 @@ def _build_stream_context(
         "world_rule": world_rules[0].rule_name if world_rules else "代价规则",
         "foreshadow_hint": foreshadows[0].content if foreshadows else "一个尚未解释清楚的异常细节",
         "recent_context": " ".join(item.strip() for item in recent_chapters[-2:] if item.strip())[:220],
+        "social_topology": social_topology if isinstance(social_topology, dict) else {},
+        "causal_context": causal_context if isinstance(causal_context, dict) else {},
+        "open_threads": open_threads if isinstance(open_threads, list) else [],
     }
+
+
+async def _load_stream_enrichment(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    chapter_number: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    open_threads_payload: list[dict[str, Any]] = []
+    social_topology_payload: dict[str, Any] = {}
+    causal_context_payload: dict[str, Any] = {}
+
+    try:
+        open_threads = await foreshadowing_lifecycle_service.get_active_threads(
+            session,
+            project_id=project_id,
+            chapter_num=chapter_number,
+            lookback=10,
+        )
+        open_threads_payload = [
+            {
+                "id": str(item.id),
+                "planted_chapter": item.planted_chapter,
+                "entity_ref": item.entity_ref,
+                "entity_type": item.entity_type,
+                "potential_tags": item.potential_tags or [],
+                "status": item.status,
+                "payoff_priority": item.payoff_priority,
+            }
+            for item in open_threads
+        ]
+    except Exception:
+        open_threads_payload = []
+
+    try:
+        social_topology = await social_topology_service.build_social_topology(
+            session,
+            project_id=project_id,
+        )
+        social_topology_payload = {
+            "centrality_scores": social_topology.centrality_scores or {},
+            "influence_graph": social_topology.influence_graph or {},
+            "social_dynamics": social_topology.social_dynamics or {},
+            "cluster_data": social_topology.cluster_data or {},
+        }
+    except Exception:
+        social_topology_payload = {}
+
+    try:
+        if chapter_number > 1:
+            causal_paths = await neo4j_service.query_causal_paths(
+                project_id,
+                from_chapter=chapter_number - 1,
+                to_chapter=chapter_number,
+                max_hops=5,
+            )
+            if causal_paths:
+                causal_context_payload["causal_paths"] = causal_paths
+        influence = await neo4j_service.compute_character_influence(project_id)
+        if influence:
+            causal_context_payload["character_influence"] = influence
+    except Exception:
+        causal_context_payload = {}
+
+    return open_threads_payload, social_topology_payload, causal_context_payload
+
+
+async def _load_legacy_checkpoint_resume(
+    session: AsyncSession,
+    *,
+    chapter_id: UUID | None,
+    existing_text: str,
+    resume_from_paragraph: Optional[int],
+) -> tuple[str, Optional[int], dict[str, Any] | None]:
+    if chapter_id is None:
+        return existing_text, resume_from_paragraph, None
+    if existing_text.strip() or resume_from_paragraph is not None:
+        return existing_text, resume_from_paragraph, None
+
+    checkpoint_service = CheckpointService(session)
+    checkpoint = await checkpoint_service.get_latest_generation_checkpoint(chapter_id)
+    if checkpoint is None or not checkpoint_service.can_resume(checkpoint):
+        return existing_text, resume_from_paragraph, None
+
+    generated_content = str(getattr(checkpoint, "generated_content", "") or "").strip()
+    if not generated_content:
+        return existing_text, resume_from_paragraph, None
+
+    next_paragraph = int(getattr(checkpoint, "segments_completed", 0) or 0) + 1
+    metadata = {
+        "checkpoint_id": str(checkpoint.id),
+        "checkpoint_version_number": checkpoint.chapter_version_number,
+        "segments_completed": checkpoint.segments_completed,
+        "segments_total": checkpoint.segments_total,
+        "progress": checkpoint.progress,
+        "source": "legacy_generation_checkpoint",
+    }
+    return generated_content, next_paragraph, metadata
 
 
 def _compose_stream_paragraph(

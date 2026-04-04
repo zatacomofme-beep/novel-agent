@@ -7,7 +7,6 @@ from api.v1.evaluation import router as evaluation_router
 from api.v1.model_routing import router as model_routing_router
 from api.v1.open_threads import router as open_threads_router
 from api.v1.causal_graph import router as causal_graph_router
-from api.v1.chapter_history import router as chapter_history_router
 from api.v1.profile import router as profile_router
 from api.v1.projects import router as projects_router
 from api.v1.story_engine import router as story_engine_router
@@ -20,9 +19,12 @@ api_router.include_router(dashboard_router, prefix="/dashboard", tags=["dashboar
 api_router.include_router(model_routing_router, tags=["model-routing"])
 api_router.include_router(profile_router, prefix="/profile", tags=["profile"])
 api_router.include_router(projects_router, prefix="/projects", tags=["projects"])
+
+# Auxiliary domain APIs still exposed for compatibility, but not current product mainline.
 api_router.include_router(open_threads_router, tags=["open-threads"])
 api_router.include_router(causal_graph_router, tags=["causal-graph"])
-api_router.include_router(chapter_history_router, tags=["chapter-history"])
+
+# Formal chapter chain and Story Engine remain the active product surface.
 api_router.include_router(chapters_router, tags=["chapters"])
 api_router.include_router(evaluation_router, tags=["evaluation"])
 api_router.include_router(tasks_router, tags=["tasks"])

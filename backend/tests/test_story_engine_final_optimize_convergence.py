@@ -122,6 +122,9 @@ class StoryEngineFinalOptimizeConvergenceTests(unittest.IsolatedAsyncioTestCase)
                     "updated_at": "2026-03-24T00:00:00Z",
                 }
             ),
+        ), patch(
+            "services.story_engine_workflow_service._sync_final_optimize_side_effects",
+            AsyncMock(return_value={"l2_episode_synced": True, "neo4j_event_synced": True}),
         ):
             result = await run_final_optimize(
                 SimpleNamespace(),
@@ -147,6 +150,10 @@ class StoryEngineFinalOptimizeConvergenceTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(result["workflow_timeline"][-1]["stage"], "final_optimize_completed")
         self.assertIn(
             "chapter_summary_persisted",
+            [item["stage"] for item in result["workflow_timeline"]],
+        )
+        self.assertIn(
+            "final_side_effects_synced",
             [item["stage"] for item in result["workflow_timeline"]],
         )
 
@@ -204,6 +211,9 @@ class StoryEngineFinalOptimizeConvergenceTests(unittest.IsolatedAsyncioTestCase)
                     "updated_at": "2026-03-24T00:00:00Z",
                 }
             ),
+        ), patch(
+            "services.story_engine_workflow_service._sync_final_optimize_side_effects",
+            AsyncMock(return_value={"l2_episode_synced": True, "neo4j_event_synced": True}),
         ):
             result = await run_final_optimize(
                 SimpleNamespace(),
@@ -282,6 +292,9 @@ class StoryEngineFinalOptimizeConvergenceTests(unittest.IsolatedAsyncioTestCase)
                     "updated_at": "2026-03-24T00:00:00Z",
                 }
             ),
+        ), patch(
+            "services.story_engine_workflow_service._sync_final_optimize_side_effects",
+            AsyncMock(return_value={"l2_episode_synced": True, "neo4j_event_synced": True}),
         ):
             result = await run_final_optimize(
                 SimpleNamespace(),

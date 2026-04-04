@@ -32,6 +32,9 @@ export function SmartRecommendPanel({
   const [templates, setTemplates] = useState<RecommendedTemplate[]>([]);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(!compact);
+  const browseHref = projectId
+    ? `/dashboard/projects/${projectId}/story-room`
+    : "/dashboard";
 
   useEffect(() => {
     async function fetchRecommendations() {
@@ -122,7 +125,7 @@ export function SmartRecommendPanel({
               </button>
             ))}
             <Link
-              href="/dashboard/prompt-templates"
+              href={browseHref}
               className="flex items-center justify-center gap-1 rounded-xl border border-dashed border-black/20 p-2 text-xs text-black/50 hover:border-copper/40 hover:text-copper"
             >
               查看全部模板 →
@@ -191,7 +194,7 @@ export function SmartRecommendPanel({
       {expanded && (
         <div className="mt-4 flex items-center justify-center">
           <Link
-            href="/dashboard/prompt-templates"
+            href={browseHref}
             className="rounded-full border border-dashed border-copper/40 px-4 py-2 text-sm text-copper hover:bg-copper/10"
           >
             浏览全部 {templates.length}+ 模板 →

@@ -4,6 +4,7 @@ from models.chapter_comment import ChapterComment
 from models.chapter_review_decision import ChapterReviewDecision
 from models.chapter_version import ChapterVersion
 from models.character import Character
+from models.character_linguistic import CharacterLinguisticProfile, LinguisticConsistencyLog
 from models.evaluation import Evaluation
 from models.open_thread import (
     OpenThread,
@@ -55,6 +56,7 @@ __all__ = [
     "ChapterReviewDecision",
     "ChapterVersion",
     "Character",
+    "CharacterLinguisticProfile",
     "Evaluation",
     "Foreshadowing",
     "OpenThread",
@@ -92,4 +94,5 @@ __all__ = [
     "User",
     "UserPreference",
     "WorldSetting",
+    "LinguisticConsistencyLog",
 ]

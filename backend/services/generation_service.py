@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Legacy chapter generation core.
+
+This module is frozen except for compatibility fixes.
+Current product mainline should prefer Story Engine workflows instead of adding
+new behavior here.
+"""
+
 from functools import partial
 from typing import Any
 from uuid import UUID
@@ -115,7 +122,7 @@ async def build_generation_payload(
         chapter_outline_seed=chapter_outline_seed,
     )
 
-    return {
+    base = {
         "chapter_id": str(chapter.id),
         "project_id": str(chapter.project_id),
         "volume_id": str(chapter.volume_id) if chapter.volume_id is not None else None,
@@ -162,6 +169,7 @@ async def build_generation_payload(
 
 
 async def run_generation_pipeline(
+    session: AsyncSession,
     *,
     chapter_id: UUID,
     user_id: UUID,

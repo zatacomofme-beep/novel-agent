@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""Project generation helpers.
+
+This module contains reusable next-chapter candidate logic and Story Bible
+follow-up helpers that still serve the current product mainline.
+
+Legacy chapter-generation dispatch has been moved to
+`services.legacy_project_generation_service`.
+"""
+
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -17,17 +26,13 @@ from models.project import Project
 from models.project_branch import ProjectBranch
 from models.project_volume import ProjectVolume
 from models.story_bible_version import StoryBiblePendingChange, StoryBiblePendingChangeStatus
-from schemas.chapter import ChapterRead
 from schemas.project import (
     ProjectBootstrapProfileRead,
     ProjectChapterBlueprint,
-    ProjectChapterGenerationDispatchRead,
     ProjectNextChapterCandidateRead,
     ProjectNovelBlueprintRead,
 )
-from services.chapter_service import get_owned_chapter
 from services.project_service import (
-    PROJECT_PERMISSION_EDIT,
     _story_bible_identity_key,
     build_project_structure_payload,
 )
@@ -83,53 +88,8 @@ def preview_next_project_chapter_candidate(
     return candidate.to_read()
 
 
-async def dispatch_next_project_chapter_generation(
-    session: AsyncSession,
-    project: Project,
-    *,
-    actor_user_id: UUID,
-    branch_id: UUID | None = None,
-) -> ProjectChapterGenerationDispatchRead:
-    candidate = _resolve_next_project_chapter_candidate(project, branch_id=branch_id)
-    if candidate is None:
-        raise AppError(
-            code="project.next_chapter_unavailable",
-            message="Project next chapter is unavailable. Generate a novel blueprint first.",
-            status_code=400,
-        )
 
-    chapter = await _materialize_candidate_chapter(session, project, candidate)
-    chapter = await get_owned_chapter(
-        session,
-        chapter.id,
-        actor_user_id,
-        permission=PROJECT_PERMISSION_EDIT,
-    )
     # 这里延迟导入，避免 generation_service 和 project_generation_service 在模块加载期互相引用。
-    from services.generation_service import build_generation_payload
-    from tasks.chapter_generation import dispatch_generation_task, enqueue_chapter_generation_task
-
-    payload = await build_generation_payload(session, chapter.id, actor_user_id)
-    task_state = await enqueue_chapter_generation_task(
-        str(chapter.id),
-        str(actor_user_id),
-        str(project.id),
-        payload,
-    )
-    task_state = await dispatch_generation_task(
-        task_id=task_state.task_id,
-        chapter_id=str(chapter.id),
-        project_id=str(project.id),
-        user_id=str(actor_user_id),
-    )
-
-    return ProjectChapterGenerationDispatchRead(
-        chapter=ChapterRead.model_validate(chapter),
-        next_chapter=candidate.to_read(chapter_override=chapter),
-        task_id=task_state.task_id,
-        task_status=task_state.status,
-        task=task_state,
-    )
 
 
 async def propose_story_bible_updates_from_generation(

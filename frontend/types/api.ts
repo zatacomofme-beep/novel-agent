@@ -65,6 +65,7 @@ export interface Project {
   has_novel_blueprint: boolean;
 }
 
+
 export interface StoryEnginePresetSummary {
   key: string;
   label: string;

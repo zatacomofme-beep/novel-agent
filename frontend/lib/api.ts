@@ -3,6 +3,32 @@ import { getAccessToken } from "@/lib/auth";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+export function buildApiWebSocketUrl(
+  path: string,
+  query: Record<string, string | string[] | null | undefined> = {},
+): string {
+  const url = new URL(API_URL);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = path;
+  url.search = "";
+
+  for (const [key, rawValue] of Object.entries(query)) {
+    if (Array.isArray(rawValue)) {
+      for (const value of rawValue) {
+        if (value !== undefined && value !== null && value !== "") {
+          url.searchParams.append(key, value);
+        }
+      }
+      continue;
+    }
+    if (rawValue !== undefined && rawValue !== null && rawValue !== "") {
+      url.searchParams.set(key, rawValue);
+    }
+  }
+
+  return url.toString();
+}
+
 function extractDownloadFilename(contentDisposition: string | null): string | null {
   if (!contentDisposition) {
     return null;
@@ -182,49 +208,3 @@ export async function downloadWithAuth(
   window.URL.revokeObjectURL(objectUrl);
 }
 
-export interface SnapshotResponse {
-  id: string;
-  version_number: number;
-  content: string;
-  action_type: string;
-  trigger_agent: string | null;
-  revision_round: number | null;
-  content_length: number;
-  created_at: string;
-}
-
-export interface UndoRedoStatus {
-  can_undo: boolean;
-  can_redo: boolean;
-  current_version: number;
-  total_versions: number;
-}
-
-export async function getChapterUndoRedoStatus(chapterId: string): Promise<UndoRedoStatus> {
-  return apiFetchWithAuth<UndoRedoStatus>(
-    `/api/v1/chapters/${chapterId}/history/status`
-  );
-}
-
-export async function listChapterSnapshots(
-  chapterId: string,
-  limit = 20
-): Promise<SnapshotResponse[]> {
-  return apiFetchWithAuth<SnapshotResponse[]>(
-    `/api/v1/chapters/${chapterId}/history/snapshots?limit=${limit}`
-  );
-}
-
-export async function undoChapter(chapterId: string): Promise<{ success: boolean; snapshot?: SnapshotResponse; message?: string }> {
-  return apiFetchWithAuth(
-    `/api/v1/chapters/${chapterId}/history/undo`,
-    { method: "POST" }
-  );
-}
-
-export async function redoChapter(chapterId: string): Promise<{ success: boolean; snapshot?: SnapshotResponse; message?: string }> {
-  return apiFetchWithAuth(
-    `/api/v1/chapters/${chapterId}/history/redo`,
-    { method: "POST" }
-  );
-}

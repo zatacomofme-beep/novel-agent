@@ -128,3 +128,52 @@ class StoryEngineModelServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.metadata["stream_failover_triggered"])
         self.assertEqual(gateway_mock.await_count, 1)
 
+    async def test_generate_story_stream_paragraph_includes_enrichment_hints(self) -> None:
+        gateway_mock = AsyncMock(
+            return_value=GenerationResult(
+                content="Alice kept moving.",
+                provider="openai-compatible",
+                model="gpt-5.4",
+                used_fallback=False,
+                metadata={},
+            )
+        )
+
+        with patch(
+            "services.story_engine_model_service.model_gateway.generate_text",
+            gateway_mock,
+        ):
+            await generate_story_stream_paragraph(
+                chapter_number=7,
+                chapter_title="Storm Pier",
+                beat="Push the protagonist into the next choice",
+                paragraph_index=2,
+                paragraph_total=4,
+                draft_text="Existing draft",
+                outline_text="Outline",
+                style_sample=None,
+                workspace={
+                    "characters": [
+                        SimpleNamespace(name="Alice", character_id="char-1"),
+                        SimpleNamespace(name="Bob", character_id="char-2"),
+                    ],
+                    "world_rules": [SimpleNamespace(rule_name="Cost Rule", rule_content="Every surge has a price")],
+                    "foreshadows": [SimpleNamespace(content="The gate was already open")],
+                    "items": [SimpleNamespace(name="rusted key")],
+                },
+                recent_chapters=["Alice discovered the gate was tampered with."],
+                fallback="fallback",
+                model_routing={"stream_writer": {"model": "gpt-5.4", "reasoning_effort": "medium"}},
+                social_topology={"centrality_scores": {"char-1": 0.9, "char-2": 0.4}},
+                causal_context={
+                    "causal_paths": [{"nodes": [{"name": "Harbor Alarm"}, {"name": "Pier Clash"}]}],
+                    "character_influence": [{"name": "Alice"}],
+                },
+                open_threads=[{"entity_ref": "rusted key", "entity_type": "item"}],
+            )
+
+        request = gateway_mock.await_args.args[0]
+        self.assertIn("Alice", request.prompt)
+        self.assertIn("Harbor Alarm", request.prompt)
+        self.assertIn("rusted key", request.prompt)
+

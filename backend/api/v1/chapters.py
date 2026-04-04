@@ -5,6 +5,22 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_user, get_db_session
+from api.v1.story_engine import (
+    story_engine_chapter_checkpoint_create,
+    story_engine_chapter_checkpoint_update,
+    story_engine_chapter_comment_create,
+    story_engine_chapter_comment_delete,
+    story_engine_chapter_comment_update,
+    story_engine_chapter_create,
+    story_engine_chapter_detail,
+    story_engine_chapter_export,
+    story_engine_chapter_patch,
+    story_engine_chapter_rewrite_selection,
+    story_engine_chapter_review_create,
+    story_engine_chapter_review_workspace,
+    story_engine_chapter_rollback,
+    story_engine_chapter_versions,
+)
 from models.user import User
 from schemas.chapter import (
     ChapterCheckpointCreate,
@@ -24,41 +40,37 @@ from schemas.chapter import (
     ChapterVersionRead,
     RollbackResponse,
 )
-from services.rewrite_service import rewrite_chapter_selection
-from services.review_service import (
-    create_chapter_checkpoint,
-    create_chapter_comment,
-    create_chapter_review_decision,
-    delete_chapter_comment,
-    get_chapter_review_workspace,
-    update_chapter_checkpoint,
-    update_chapter_comment,
-)
 from services.chapter_service import (
-    create_chapter,
     get_owned_chapter,
     list_project_chapters,
-    list_versions,
-    rollback_to_version,
-    update_chapter,
 )
-from services.export_service import (
-    ExportFormat,
-    build_chapter_export_filename,
-    build_export_response,
-    render_chapter_export,
+from services.export_service import ExportFormat
+from services.legacy_generation_dispatch_service import (
+    dispatch_legacy_generation_for_chapter,
 )
-from services.generation_service import build_generation_payload
 from services.project_service import (
-    get_owned_project,
     PROJECT_PERMISSION_EDIT,
     PROJECT_PERMISSION_READ,
 )
-from tasks.chapter_generation import dispatch_generation_task, enqueue_chapter_generation_task
 from tasks.schemas import TaskState
 
 
 router = APIRouter()
+
+
+async def _resolve_legacy_chapter_project_id(
+    session: AsyncSession,
+    *,
+    chapter_id: UUID,
+    user_id: UUID,
+) -> UUID:
+    chapter = await get_owned_chapter(
+        session,
+        chapter_id,
+        user_id,
+        permission=PROJECT_PERMISSION_READ,
+    )
+    return chapter.project_id
 
 
 @router.get("/projects/{project_id}/chapters", response_model=list[ChapterRead])
@@ -90,74 +102,118 @@ async def chapter_create(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterRead:
-    chapter = await create_chapter(session, project_id, current_user.id, payload)
-    return ChapterRead.model_validate(chapter)
+    return await story_engine_chapter_create(
+        project_id=project_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
+    )
 
 
-@router.get("/chapters/{chapter_id}", response_model=ChapterRead)
+@router.get(
+    "/chapters/{chapter_id}",
+    response_model=ChapterRead,
+    deprecated=True,
+    include_in_schema=False,
+)
 async def chapter_detail(
     chapter_id: UUID,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterRead:
-    chapter = await get_owned_chapter(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        current_user.id,
-        permission=PROJECT_PERMISSION_READ,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
     )
-    return ChapterRead.model_validate(chapter)
+    return await story_engine_chapter_detail(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        current_user=current_user,
+        session=session,
+    )
 
 
-@router.patch("/chapters/{chapter_id}", response_model=ChapterRead)
+@router.patch(
+    "/chapters/{chapter_id}",
+    response_model=ChapterRead,
+    deprecated=True,
+    include_in_schema=False,
+)
 async def chapter_patch(
     chapter_id: UUID,
     payload: ChapterUpdate,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterRead:
-    chapter = await get_owned_chapter(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        current_user.id,
-        permission=PROJECT_PERMISSION_EDIT,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
     )
-    updated = await update_chapter(
-        session,
-        chapter,
-        payload,
-        preference_learning_user_id=current_user.id,
-        preference_learning_source="manual_update",
+    return await story_engine_chapter_patch(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
     )
-    return ChapterRead.model_validate(updated)
 
 
-@router.get("/chapters/{chapter_id}/versions", response_model=list[ChapterVersionRead])
+@router.get(
+    "/chapters/{chapter_id}/versions",
+    response_model=list[ChapterVersionRead],
+    deprecated=True,
+    include_in_schema=False,
+)
 async def chapter_versions(
     chapter_id: UUID,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ChapterVersionRead]:
-    versions = await list_versions(session, chapter_id, current_user.id)
-    return [ChapterVersionRead.model_validate(version) for version in versions]
+    project_id = await _resolve_legacy_chapter_project_id(
+        session,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_versions(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        current_user=current_user,
+        session=session,
+    )
 
 
 @router.get(
     "/chapters/{chapter_id}/review-workspace",
     response_model=ChapterReviewWorkspaceRead,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_review_workspace(
     chapter_id: UUID,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterReviewWorkspaceRead:
-    return await get_chapter_review_workspace(session, chapter_id, current_user.id)
+    project_id = await _resolve_legacy_chapter_project_id(
+        session,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_review_workspace(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        current_user=current_user,
+        session=session,
+    )
 
 
 @router.post(
     "/chapters/{chapter_id}/checkpoints",
     response_model=ChapterCheckpointRead,
     status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_checkpoint_create(
     chapter_id: UUID,
@@ -165,12 +221,25 @@ async def chapter_checkpoint_create(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterCheckpointRead:
-    return await create_chapter_checkpoint(session, chapter_id, current_user.id, payload)
+    project_id = await _resolve_legacy_chapter_project_id(
+        session,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_checkpoint_create(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
+    )
 
 
 @router.patch(
     "/chapters/{chapter_id}/checkpoints/{checkpoint_id}",
     response_model=ChapterCheckpointRead,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_checkpoint_patch(
     chapter_id: UUID,
@@ -179,12 +248,18 @@ async def chapter_checkpoint_patch(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterCheckpointRead:
-    return await update_chapter_checkpoint(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        checkpoint_id,
-        current_user.id,
-        payload,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_checkpoint_update(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        checkpoint_id=checkpoint_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
     )
 
 
@@ -192,6 +267,8 @@ async def chapter_checkpoint_patch(
     "/chapters/{chapter_id}/comments",
     response_model=ChapterReviewCommentRead,
     status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_comment_create(
     chapter_id: UUID,
@@ -199,12 +276,25 @@ async def chapter_comment_create(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterReviewCommentRead:
-    return await create_chapter_comment(session, chapter_id, current_user.id, payload)
+    project_id = await _resolve_legacy_chapter_project_id(
+        session,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_comment_create(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
+    )
 
 
 @router.patch(
     "/chapters/{chapter_id}/comments/{comment_id}",
     response_model=ChapterReviewCommentRead,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_comment_patch(
     chapter_id: UUID,
@@ -213,18 +303,26 @@ async def chapter_comment_patch(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterReviewCommentRead:
-    return await update_chapter_comment(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        comment_id,
-        current_user.id,
-        payload,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_comment_update(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        comment_id=comment_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
     )
 
 
 @router.delete(
     "/chapters/{chapter_id}/comments/{comment_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_comment_delete(
     chapter_id: UUID,
@@ -232,14 +330,26 @@ async def chapter_comment_delete(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> Response:
-    await delete_chapter_comment(session, chapter_id, comment_id, current_user.id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    project_id = await _resolve_legacy_chapter_project_id(
+        session,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_comment_delete(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        comment_id=comment_id,
+        current_user=current_user,
+        session=session,
+    )
 
 
 @router.post(
     "/chapters/{chapter_id}/reviews",
     response_model=ChapterReviewDecisionRead,
     status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_review_create(
     chapter_id: UUID,
@@ -247,17 +357,25 @@ async def chapter_review_create(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterReviewDecisionRead:
-    return await create_chapter_review_decision(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        current_user.id,
-        payload,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_review_create(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
     )
 
 
 @router.post(
     "/chapters/{chapter_id}/rewrite-selection",
     response_model=ChapterSelectionRewriteResponse,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_rewrite_selection(
     chapter_id: UUID,
@@ -265,17 +383,25 @@ async def chapter_rewrite_selection(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterSelectionRewriteResponse:
-    return await rewrite_chapter_selection(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        current_user.id,
-        payload,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
+    return await story_engine_chapter_rewrite_selection(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        payload=payload,
+        current_user=current_user,
+        session=session,
     )
 
 
 @router.post(
     "/chapters/{chapter_id}/rollback/{version_id}",
     response_model=RollbackResponse,
+    deprecated=True,
+    include_in_schema=False,
 )
 async def chapter_rollback(
     chapter_id: UUID,
@@ -283,82 +409,87 @@ async def chapter_rollback(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> RollbackResponse:
-    chapter, restored_version = await rollback_to_version(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        version_id,
-        current_user.id,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
     )
-    return RollbackResponse(
-        chapter=ChapterRead.model_validate(chapter),
-        restored_version=ChapterVersionRead.model_validate(restored_version),
+    return await story_engine_chapter_rollback(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        version_id=version_id,
+        current_user=current_user,
+        session=session,
     )
 
 
-@router.post("/chapters/{chapter_id}/generate", response_model=TaskState)
+@router.post(
+    "/chapters/{chapter_id}/generate",
+    response_model=TaskState,
+    deprecated=True,
+    include_in_schema=False,
+    summary="Legacy chapter generation entrypoint",
+)
 async def chapter_generate(
     chapter_id: UUID,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TaskState:
+    """Legacy generation pipeline kept for compatibility.
+
+    Current product mainline uses Story Engine workflows from `story-room`.
+    """
     chapter = await get_owned_chapter(
         session,
         chapter_id,
         current_user.id,
         permission=PROJECT_PERMISSION_EDIT,
     )
-    payload = await build_generation_payload(session, chapter.id, current_user.id)
-    task_state = await enqueue_chapter_generation_task(
-        str(chapter.id),
-        str(current_user.id),
-        str(chapter.project_id),
-        payload,
+    return await dispatch_legacy_generation_for_chapter(
+        session,
+        chapter=chapter,
+        user_id=current_user.id,
     )
-    task_state = await dispatch_generation_task(
-        task_id=task_state.task_id,
-        chapter_id=str(chapter.id),
-        project_id=str(chapter.project_id),
-        user_id=str(current_user.id),
-    )
-    return task_state
 
 
-@router.get("/chapters/{chapter_id}/export")
+@router.get(
+    "/chapters/{chapter_id}/export",
+    deprecated=True,
+    include_in_schema=False,
+)
 async def chapter_export(
     chapter_id: UUID,
     export_format: ExportFormat = Query(default="md", alias="format"),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> Response:
-    chapter = await get_owned_chapter(
+    project_id = await _resolve_legacy_chapter_project_id(
         session,
-        chapter_id,
-        current_user.id,
-        permission=PROJECT_PERMISSION_READ,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
     )
-    project = await get_owned_project(
-        session,
-        chapter.project_id,
-        current_user.id,
-        permission=PROJECT_PERMISSION_READ,
-    )
-    return build_export_response(
-        content=render_chapter_export(
-            project_title=project.title,
-            chapter=chapter,
-            export_format=export_format,
-        ),
-        filename=build_chapter_export_filename(project.title, chapter, export_format),
+    return await story_engine_chapter_export(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        export_format=export_format,
+        current_user=current_user,
+        session=session,
     )
 
 
-@router.post("/chapters/{chapter_id}/beta-reader")
+@router.post(
+    "/chapters/{chapter_id}/beta-reader",
+    deprecated=True,
+    include_in_schema=False,
+    summary="Legacy beta reader entrypoint",
+)
 async def get_beta_reader_feedback(
     chapter_id: UUID,
     body: dict,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Legacy sidecar analysis kept for compatibility."""
     from agents.beta_reader import BetaReaderAgent
     from agents.base import AgentRunContext
 

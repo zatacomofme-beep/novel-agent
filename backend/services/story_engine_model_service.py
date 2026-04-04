@@ -459,6 +459,9 @@ async def generate_story_stream_paragraph(
     fallback: str,
     model_routing: Optional[dict[str, dict[str, Any]]] = None,
     repair_instruction: Optional[str] = None,
+    social_topology: Optional[dict[str, Any]] = None,
+    causal_context: Optional[dict[str, Any]] = None,
+    open_threads: Optional[list[dict[str, Any]]] = None,
 ) -> GenerationResult:
     """为单段正文生成构造真实模型请求；在写作模型失败时按候选链自动容灾。"""
 
@@ -478,6 +481,16 @@ async def generate_story_stream_paragraph(
     ]
     foreshadow_snippets = [item.content for item in workspace.get("foreshadows", [])[:2]]
     item_snippets = [item.name for item in workspace.get("items", [])[:3]]
+    social_snippets = _build_story_stream_social_snippets(
+        workspace=workspace,
+        social_topology=social_topology if isinstance(social_topology, dict) else {},
+    )
+    causal_snippets = _build_story_stream_causal_snippets(
+        causal_context=causal_context if isinstance(causal_context, dict) else {},
+    )
+    open_thread_snippets = _build_story_stream_open_thread_snippets(
+        open_threads=open_threads if isinstance(open_threads, list) else [],
+    )
     recent_summary = "\n".join(f"- {item[:160]}" for item in recent_chapters[-2:] if item.strip())
     style_hint = style_sample.strip()[:1200] if style_sample and style_sample.strip() else "无样文，保持自然、利落、适合网文连载。"
     outline_hint = outline_text.strip()[:1200] if outline_text and outline_text.strip() else "无明确细纲，请围绕当前冲突自然推进。"
@@ -509,6 +522,13 @@ async def generate_story_stream_paragraph(
         f"修正要求：{repair_instruction or '无额外修正要求'}\n\n"
         f"样文参考：\n{style_hint}\n\n"
         "请直接写这一段正文，长度控制在 180-320 汉字左右，保证有画面、有推进、有因果。"
+    )
+
+    prompt = (
+        f"{prompt}"
+        f"Social topology: {'; '.join(social_snippets) or 'none'}\n"
+        f"Causal context: {'; '.join(causal_snippets) or 'none'}\n"
+        f"Open threads: {'; '.join(open_thread_snippets) or 'none'}\n"
     )
 
     candidates = _build_story_stream_model_candidates(model_routing)
@@ -587,6 +607,93 @@ async def generate_story_stream_paragraph(
             "stream_failover_attempts": failover_attempts,
         },
     )
+
+
+def _build_story_stream_social_snippets(
+    *,
+    workspace: dict[str, Any],
+    social_topology: dict[str, Any],
+) -> list[str]:
+    centrality_scores = social_topology.get("centrality_scores")
+    if not isinstance(centrality_scores, dict) or not centrality_scores:
+        return []
+
+    id_to_name: dict[str, str] = {}
+    for item in workspace.get("characters", []) or []:
+        character_id = str(
+            getattr(item, "character_id", None)
+            or getattr(item, "id", None)
+            or ""
+        ).strip()
+        name = str(getattr(item, "name", "") or "").strip()
+        if character_id and name:
+            id_to_name[character_id] = name
+
+    ranked = sorted(
+        (
+            (str(char_id), float(score))
+            for char_id, score in centrality_scores.items()
+            if isinstance(score, (int, float))
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    snippets: list[str] = []
+    for char_id, score in ranked[:3]:
+        name = id_to_name.get(char_id)
+        if not name:
+            continue
+        snippets.append(f"{name}({score:.2f})")
+    return snippets
+
+
+def _build_story_stream_causal_snippets(
+    *,
+    causal_context: dict[str, Any],
+) -> list[str]:
+    snippets: list[str] = []
+    paths = causal_context.get("causal_paths")
+    if isinstance(paths, list):
+        for path in paths[:2]:
+            if not isinstance(path, dict):
+                continue
+            nodes = path.get("nodes")
+            if not isinstance(nodes, list):
+                continue
+            labels = [
+                str(node.get("name") or "").strip()
+                for node in nodes
+                if isinstance(node, dict) and str(node.get("name") or "").strip()
+            ]
+            if labels:
+                snippets.append(" -> ".join(labels[:4]))
+
+    influences = causal_context.get("character_influence")
+    if isinstance(influences, list):
+        names = [
+            str(item.get("name") or "").strip()
+            for item in influences[:3]
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        if names:
+            snippets.append(f"High influence: {', '.join(names)}")
+    return snippets[:3]
+
+
+def _build_story_stream_open_thread_snippets(
+    *,
+    open_threads: list[dict[str, Any]],
+) -> list[str]:
+    snippets: list[str] = []
+    for item in open_threads[:3]:
+        if not isinstance(item, dict):
+            continue
+        entity_ref = str(item.get("entity_ref") or "").strip()
+        entity_type = str(item.get("entity_type") or "").strip()
+        if not entity_ref:
+            continue
+        snippets.append(f"{entity_ref}({entity_type})" if entity_type else entity_ref)
+    return snippets
 
 
 async def revise_story_final_draft(

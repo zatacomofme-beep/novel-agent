@@ -287,6 +287,9 @@ const recentTaskStatusLabels: Record<string, string> = {
 };
 
 function formatRecentTaskType(taskType: string): string {
+  if (taskType === "chapter_generation") {
+    return "兼容正文生成";
+  }
   return recentTaskTypeLabels[taskType] ?? taskType.replaceAll(".", " / ");
 }
 

@@ -36,18 +36,18 @@ class TaskState(BaseModel):
             raw_chapter_number = task_result.get("chapter_number")
             chapter_number = raw_chapter_number if isinstance(raw_chapter_number, int) else None
         return cls(
-            task_id=task_run.task_id,
-            task_type=task_run.task_type,
-            status=task_run.status,
-            progress=task_run.progress,
-            message=task_run.message,
-            result=task_run.result,
-            error=task_run.error,
-            project_id=task_run.project_id,
-            chapter_id=task_run.chapter_id,
+            task_id=getattr(task_run, "task_id"),
+            task_type=getattr(task_run, "task_type"),
+            status=getattr(task_run, "status"),
+            progress=getattr(task_run, "progress", 0),
+            message=getattr(task_run, "message", None),
+            result=getattr(task_run, "result", None),
+            error=getattr(task_run, "error", None),
+            project_id=getattr(task_run, "project_id", None),
+            chapter_id=getattr(task_run, "chapter_id", None),
             chapter_number=chapter_number,
-            created_at=task_run.created_at,
-            updated_at=task_run.updated_at,
+            created_at=getattr(task_run, "created_at", utcnow()),
+            updated_at=getattr(task_run, "updated_at", utcnow()),
         )
 
 

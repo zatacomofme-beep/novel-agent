@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from memory.story_bible import StoryBibleContext
+from services.legacy_project_generation_service import (
+    dispatch_next_project_chapter_generation,
+)
 from services.project_generation_service import (
     _ResolvedNextChapterCandidate,
-    dispatch_next_project_chapter_generation,
     preview_next_project_chapter_candidate,
     propose_story_bible_updates_from_generation,
 )
@@ -220,31 +222,16 @@ class ProjectGenerationServiceTests(unittest.IsolatedAsyncioTestCase):
         session = SimpleNamespace()
 
         with patch(
-            "services.project_generation_service._resolve_next_project_chapter_candidate",
+            "services.legacy_project_generation_service._resolve_next_project_chapter_candidate",
             return_value=candidate,
         ), patch(
-            "services.project_generation_service._materialize_candidate_chapter",
+            "services.legacy_project_generation_service._materialize_candidate_chapter",
             AsyncMock(return_value=chapter),
         ), patch(
-            "services.project_generation_service.get_owned_chapter",
+            "services.legacy_project_generation_service.get_owned_chapter",
             AsyncMock(return_value=chapter),
         ), patch(
-            "services.project_generation_service.build_generation_payload",
-            AsyncMock(return_value={"chapter_id": str(chapter.id)}),
-        ), patch(
-            "services.project_generation_service.enqueue_chapter_generation_task",
-            AsyncMock(
-                return_value=TaskState(
-                    task_id="task-1",
-                    task_type="chapter_generation",
-                    status="queued",
-                    progress=0,
-                    message="queued",
-                    result={},
-                )
-            ),
-        ), patch(
-            "services.project_generation_service.dispatch_generation_task",
+            "services.legacy_generation_dispatch_service.dispatch_legacy_generation_for_chapter",
             AsyncMock(
                 return_value=TaskState(
                     task_id="task-1",
@@ -321,7 +308,10 @@ class ProjectGenerationServiceTests(unittest.IsolatedAsyncioTestCase):
             timeline_events=[],
             chapter_summaries=[],
         )
-        session = SimpleNamespace(commit=AsyncMock())
+        session = SimpleNamespace(
+            commit=AsyncMock(),
+            execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None)),
+        )
         captured_triggers: list[str] = []
 
         async def fake_auto_trigger(*args, **kwargs):

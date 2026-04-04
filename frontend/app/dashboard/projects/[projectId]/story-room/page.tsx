@@ -26,6 +26,20 @@ import { OutlineWorkbench } from "@/components/story-engine/outline-workbench";
 import { apiFetchWithAuth, apiStreamWithAuth } from "@/lib/api";
 import { buildUserFriendlyError } from "@/lib/errors";
 import {
+  createLegacyChapter,
+  createLegacyChapterCheckpoint,
+  createLegacyChapterComment,
+  createLegacyChapterReviewDecision,
+  deleteLegacyChapterComment,
+  exportLegacyChapter,
+  fetchLegacyChapterReviewBundle,
+  rewriteLegacyChapterSelection,
+  rollbackLegacyChapterVersion,
+  updateLegacyChapter,
+  updateLegacyChapterCheckpoint,
+  updateLegacyChapterComment,
+} from "@/lib/legacy-chapter-chain";
+import {
   analyzeStoryRoomLocalDraftRecovery,
   buildStoryRoomLocalDraftKey,
   listStoryRoomLocalDrafts,
@@ -50,7 +64,6 @@ import type {
   ProjectEntityGenerationDispatch,
   ProjectNextChapterCandidate,
   RealtimeGuardResponse,
-  RollbackResponse,
   StoryBible,
   StoryBiblePendingChange,
   StoryBiblePendingChangeList,
@@ -346,6 +359,9 @@ function formatWorkflowLabel(workflowType: string): string {
 }
 
 function formatTaskPlaybackLabel(taskType: string): string {
+  if (taskType === "chapter_generation") {
+    return "兼容正文生成";
+  }
   const labels: Record<string, string> = {
     chapter_generation: "正文生成",
     "story_engine.bulk_import": "导入设定",
@@ -2281,12 +2297,8 @@ export default function StoryRoomPage() {
       setLoadingChapterReview(true);
     }
     try {
-      const [workspaceData, versionData] = await Promise.all([
-        apiFetchWithAuth<ChapterReviewWorkspace>(
-          `/api/v1/chapters/${chapterId}/review-workspace`,
-        ),
-        apiFetchWithAuth<ChapterVersion[]>(`/api/v1/chapters/${chapterId}/versions`),
-      ]);
+      const { workspace: workspaceData, versions: versionData } =
+        await fetchLegacyChapterReviewBundle(projectId, chapterId);
       setReviewWorkspace(workspaceData);
       setChapterVersions(
         [...versionData].sort((left, right) => right.version_number - left.version_number),
@@ -3579,10 +3591,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      await apiFetchWithAuth(`/api/v1/chapters/${chapter.id}/comments`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+      await createLegacyChapterComment(projectId, chapter.id, payload);
       await refreshActiveChapterReviewState(chapter.id);
       setSuccess(
         payload.parent_comment_id
@@ -3618,10 +3627,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      await apiFetchWithAuth(`/api/v1/chapters/${chapter.id}/comments/${commentId}`, {
-        method: "PATCH",
-        body: JSON.stringify(payload),
-      });
+      await updateLegacyChapterComment(projectId, chapter.id, commentId, payload);
       await refreshActiveChapterReviewState(chapter.id);
       if (payload.status === "resolved") {
         setSuccess("这条批注已经标成解决。");
@@ -3657,9 +3663,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      await apiFetchWithAuth(`/api/v1/chapters/${chapter.id}/comments/${commentId}`, {
-        method: "DELETE",
-      });
+      await deleteLegacyChapterComment(projectId, chapter.id, commentId);
       await refreshActiveChapterReviewState(chapter.id);
       setSuccess("这条批注已经删除。");
       return true;
@@ -3686,10 +3690,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      await apiFetchWithAuth(`/api/v1/chapters/${chapter.id}/checkpoints`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+      await createLegacyChapterCheckpoint(projectId, chapter.id, payload);
       await refreshActiveChapterReviewState(chapter.id, {
         refreshChapterChain: true,
       });
@@ -3726,13 +3727,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      await apiFetchWithAuth(
-        `/api/v1/chapters/${chapter.id}/checkpoints/${checkpointId}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify(payload),
-        },
-      );
+      await updateLegacyChapterCheckpoint(projectId, chapter.id, checkpointId, payload);
       await refreshActiveChapterReviewState(chapter.id, {
         refreshChapterChain: true,
       });
@@ -3767,10 +3762,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      await apiFetchWithAuth(`/api/v1/chapters/${chapter.id}/reviews`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+      await createLegacyChapterReviewDecision(projectId, chapter.id, payload);
       await refreshActiveChapterReviewState(chapter.id, {
         refreshChapterChain: true,
       });
@@ -3802,12 +3794,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      const response = await apiFetchWithAuth<RollbackResponse>(
-        `/api/v1/chapters/${chapter.id}/rollback/${versionId}`,
-        {
-          method: "POST",
-        },
-      );
+      const response = await rollbackLegacyChapterVersion(projectId, chapter.id, versionId);
       setChapters((current) =>
         sortChapters([
           ...current.filter((item) => item.id !== response.chapter.id),
@@ -3852,16 +3839,10 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      const response = await apiFetchWithAuth<ChapterSelectionRewriteResponse>(
-        `/api/v1/chapters/${chapter.id}/rewrite-selection`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            ...payload,
-            create_version: true,
-          }),
-        },
-      );
+      const response = await rewriteLegacyChapterSelection(projectId, chapter.id, {
+        ...payload,
+        create_version: true,
+      });
       setChapters((current) =>
         sortChapters([
           ...current.filter((item) => item.id !== response.chapter.id),
@@ -3917,10 +3898,7 @@ export default function StoryRoomPage() {
         if (activeChapter.status === "draft" && draftText.trim().length > 0) {
           payload.status = "writing";
         }
-        const updatedChapter = await apiFetchWithAuth<Chapter>(`/api/v1/chapters/${activeChapter.id}`, {
-          method: "PATCH",
-          body: JSON.stringify(payload),
-        });
+        const updatedChapter = await updateLegacyChapter(projectId, activeChapter.id, payload);
         setChapters((current) =>
           sortChapters([
             ...current.filter((chapter) => chapter.id !== updatedChapter.id),
@@ -3932,22 +3910,16 @@ export default function StoryRoomPage() {
         await clearCurrentCloudDraft();
         setSuccess(`第 ${chapterNumber} 章已保存，版本和发布状态都会按这版继续跟进。`);
       } else {
-        const createdChapter = await apiFetchWithAuth<Chapter>(
-          `/api/v1/projects/${projectId}/chapters`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              chapter_number: chapterNumber,
-              volume_id: selectedVolumeId,
-              branch_id: selectedBranchId,
-              title: chapterTitle.trim() || null,
-              content: draftText,
-              outline: outlinePayload,
-              status: draftText.trim().length > 0 ? "writing" : "draft",
-              change_reason: "Created from story room",
-            }),
-          },
-        );
+        const createdChapter = await createLegacyChapter(projectId, {
+          chapter_number: chapterNumber,
+          volume_id: selectedVolumeId,
+          branch_id: selectedBranchId,
+          title: chapterTitle.trim() || null,
+          content: draftText,
+          outline: outlinePayload,
+          status: draftText.trim().length > 0 ? "writing" : "draft",
+          change_reason: "Created from story room",
+        });
         setChapters((current) => sortChapters([...current, createdChapter]));
         setDraftDirty(false);
         await clearCurrentLocalDraft();
@@ -3995,13 +3967,10 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      const updatedChapter = await apiFetchWithAuth<Chapter>(`/api/v1/chapters/${activeChapter.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          status: "final",
-          change_reason: "Marked as final from story room",
-          create_version: false,
-        }),
+      const updatedChapter = await updateLegacyChapter(projectId, activeChapter.id, {
+        status: "final",
+        change_reason: "Marked as final from story room",
+        create_version: false,
       });
       await clearCurrentCloudDraft();
 
@@ -4073,8 +4042,7 @@ export default function StoryRoomPage() {
     setSuccess(null);
 
     try {
-      const { downloadWithAuth } = await import("@/lib/api");
-      await downloadWithAuth(`/api/v1/chapters/${activeChapter.id}/export?format=${format}`);
+      await exportLegacyChapter(projectId, activeChapter.id, format);
       setSuccess(format === "md" ? "Markdown 交稿版已经开始导出。" : "TXT 交稿版已经开始导出。");
     } catch (requestError) {
       setError(buildUserFriendlyError(requestError));
