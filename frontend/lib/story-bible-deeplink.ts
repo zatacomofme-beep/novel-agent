@@ -98,7 +98,10 @@ export function buildStoryBibleHref(
     }),
   );
 
-  return `/dashboard/projects/${target.projectId}/bible?${params.toString()}`;
+  params.set("stage", "knowledge");
+  params.set("entry", "story_bible");
+
+  return `/dashboard/projects/${target.projectId}/story-room?${params.toString()}`;
 }
 
 export function normalizeEntityLabels(

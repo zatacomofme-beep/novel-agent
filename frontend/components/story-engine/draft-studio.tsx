@@ -572,6 +572,7 @@ export function DraftStudio({
               <button
                 className="rounded-full bg-[#566246] px-4 py-2 text-xs font-semibold text-white transition hover:opacity-90"
                 onClick={onRestoreLocalDraft}
+                data-testid="draft-restore-local"
                 type="button"
               >
                 恢复这章内容
@@ -786,7 +787,7 @@ export function DraftStudio({
   );
 
   return (
-    <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
+    <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]" data-testid="story-room-stage-draft">
       <div className="space-y-5">
         <section className="rounded-[32px] border border-black/10 bg-white/82 p-6 shadow-[0_20px_50px_rgba(16,20,23,0.05)]">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -923,6 +924,7 @@ export function DraftStudio({
                 value={chapterTitle}
                 onChange={(event) => onChapterTitleChange(event.target.value)}
                 placeholder="这一章叫什么？"
+                data-testid="draft-chapter-title-input"
               />
             </label>
           </div>
@@ -936,6 +938,7 @@ export function DraftStudio({
                 min={1}
                 value={chapterNumber}
                 onChange={(event) => onChapterNumberChange(Number(event.target.value || 1))}
+                data-testid="draft-chapter-number-input"
               />
             </label>
             <div className="rounded-[24px] border border-black/10 bg-[#fbfaf5] px-4 py-3">

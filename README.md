@@ -42,7 +42,7 @@
 - 前端：Next.js 14 + TypeScript + Tailwind
 - 后端：FastAPI + SQLAlchemy + Celery
 - 主数据库：PostgreSQL
-- 向量检索：Qdrant + Chroma
+- 向量检索：Qdrant
 - 工作流 / 协作：LangGraph + 多角色模型路由
 - 实时任务：Redis + WebSocket task events
 
@@ -84,14 +84,13 @@ docker compose exec backend alembic upgrade head
 - 前端：http://localhost:3000
 - 后端 API：http://localhost:8000
 - API 文档：http://localhost:8000/docs
-- Chroma：http://localhost:8001
 - Qdrant：http://localhost:6333
 
 生产 Compose 也沿用 `backend/.env.compose` 这套容器内配置语义。
 
 ### 方式二：本机直跑前后端
 
-适合本机自己装了 PostgreSQL / Redis / Qdrant / Chroma，或者你要单独调试 Python / Next。
+适合本机自己装了 PostgreSQL / Redis / Qdrant，或者你要单独调试 Python / Next。
 
 1. 准备环境文件
 
@@ -106,7 +105,7 @@ cp frontend/.env.example frontend/.env
 cd backend
 python3.11 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 cd ../frontend
 npm install
@@ -169,7 +168,7 @@ RUN_MODEL_VERIFY=1 bash scripts/run_delivery_checks.sh
 
 ```bash
 cd backend
-PYTHONPATH=. python3 scripts/verify_story_engine_models.py
+PYTHONPATH=. ./venv/bin/python scripts/verify_story_engine_models.py
 ```
 
 ### Story Engine 联调烟雾测试
@@ -178,7 +177,7 @@ PYTHONPATH=. python3 scripts/verify_story_engine_models.py
 
 ```bash
 cd backend
-PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 scripts/story_engine_live_smoke.py
+PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 ./venv/bin/python scripts/story_engine_live_smoke.py
 ```
 
 ## 当前目录重点
@@ -216,10 +215,59 @@ novels/
 ## 关键文档
 
 - [DEVELOPMENT.md](./DEVELOPMENT.md)
+- [交接说明](./docs/HANDOFF.md)
 - [架构索引](./docs/architecture/README.md)
 - [章节生命周期](./docs/architecture/chapter-lifecycle.md)
 - [前后端契约图](./docs/architecture/api-contract-map.md)
 - [模型接入说明](./docs/setup/story-engine-models.md)
+
+## 开发者验收流程
+
+如果你只是想确认“当前改动没有把主线打坏”，建议按这组顺序执行：
+
+1. 准备后端 Python 3.11 环境
+
+```bash
+python3.11 -m venv backend/venv
+backend/venv/bin/pip install -r backend/requirements-dev.txt
+```
+
+2. 准备前端依赖
+
+```bash
+cd frontend
+npm ci
+cd ..
+```
+
+3. 跑仓库级关键检查
+
+```bash
+bash scripts/run_delivery_checks.sh
+```
+
+4. 如果你改了后端主逻辑，再补一轮全量后端回归
+
+```bash
+cd backend
+PYTHONPATH=. ./venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q
+```
+
+5. 如果你改了前端交互，再补前端静态检查和单测
+
+```bash
+cd frontend
+npm run lint
+npm run test
+```
+
+6. 如果你改了 `story-room` 主流程，再补一轮 UI 冒烟
+
+```bash
+bash scripts/run_story_room_e2e.sh
+```
+
+当前 CI 也已经覆盖这条最小验收链。
 
 ## 当前状态
 

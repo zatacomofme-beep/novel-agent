@@ -11,7 +11,7 @@ from bus.protocol import AgentResponse
 
 class CoordinatorAgentTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_propagates_truth_layer_context_through_revision_loop(self) -> None:
-        agent = CoordinatorAgent(max_revision_rounds=1)
+        agent = CoordinatorAgent(max_revision_rounds=2)
         context = AgentRunContext(
             chapter_id=str(uuid4()),
             project_id=str(uuid4()),
@@ -110,6 +110,10 @@ class CoordinatorAgentTests(unittest.IsolatedAsyncioTestCase):
         )
         agent.canon_guardian.run = AsyncMock(
             side_effect=[
+                AgentResponse(
+                    success=True,
+                    data={"canon_report": second_canon_report},
+                ),
                 AgentResponse(
                     success=True,
                     data={"canon_report": first_canon_report},
@@ -214,6 +218,21 @@ class CoordinatorAgentTests(unittest.IsolatedAsyncioTestCase):
             return_value=AgentResponse(
                 success=True,
                 data={"content": "修订后内容"},
+            )
+        )
+        agent.linguistic_checker.run = AsyncMock(
+            return_value=AgentResponse(
+                success=True,
+                data={"issues": []},
+            )
+        )
+        agent.chaos_agent.run = AsyncMock(
+            return_value=AgentResponse(
+                success=True,
+                data={
+                    "chaos_interventions": [],
+                    "overall_chaos_score": 0.2,
+                },
             )
         )
         approver_run = AsyncMock(

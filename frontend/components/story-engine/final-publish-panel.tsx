@@ -148,7 +148,10 @@ export function FinalPublishPanel({
   ];
 
   return (
-    <section className="rounded-[36px] border border-black/10 bg-white/82 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)]">
+    <section
+      className="rounded-[36px] border border-black/10 bg-white/82 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)]"
+      data-testid="final-publish-panel"
+    >
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-copper">第四步</p>
@@ -239,6 +242,7 @@ export function FinalPublishPanel({
                 type="button"
                 onClick={onContinueToNextChapter}
                 disabled={!canContinueToNextChapter || finalizingChapter}
+                data-testid="final-continue-next-chapter"
               >
                 {buildNextChapterActionLabel(nextChapter)}
               </button>

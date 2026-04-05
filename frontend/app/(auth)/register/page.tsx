@@ -87,6 +87,7 @@ function RegisterForm() {
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               required
+              data-testid="register-email-input"
             />
           </label>
 
@@ -99,6 +100,7 @@ function RegisterForm() {
               onChange={(event) => setPassword(event.target.value)}
               minLength={8}
               required
+              data-testid="register-password-input"
             />
           </label>
 
@@ -112,6 +114,7 @@ function RegisterForm() {
             className="rounded-2xl bg-moss px-4 py-3 text-sm font-medium text-paper transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
             type="submit"
             disabled={loading}
+            data-testid="register-submit"
           >
             {loading ? "创建中..." : "注册"}
           </button>
@@ -130,7 +133,10 @@ function RegisterForm() {
 
 export default function RegisterPage() {
   return (
-    <main className="flex min-h-screen items-center justify-center px-6 py-10 md:px-8">
+    <main
+      className="flex min-h-screen items-center justify-center px-6 py-10 md:px-8"
+      data-testid="register-page"
+    >
       <Suspense
         fallback={
           <div className="grid w-full max-w-6xl gap-6 lg:grid-cols-[1.02fr_0.98fr]">

@@ -13,6 +13,7 @@ from schemas.project import (
     PlotThreadGenerationRequest,
 )
 from services.entity_generation_service import (
+    _resolve_entity_generation_model_routing,
     generate_characters,
     generate_factions,
     generate_items,
@@ -330,3 +331,52 @@ class EntityGenerationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(response.factions[0].name, "黑钟会")
         self.assertIn(response.factions[0].leader, {"林澈", "沈岚"})
         self.assertIn(response.factions[0].territory, {"雾港", "钟塔区"})
+
+    async def test_resolve_entity_generation_model_routing_logs_and_falls_back(self) -> None:
+        session = SimpleNamespace()
+        project_id = uuid4()
+        user_id = uuid4()
+
+        with patch(
+            "services.story_engine_kb_service.get_story_engine_project",
+            AsyncMock(side_effect=RuntimeError("db unavailable")),
+        ), patch(
+            "services.entity_generation_service.logger.warning",
+        ) as mocked_warning:
+            routing = await _resolve_entity_generation_model_routing(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+            )
+
+        self.assertIsNone(routing)
+        mocked_warning.assert_called_once()
+        warning_args, warning_kwargs = mocked_warning.call_args
+        self.assertEqual(warning_args[0], "entity_generation_model_routing_resolve_failed")
+        self.assertEqual(warning_kwargs["extra"]["project_id"], str(project_id))
+        self.assertEqual(warning_kwargs["extra"]["user_id"], str(user_id))
+        self.assertEqual(warning_kwargs["extra"]["error_type"], "RuntimeError")
+
+    async def test_resolve_entity_generation_model_routing_success_does_not_warn(self) -> None:
+        session = SimpleNamespace()
+        project_id = uuid4()
+        user_id = uuid4()
+        routing = {"guardian": {"model": "gpt-5.4", "reasoning_effort": "high"}}
+
+        with patch(
+            "services.story_engine_kb_service.get_story_engine_project",
+            AsyncMock(return_value=SimpleNamespace()),
+        ), patch(
+            "services.entity_generation_service.resolve_story_engine_model_routing",
+            return_value=routing,
+        ), patch(
+            "services.entity_generation_service.logger.warning",
+        ) as mocked_warning:
+            resolved = await _resolve_entity_generation_model_routing(
+                session,
+                project_id=project_id,
+                user_id=user_id,
+            )
+
+        self.assertEqual(resolved, routing)
+        mocked_warning.assert_not_called()

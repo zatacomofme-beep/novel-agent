@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   formatAiTaste,
@@ -14,6 +14,7 @@ import {
   trendDirectionLabel,
 } from "@/app/dashboard/_components/quality-trend";
 import { ProcessPlaybackPanel, type ProcessPlaybackItem } from "@/components/process-playback-panel";
+import { useTaskEventStream } from "@/hooks/use-task-event-stream";
 import { apiFetchWithAuth, downloadWithAuth } from "@/lib/api";
 import { clearAuthSession, loadAuthSession } from "@/lib/auth";
 import type {
@@ -391,6 +392,7 @@ function DashboardPageShell() {
   const searchParams = useSearchParams();
   const createSectionRef = useRef<HTMLElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const realtimeOverviewRefreshTimerRef = useRef<number | null>(null);
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [title, setTitle] = useState("");
@@ -415,20 +417,27 @@ function DashboardPageShell() {
     void fetchOverview();
   }, []);
 
-  async function fetchOverview() {
-    setLoading(true);
-    setError(null);
+  async function fetchOverview(options: { silent?: boolean } = {}) {
+    const { silent = false } = options;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const data = await apiFetchWithAuth<DashboardOverview>("/api/v1/dashboard/overview");
       setOverview(data);
     } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Failed to load dashboard overview.",
-      );
+      if (!silent) {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Failed to load dashboard overview.",
+        );
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }
 
@@ -442,7 +451,7 @@ function DashboardPageShell() {
       const normalizedChapterWords = normalizePositiveNumber(targetChapterWords, 3_000);
       const plannedChapterCount = Math.max(
         10,
-        Math.ceil(normalizedTotalWords / normalizedChapterWords),
+        Math.min(200, Math.ceil(normalizedTotalWords / normalizedChapterWords)),
       );
       const createdProject = await apiFetchWithAuth<Project>("/api/v1/projects", {
         method: "POST",
@@ -551,7 +560,7 @@ function DashboardPageShell() {
 
   const projectSummaries = overview?.project_summaries ?? [];
   const qualityTrends = overview?.project_quality_trends ?? [];
-  const recentTasks = overview?.recent_tasks ?? [];
+  const recentTasks = overview?.recent_tasks;
   const focusQueue = overview?.focus_queue ?? [];
   const genreDistribution = overview?.genre_distribution ?? [];
   const activitySnapshot = overview?.activity_snapshot;
@@ -567,7 +576,7 @@ function DashboardPageShell() {
     [overview?.project_summaries],
   );
   const recentProcessItems = useMemo<ProcessPlaybackItem[]>(() => {
-    return recentTasks.map((task) => {
+    return (recentTasks ?? []).map((task) => {
       const taskHref = buildRecentTaskHref(task);
       const projectTitle =
         task.project_id ? projectTitleMap[task.project_id] ?? "当前项目" : "最近过程";
@@ -610,6 +619,34 @@ function DashboardPageShell() {
         normalizePositiveNumber(targetChapterWords, 3_000),
     ),
   );
+  const realtimeProjectIds = useMemo(
+    () => (overview?.project_summaries ?? []).map((item) => item.project_id),
+    [overview?.project_summaries],
+  );
+
+  const handleRealtimeTaskState = useCallback(() => {
+    if (realtimeOverviewRefreshTimerRef.current !== null) {
+      window.clearTimeout(realtimeOverviewRefreshTimerRef.current);
+    }
+    realtimeOverviewRefreshTimerRef.current = window.setTimeout(() => {
+      void fetchOverview({ silent: true });
+      realtimeOverviewRefreshTimerRef.current = null;
+    }, 900);
+  }, []);
+
+  useTaskEventStream({
+    enabled: Boolean(currentUser),
+    projectIds: realtimeProjectIds,
+    onTaskState: handleRealtimeTaskState,
+  });
+
+  useEffect(() => {
+    return () => {
+      if (realtimeOverviewRefreshTimerRef.current !== null) {
+        window.clearTimeout(realtimeOverviewRefreshTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!currentUser || !isFirstBookFlow) {
@@ -653,7 +690,7 @@ function DashboardPageShell() {
   }
 
   return (
-    <main className="min-h-screen px-6 py-10">
+    <main className="min-h-screen px-6 py-10" data-testid="dashboard-page">
       <div className="mx-auto flex max-w-7xl flex-col gap-8">
         <section
           ref={createSectionRef}
@@ -694,6 +731,7 @@ function DashboardPageShell() {
               id="create-project"
               className="rounded-[30px] border border-black/10 bg-[#fbfaf5] p-6"
               onSubmit={handleCreate}
+              data-testid="dashboard-create-book-form"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -727,6 +765,7 @@ function DashboardPageShell() {
                     onChange={(event) => setTitle(event.target.value)}
                     placeholder="例如：海城夜潮"
                     required
+                    data-testid="dashboard-create-book-title"
                   />
                 </label>
 
@@ -739,6 +778,7 @@ function DashboardPageShell() {
                       min={50000}
                       step={10000}
                       value={targetTotalWords}
+                      data-testid="dashboard-create-book-total-words"
                       onChange={(event) =>
                         setTargetTotalWords(Number(event.target.value || 1_000_000))
                       }
@@ -753,6 +793,7 @@ function DashboardPageShell() {
                       min={1000}
                       step={500}
                       value={targetChapterWords}
+                      data-testid="dashboard-create-book-chapter-words"
                       onChange={(event) =>
                         setTargetChapterWords(Number(event.target.value || 3_000))
                       }
@@ -768,6 +809,7 @@ function DashboardPageShell() {
                       value={genre}
                       onChange={(event) => setGenre(event.target.value)}
                       placeholder="科幻 / 悬疑 / 奇幻..."
+                      data-testid="dashboard-create-book-genre"
                     />
                   </label>
 
@@ -778,6 +820,7 @@ function DashboardPageShell() {
                       value={tone}
                       onChange={(event) => setTone(event.target.value)}
                       placeholder="热血 / 冷峻 / 轻快..."
+                      data-testid="dashboard-create-book-tone"
                     />
                   </label>
                 </div>
@@ -791,6 +834,7 @@ function DashboardPageShell() {
                 className="mt-6 w-full rounded-2xl bg-ink px-4 py-3 text-sm font-medium text-paper transition hover:bg-copper disabled:cursor-not-allowed disabled:opacity-60"
                 type="submit"
                 disabled={creating}
+                data-testid="dashboard-create-book-submit"
               >
                 {creating ? "创建中..." : "创建新书并去定大纲"}
               </button>

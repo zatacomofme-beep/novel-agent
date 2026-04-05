@@ -3,9 +3,29 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_ENV_FILE="${BACKEND_ENV_FILE:-}"
+DEFAULT_VENV_PYTHON="$ROOT_DIR/backend/venv/bin/python"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  if [[ -x "$DEFAULT_VENV_PYTHON" ]]; then
+    PYTHON_BIN="$DEFAULT_VENV_PYTHON"
+  else
+    PYTHON_BIN="python3.11"
+  fi
+fi
+
+if [[ "$PYTHON_BIN" == */* ]]; then
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "找不到 Python 3.11 解释器：$PYTHON_BIN" >&2
+    exit 1
+  fi
+elif ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "找不到 Python 3.11 解释器：$PYTHON_BIN" >&2
+  exit 1
+fi
 
 load_env_exports() {
-  python3 - "$1" <<'PY'
+  "$PYTHON_BIN" - "$1" <<'PY'
 from __future__ import annotations
 
 import shlex
@@ -45,7 +65,7 @@ eval "$(load_env_exports "$BACKEND_ENV_FILE")"
 cd "$ROOT_DIR"
 
 echo "[2/3] 运行后端 Story Engine 关键测试"
-PYTHONPATH=backend python3 -m pytest \
+PYTHONPATH=backend "$PYTHON_BIN" -m pytest \
   backend/tests/test_story_engine_* \
   backend/tests/test_preference_service.py \
   backend/tests/test_model_gateway.py \
@@ -61,7 +81,7 @@ if [[ "${RUN_MODEL_VERIFY:-0}" == "1" ]]; then
   echo "[附加] 校验模型网关可见模型"
   (
     cd "$ROOT_DIR/backend"
-    PYTHONPATH=. python3 scripts/verify_story_engine_models.py
+    PYTHONPATH=. "$PYTHON_BIN" scripts/verify_story_engine_models.py
   )
 fi
 

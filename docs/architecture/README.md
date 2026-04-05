@@ -14,7 +14,8 @@
 3. `chapter-lifecycle.md`
 4. `agent-collaboration.md`
 5. `api-contract-map.md`
-6. `alignment-backlog.md`
+6. `legacy-chapter-endpoint-offboarding.md`
+7. `alignment-backlog.md`
 
 ## 一张总图
 
@@ -103,6 +104,14 @@
 - 每个前端页面实际依赖哪些接口
 - 后端服务真正承诺了什么数据结构
 - 当前最明显的前后端契约偏差在哪里
+
+### `legacy-chapter-endpoint-offboarding.md`
+
+重点回答：
+
+- 旧 `/api/v1/chapters/*` 兼容入口现在还剩哪些
+- 哪些端点可以先下线，哪些要等工作流语义迁移后再下线
+- 如何通过 `legacy_chapter_endpoint_used` 观测日志判断下线时机
 
 ### `alignment-backlog.md`
 

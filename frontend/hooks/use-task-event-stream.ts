@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef } from "react";
 
 import { buildApiWebSocketUrl } from "@/lib/api";
+import { getAccessToken } from "@/lib/auth";
 import type { TaskState } from "@/types/api";
 
 type TaskEventStreamMessage =
@@ -89,6 +90,10 @@ export function useTaskEventStream({
 
       socket.onopen = () => {
         reconnectAttempt = 0;
+        const accessToken = getAccessToken();
+        if (accessToken) {
+          socket?.send(JSON.stringify({ type: "auth", token: accessToken }));
+        }
       };
 
       socket.onmessage = (event) => {

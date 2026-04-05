@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup backend venv
+        run: |
+          python -m venv backend/venv
+          backend/venv/bin/pip install -r backend/requirements-dev.txt
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Delivery checks
+        env:
+          PYTHON_BIN: backend/venv/bin/python
+        run: bash scripts/run_delivery_checks.sh
+
+      - name: Backend full test suite
+        working-directory: backend
+        run: PYTHONPATH=. ./venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q
+
+      - name: Frontend lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Frontend unit tests
+        working-directory: frontend
+        run: npm run test
+
+  e2e-story-room:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: novel_agent
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d novel_agent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup backend venv
+        run: |
+          python -m venv backend/venv
+          backend/venv/bin/pip install -r backend/requirements-dev.txt
+
+      - name: Prepare backend env
+        run: cp backend/.env.example backend/.env
+
+      - name: Run migrations
+        working-directory: backend
+        run: ./venv/bin/alembic upgrade head
+
+      - name: Start backend
+        working-directory: backend
+        run: |
+          nohup ./venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 > /tmp/novel-agent-backend.log 2>&1 &
+          echo $! > /tmp/novel-agent-backend.pid
+
+      - name: Wait for backend
+        run: |
+          for attempt in {1..60}; do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/novel-agent-backend.log || true
+          exit 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run story-room E2E smoke
+        env:
+          PYTHON_BIN: backend/venv/bin/python
+          BACKEND_ENV_FILE: backend/.env
+          PLAYWRIGHT_API_URL: http://127.0.0.1:8000
+        run: bash scripts/run_story_room_e2e.sh
+
+      - name: Dump backend log on failure
+        if: failure()
+        run: cat /tmp/novel-agent-backend.log || true

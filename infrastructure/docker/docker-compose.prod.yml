@@ -60,15 +60,6 @@ services:
     networks:
       - novel-network
 
-  chroma:
-    image: chromadb/chroma:0.5.23
-    container_name: novel-agent-chroma
-    restart: unless-stopped
-    volumes:
-      - chroma_data:/chroma/chroma
-    networks:
-      - novel-network
-
   backend:
     build:
       context: ../../backend
@@ -90,8 +81,6 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - QDRANT_URL=http://qdrant:6333
-      - CHROMA_HOST=chroma
-      - CHROMA_PORT=8000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -110,8 +99,6 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-      chroma:
-        condition: service_started
     networks:
       - novel-network
 
@@ -136,16 +123,12 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - CHROMA_HOST=chroma
-      - CHROMA_PORT=8000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      chroma:
-        condition: service_started
     deploy:
       resources:
         limits:
@@ -204,7 +187,6 @@ volumes:
   postgres_data:
   redis_data:
   qdrant_data:
-  chroma_data:
   nginx_certs:
 
 networks:

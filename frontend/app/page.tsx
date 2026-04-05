@@ -59,7 +59,10 @@ const signalTags = [
 
 export default function HomePage() {
   return (
-    <main className="min-h-screen px-6 py-6 text-ink md:px-8 md:py-8">
+    <main
+      className="min-h-screen px-6 py-6 text-ink md:px-8 md:py-8"
+      data-testid="home-page"
+    >
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <header className="rounded-[30px] border border-black/10 bg-white/72 px-6 py-4 shadow-[0_18px_50px_rgba(16,20,23,0.06)] backdrop-blur">
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -77,12 +80,14 @@ export default function HomePage() {
               <Link
                 className="rounded-full border border-black/10 bg-white px-4 py-2 text-sm font-semibold text-black/72 transition hover:bg-[#f6f0e6]"
                 href="/login"
+                data-testid="home-login-link"
               >
                 登录
               </Link>
               <Link
                 className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-paper transition hover:bg-copper"
                 href={`/register?redirect=${NEW_BOOK_REDIRECT}`}
+                data-testid="home-create-book-link"
               >
                 创建新书
               </Link>

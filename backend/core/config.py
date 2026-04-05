@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     )
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    legacy_chapter_routes_mode: Literal["compat", "gone"] = Field(
+        default="compat",
+        alias="LEGACY_CHAPTER_ROUTES_MODE",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

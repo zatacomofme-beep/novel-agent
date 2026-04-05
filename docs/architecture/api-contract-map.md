@@ -135,7 +135,7 @@ Backend:
 - `GET /api/v1/projects/{project_id}/structure`
 - `GET /api/v1/projects/{project_id}/chapters`
 - `POST /api/v1/projects/{project_id}/chapters`
-- `PATCH /api/v1/chapters/{chapter_id}`
+- `PATCH /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}`
 
 Meaning:
 - `story-room` 已经是写手前台的真实主入口
@@ -213,21 +213,24 @@ Frontend:
 - `frontend/components/editor/use-task-websocket.ts`
 
 Backend:
-- `GET /api/v1/chapters/{chapter_id}`
-- `PATCH /api/v1/chapters/{chapter_id}`
-- `GET /api/v1/chapters/{chapter_id}/versions`
-- `GET /api/v1/chapters/{chapter_id}/review-workspace`
+- `GET /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}`
+- `PATCH /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}`
+- `GET /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/versions`
+- `GET /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/review-workspace`
+- `POST /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/comments`
+- `PATCH /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/comments/{comment_id}`
+- `DELETE /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/comments/{comment_id}`
+- `POST /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/reviews`
+- `POST /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/checkpoints`
+- `PATCH /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/checkpoints/{checkpoint_id}`
+- `POST /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/rollback/{version_id}`
+- `POST /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/rewrite-selection`
+- `GET /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/export`
+- `GET /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/tasks`
+- `POST /api/v1/projects/{project_id}/story-engine/chapters/{chapter_id}/evaluate`
 - `GET /api/v1/chapters/{chapter_id}/tasks`
 - `POST /api/v1/chapters/{chapter_id}/generate`
 - `POST /api/v1/chapters/{chapter_id}/evaluate`
-- `POST /api/v1/chapters/{chapter_id}/rollback/{version_id}`
-- `POST /api/v1/chapters/{chapter_id}/rewrite-selection`
-- `POST /api/v1/chapters/{chapter_id}/comments`
-- `PATCH /api/v1/chapters/{chapter_id}/comments/{comment_id}`
-- `DELETE /api/v1/chapters/{chapter_id}/comments/{comment_id}`
-- `POST /api/v1/chapters/{chapter_id}/reviews`
-- `POST /api/v1/chapters/{chapter_id}/checkpoints`
-- `PATCH /api/v1/chapters/{chapter_id}/checkpoints/{checkpoint_id}`
 - `GET /api/v1/tasks/{task_id}`
 - `GET /api/v1/tasks/{task_id}/events`
 - `WS /ws/tasks/{task_id}`
@@ -235,6 +238,7 @@ Backend:
 Meaning:
 - the editor is a compound workspace that joins chapter state, version history, live task state, and review state
 - WebSocket updates are incremental, but the page still reloads authoritative state after task completion
+- 新调用应优先使用 project-scoped `story-engine/chapters/*` 前缀；`/api/v1/chapters/*` 主要保留给历史兼容入口（如 `tasks / generate / evaluate`）
 
 ### Quality View
 

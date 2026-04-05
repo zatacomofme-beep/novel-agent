@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.model_gateway import GenerationRequest, model_gateway
+from core.logging import get_logger
 from memory.story_bible import StoryBibleContext, load_story_bible_context
 from schemas.project import (
     CharacterGenerationRequest,
@@ -33,6 +34,8 @@ from services.story_engine_model_service import (
     get_story_engine_role_reasoning,
 )
 from services.story_engine_settings_service import resolve_story_engine_model_routing
+
+logger = get_logger(__name__)
 
 
 _LIST_SPLIT_PATTERN = re.compile(r"[\n,，、/；;|]+")
@@ -680,7 +683,16 @@ async def _resolve_entity_generation_model_routing(
 
         project = await get_story_engine_project(session, project_id, user_id)
         return resolve_story_engine_model_routing(project)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "entity_generation_model_routing_resolve_failed",
+            extra={
+                "project_id": str(project_id),
+                "user_id": str(user_id),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         return None
 
 

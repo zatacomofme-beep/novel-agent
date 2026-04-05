@@ -1,7 +1,7 @@
 """Create prompt_templates table
 
 Revision ID: 20260328_0028
-Revises: 20260327_0027_chapter_writing_intent
+Revises: 20260327_0027
 Create Date: 2026-03-28
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID, JSON
 
 revision: str = "20260328_0028"
-down_revision: Union[str, None] = "20260327_0027_chapter_writing_intent"
+down_revision: Union[str, None] = "20260327_0027"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("tagline", sa.String(length=300), nullable=False),
         sa.Column("description", sa.Text(), nullable=False),
-        sa.Column("category", sa.String(length=50), nullable=False, index=True),
+        sa.Column("category", sa.String(length=50), nullable=False),
         sa.Column("sub_category", sa.String(length=50), nullable=True),
         sa.Column("tags", JSON(), nullable=False, server_default="[]"),
         sa.Column("content", sa.Text(), nullable=False),

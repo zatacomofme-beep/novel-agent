@@ -18,7 +18,7 @@
 
 ### 1.2 现有系统概述
 
-**技术栈**：Next.js 14 + FastAPI + SQLAlchemy 2.0 + LangGraph + Celery + PostgreSQL + **Neo4j** + Qdrant/Chroma
+**技术栈**：Next.js 14 + FastAPI + SQLAlchemy 2.0 + LangGraph + Celery + PostgreSQL + **Neo4j** + Qdrant
 
 **核心架构**：Multi-Agent 协作系统（9 个 Agent）+ Story Engine 工作流 + Canon 世界观守护
 

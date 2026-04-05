@@ -1,7 +1,7 @@
 """Create story_room_cloud_draft_versions table
 
 Revision ID: 20260328_0029
-Revises: 20260328_0028_prompt_templates
+Revises: 20260328_0028
 Create Date: 2026-03-28
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
 revision: str = "20260328_0029"
-down_revision: Union[str, None] = "20260328_0028_prompt_templates"
+down_revision: Union[str, None] = "20260328_0028"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -22,7 +22,7 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
-        sa.Column("draft_id", UUID(as_uuid=True), nullable=False, index=True),
+        sa.Column("draft_id", UUID(as_uuid=True), nullable=False),
         sa.Column("version_number", sa.Integer(), nullable=False),
         sa.Column("draft_text", sa.Text(), nullable=False, server_default=""),
         sa.Column("chapter_title", sa.String(length=255), nullable=False, server_default=""),

@@ -28,8 +28,9 @@ async def preference_detail(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UserPreferenceRead:
-    preference = await get_or_create_user_preference(session, current_user.id)
-    learning_snapshot = await get_preference_learning_snapshot(session, current_user.id)
+    user_id = current_user.id
+    preference = await get_or_create_user_preference(session, user_id)
+    learning_snapshot = await get_preference_learning_snapshot(session, user_id)
     return to_user_preference_read(preference, learning_snapshot)
 
 
@@ -39,9 +40,10 @@ async def preference_patch(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UserPreferenceRead:
-    preference = await get_or_create_user_preference(session, current_user.id)
+    user_id = current_user.id
+    preference = await get_or_create_user_preference(session, user_id)
     updated = await update_user_preference(session, preference, payload)
-    learning_snapshot = await get_preference_learning_snapshot(session, current_user.id)
+    learning_snapshot = await get_preference_learning_snapshot(session, user_id)
     return to_user_preference_read(updated, learning_snapshot)
 
 
@@ -50,7 +52,8 @@ async def style_template_list(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[StyleTemplateRead]:
-    preference = await get_or_create_user_preference(session, current_user.id)
+    user_id = current_user.id
+    preference = await get_or_create_user_preference(session, user_id)
     return list_style_templates(preference.active_template_key)
 
 
@@ -61,14 +64,15 @@ async def style_template_apply(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UserPreferenceRead:
-    preference = await get_or_create_user_preference(session, current_user.id)
+    user_id = current_user.id
+    preference = await get_or_create_user_preference(session, user_id)
     updated = await apply_style_template(
         session,
         preference,
         template_key,
         mode=payload.mode,
     )
-    learning_snapshot = await get_preference_learning_snapshot(session, current_user.id)
+    learning_snapshot = await get_preference_learning_snapshot(session, user_id)
     return to_user_preference_read(updated, learning_snapshot)
 
 
@@ -77,7 +81,8 @@ async def style_template_clear_active(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UserPreferenceRead:
-    preference = await get_or_create_user_preference(session, current_user.id)
+    user_id = current_user.id
+    preference = await get_or_create_user_preference(session, user_id)
     updated = await clear_active_style_template(session, preference)
-    learning_snapshot = await get_preference_learning_snapshot(session, current_user.id)
+    learning_snapshot = await get_preference_learning_snapshot(session, user_id)
     return to_user_preference_read(updated, learning_snapshot)

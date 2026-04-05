@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 class TaskEventBroker:
     def __init__(self) -> None:
         self._task_subscribers: dict[str, set[asyncio.Queue[TaskState]]] = defaultdict(set)
+        self._broadcast_subscribers: set[asyncio.Queue[TaskState]] = set()
         self._redis: Optional[redis_asyncio.Redis] = None
         self._listener_task: Optional[asyncio.Task] = None
         self._running = False
@@ -39,6 +40,14 @@ class TaskEventBroker:
         subscribers.discard(queue)
         if not subscribers:
             self._task_subscribers.pop(task_id, None)
+
+    async def subscribe_all(self) -> asyncio.Queue[TaskState]:
+        queue: asyncio.Queue[TaskState] = asyncio.Queue()
+        self._broadcast_subscribers.add(queue)
+        return queue
+
+    async def unsubscribe_all(self, queue: asyncio.Queue[TaskState]) -> None:
+        self._broadcast_subscribers.discard(queue)
 
     async def start(self) -> None:
         if self._running:
@@ -90,7 +99,8 @@ class TaskEventBroker:
             loop.create_task(self._publish_remote(state))
 
     def _publish_local(self, state: TaskState) -> None:
-        subscribers = self._task_subscribers.get(state.task_id, set())
+        subscribers = set(self._task_subscribers.get(state.task_id, set()))
+        subscribers.update(self._broadcast_subscribers)
         for queue in list(subscribers):
             try:
                 queue.put_nowait(state)

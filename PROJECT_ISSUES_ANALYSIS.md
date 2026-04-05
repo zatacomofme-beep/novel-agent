@@ -42,17 +42,14 @@
 | **问题编号** | ARCH-001 |
 | **严重程度** | P2 (降级) |
 | **验证状态** | ✅ 已验证 |
-| **解决方案** | 方案三：保持现状，明确职责边界（文档化） |
+| **解决方案** | 已收敛：统一到 Qdrant |
 
 **代码证据**:
 ```python
 # backend/core/config.py
 qdrant_url: str = Field(alias="QDRANT_URL")
 qdrant_collection_prefix: str = Field(default="story_bible")
-
-chroma_host: str = Field(default="chroma", alias="CHROMA_HOST")
-chroma_port: int = Field(default=8001, alias="CHROMA_PORT")
-chroma_collection_prefix: str = Field(default="novel_story_engine")
+qdrant_request_timeout_seconds: int = Field(default=5, alias="QDRANT_REQUEST_TIMEOUT_SECONDS")
 ```
 
 ```yaml
@@ -63,20 +60,14 @@ services:
     ports:
       - "6333:6333"
 
-  chroma:
-    image: chromadb/chroma:0.5.23
-    ports:
-      - "8001:8000"
 ```
 
-**结论**: 问题属实。docker-compose 中同时定义了两个向量服务，且 config 中有两套配置。
+**结论**: 该问题已过时。当前运行时已经收敛到单一的 Qdrant 向量检索。
 
-**解决方案（方案三）**:
-- 两个服务有各自明确的适用场景，强行统一反而会带来性能下降和复杂度增加
-- HybridVectorStore (Qdrant): 混合检索，适合实体列表较小的场景（context_builder）
-- StoryEngineChromaService (Chroma): 单文档操作，适合实时增删改场景（story_engine_kb_service）
-- 已添加文档注释明确职责边界
-- **决定：保持现状，降级为 P2 长期优化**
+**当前状态**:
+- `requirements.txt` 已不再包含 `chromadb`
+- 运行时代码已统一走 Qdrant
+- 剩余 `Chroma` 提及主要属于历史分析文档残留
 
 ---
 

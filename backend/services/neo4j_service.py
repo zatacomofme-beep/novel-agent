@@ -17,6 +17,7 @@ class Neo4jService:
     async def _get_client(self) -> Any | None:
         if self._client is not None:
             return self._client
+        driver: Any | None = None
         try:
             from neo4j import AsyncGraphDatabase
             driver = AsyncGraphDatabase.driver(
@@ -28,6 +29,11 @@ class Neo4jService:
             self._available = True
             return driver
         except Exception:
+            if driver is not None:
+                try:
+                    await driver.close()
+                except Exception:
+                    pass
             self._available = False
             return None
 

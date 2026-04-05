@@ -8,6 +8,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import AppError
@@ -337,9 +338,19 @@ async def get_or_create_user_preference(
 
     preference = UserPreference(user_id=user_id, **DEFAULT_PREFERENCE_VALUES)
     session.add(preference)
-    await session.commit()
-    await session.refresh(preference)
-    return preference
+    try:
+        await session.commit()
+        await session.refresh(preference)
+        return preference
+    except IntegrityError:
+        await session.rollback()
+        result = await session.execute(
+            select(UserPreference).where(UserPreference.user_id == user_id)
+        )
+        preference = result.scalar_one_or_none()
+        if preference is not None:
+            return preference
+        raise
 
 
 async def update_user_preference(

@@ -1,7 +1,7 @@
 """add_open_threads_and_history
 
-Revision ID: 20260402_open_threads
-Revises: 20260402_chapter_partitioning
+Revision ID: 20260402_0002
+Revises: 20260402_0001
 Create Date: 2026-04-02
 
 """
@@ -11,8 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "20260402_open_threads"
-down_revision: Union[str, None] = "20260402_chapter_partitioning"
+revision: str = "20260402_0002"
+down_revision: Union[str, None] = "20260402_0001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

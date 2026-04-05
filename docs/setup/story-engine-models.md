@@ -121,7 +121,7 @@ STORY_ENGINE_FINAL_VERIFY_MAX_ROUNDS=6
 
 ```bash
 cd backend
-PYTHONPATH=. python3 scripts/verify_story_engine_models.py
+PYTHONPATH=. ./venv/bin/python scripts/verify_story_engine_models.py
 ```
 
 ### 一键跑交付检查
@@ -134,7 +134,7 @@ bash scripts/run_delivery_checks.sh
 
 ```bash
 cd backend
-PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 scripts/story_engine_live_smoke.py
+PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 ./venv/bin/python scripts/story_engine_live_smoke.py
 ```
 
 这条烟雾测试会覆盖：
@@ -169,6 +169,6 @@ PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 sc
 ## 7. 注意事项
 
 - 所有模型请求都必须从后端发出，不要把真实密钥暴露到前端
-- Compose 容器里的 Chroma 地址应使用 `chroma:8000`
+- 向量检索当前已经统一收口到 Qdrant，Compose 容器里应使用 `QDRANT_URL=http://qdrant:6333`
 - 如果网关不可用，部分能力会回退到本地启发式逻辑，但质量会下降
 - 写手前台不应该看到“均衡稳稿”“逻辑极限”这类 preset 名称，除非未来单独做管理员后台

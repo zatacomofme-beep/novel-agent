@@ -11,10 +11,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "smoke:story-engine": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario all",
-    "smoke:story-engine:mainline": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario mainline",
-    "smoke:story-engine:branch": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario branch-scope",
-    "smoke:story-engine:cloud": "python3 ../backend/scripts/story_engine_live_smoke.py --scenario cloud-draft"
+    "smoke:story-engine": "../backend/venv/bin/python ../backend/scripts/story_engine_live_smoke.py --scenario all",
+    "smoke:story-engine:mainline": "../backend/venv/bin/python ../backend/scripts/story_engine_live_smoke.py --scenario mainline",
+    "smoke:story-engine:branch": "../backend/venv/bin/python ../backend/scripts/story_engine_live_smoke.py --scenario branch-scope",
+    "smoke:story-engine:cloud": "../backend/venv/bin/python ../backend/scripts/story_engine_live_smoke.py --scenario cloud-draft"
   },
   "dependencies": {
     "next": "14.2.15",

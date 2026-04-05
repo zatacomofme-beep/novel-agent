@@ -19,7 +19,7 @@ flowchart TD
         API --> WS[Workspace 聚合服务]
         API --> KBS[动态知识库服务]
         API --> WFS[工作流服务]
-        API --> VEC[Chroma 向量服务]
+        API --> VEC[Qdrant 向量服务]
         API --> DB[(PostgreSQL)]
     end
 
@@ -87,7 +87,7 @@ novels/
 │   ├── schemas/
 │   │   └── story_engine.py              # API 输入输出 Schema
 │   ├── services/
-│   │   ├── chroma_service.py            # Chroma 向量索引与语义检索
+│   │   ├── story_engine_vector_store.py # Qdrant 向量索引与语义检索
 │   │   ├── story_engine_kb_service.py   # 知识库 CRUD、版本回溯、守护校验
 │   │   └── story_engine_workflow_service.py
 │   │                                       # LangGraph 三条核心工作流
@@ -118,7 +118,7 @@ novels/
 
 1. 产品只保留一条写作主路径：大纲压测 -> 正文生成/续写 -> 多轮优化 -> 设定圣经沉淀 -> 100-300 字章节总结。
 2. 旧项目的认证、项目容器、基础 Docker 能保留，但新小说系统逻辑不再依赖旧 Story Bible 流水线。
-3. 新知识库统一由 PostgreSQL 负责结构化真相源，由 Chroma 负责语义召回。
+3. 新知识库统一由 PostgreSQL 负责结构化真相源，由 Qdrant 负责语义召回。
 4. 三级大纲中一级大纲默认锁死，不允许通过普通 CRUD 修改。
 5. 所有知识库写入都自动生成版本快照，支持按实体回滚。
 6. 前端不暴露 Agent、辩论、向量检索等术语，统一翻译成写手可理解的按钮与结果。

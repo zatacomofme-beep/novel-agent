@@ -13,6 +13,15 @@ from realtime.task_events import task_event_broker
 
 
 logger = get_logger(__name__)
+LEGACY_CHAPTER_ROUTE_PREFIX = f"{settings().api_v1_prefix}/chapters/"
+LEGACY_CHAPTER_SUNSET = "Wed, 31 Dec 2026 23:59:59 GMT"
+
+
+def _legacy_chapter_routes_mode() -> str:
+    mode = (settings().legacy_chapter_routes_mode or "compat").strip().lower()
+    if mode == "gone":
+        return "gone"
+    return "compat"
 
 
 @asynccontextmanager
@@ -39,6 +48,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_legacy_chapter_deprecation_headers(request: Request, call_next):
+    is_legacy_chapter_path = request.url.path.startswith(LEGACY_CHAPTER_ROUTE_PREFIX)
+    if is_legacy_chapter_path and _legacy_chapter_routes_mode() == "gone":
+        logger.warning(
+            "legacy_chapter_endpoint_blocked",
+            extra={"path": request.url.path},
+        )
+        payload = ErrorResponse(
+            error=ErrorDetail(
+                code="chapter.legacy_endpoint_gone",
+                message=(
+                    "Legacy chapter endpoints are no longer available. "
+                    "Use project-scoped story-engine chapter routes."
+                ),
+                metadata={"path": request.url.path},
+            )
+        )
+        response = JSONResponse(status_code=410, content=payload.model_dump())
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = LEGACY_CHAPTER_SUNSET
+        return response
+
+    response = await call_next(request)
+    if is_legacy_chapter_path:
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = LEGACY_CHAPTER_SUNSET
+    return response
+
 
 app.include_router(api_router, prefix=settings().api_v1_prefix)
 app.include_router(ws_router, prefix="/ws")

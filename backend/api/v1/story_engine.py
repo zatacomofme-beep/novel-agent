@@ -148,6 +148,9 @@ from services.export_service import (
     build_export_response,
     render_chapter_export,
 )
+from services.legacy_generation_dispatch_service import (
+    dispatch_legacy_generation_for_chapter,
+)
 from tasks.schemas import TaskState
 from tasks.story_engine_workflows import (
     dispatch_bulk_import_task,
@@ -728,6 +731,71 @@ async def story_engine_chapter_export(
         ),
         filename=build_chapter_export_filename(project.title, chapter, export_format),
     )
+
+
+@router.post(
+    "/projects/{project_id}/story-engine/chapters/{chapter_id}/generate",
+    response_model=TaskState,
+)
+async def story_engine_chapter_generate(
+    project_id: UUID,
+    chapter_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> TaskState:
+    chapter = await _get_story_engine_chapter_or_404(
+        session,
+        project_id=project_id,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+        permission=PROJECT_PERMISSION_EDIT,
+    )
+    return await dispatch_legacy_generation_for_chapter(
+        session,
+        chapter=chapter,
+        user_id=current_user.id,
+    )
+
+
+@router.post("/projects/{project_id}/story-engine/chapters/{chapter_id}/beta-reader")
+async def story_engine_chapter_beta_reader(
+    project_id: UUID,
+    chapter_id: UUID,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    from agents.base import AgentRunContext
+    from agents.beta_reader import BetaReaderAgent
+
+    chapter = await _get_story_engine_chapter_or_404(
+        session,
+        project_id=project_id,
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+        permission=PROJECT_PERMISSION_READ,
+    )
+
+    beta_reader = BetaReaderAgent()
+    context = AgentRunContext(
+        chapter_id=str(chapter_id),
+        project_id=str(chapter.project_id),
+        task_id=f"beta-{chapter_id}",
+        payload={},
+    )
+
+    result = await beta_reader.run(
+        context,
+        {
+            "content": body.get("content", ""),
+            "genre": body.get("genre", "fantasy"),
+            "target_audience": body.get("target_audience", "adult"),
+        },
+    )
+
+    if not result.success:
+        return {"success": False, "error": result.error}
+    return {"success": True, "beta_feedback": result.data}
 
 
 @router.get(

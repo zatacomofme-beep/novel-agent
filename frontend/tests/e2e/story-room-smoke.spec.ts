@@ -6,6 +6,7 @@ const API_BASE_URL =
   process.env.PLAYWRIGHT_API_URL ??
   process.env.NEXT_PUBLIC_API_URL ??
   "http://127.0.0.1:8000";
+const API_V1_PREFIX = `${API_BASE_URL}/api/v1/`;
 
 const AUTH_STORAGE_KEY = "long-novel-agent.auth";
 const AUTH_COOKIE_KEY = "novel_agent_token";
@@ -137,21 +138,52 @@ async function createChapter(
 async function patchChapter(
   request: APIRequestContext,
   session: TokenResponse,
+  projectId: string,
   chapterId: string,
   payload: Record<string, unknown>,
 ): Promise<ChapterResponse> {
-  const response = await request.patch(`${API_BASE_URL}/api/v1/chapters/${chapterId}`, {
-    data: payload,
-    headers: {
-      Authorization: `Bearer ${session.access_token}`,
+  const response = await request.patch(
+    `${API_BASE_URL}/api/v1/projects/${projectId}/story-engine/chapters/${chapterId}`,
+    {
+      data: payload,
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+      },
     },
-  });
+  );
   return await parseJsonOrThrow<ChapterResponse>(response);
 }
 
 function getVisibleStageCard(page: Page, stage: "outline" | "draft" | "final" | "knowledge") {
   return page.locator(`[data-testid="story-room-stage-card-${stage}"]:visible`).first();
 }
+
+const apiFailuresByPage = new WeakMap<Page, string[]>();
+
+test.beforeEach(async ({ page }) => {
+  const failures: string[] = [];
+  apiFailuresByPage.set(page, failures);
+  page.on("response", async (response) => {
+    const url = response.url();
+    if (!url.startsWith(API_V1_PREFIX)) {
+      return;
+    }
+    if (response.status() < 500) {
+      return;
+    }
+    const method = response.request().method();
+    const body = await response.text().catch(() => "<response body unavailable>");
+    failures.push(`${method} ${url} -> ${response.status()} ${body.slice(0, 400)}`);
+  });
+});
+
+test.afterEach(async ({ page }) => {
+  const failures = apiFailuresByPage.get(page) ?? [];
+  expect(
+    failures,
+    `Unexpected API 5xx responses observed during UI test:\n${failures.join("\n")}`,
+  ).toEqual([]);
+});
 
 async function seedAuthSession(page: Page, session: TokenResponse): Promise<void> {
   await page.context().addCookies([
@@ -290,14 +322,14 @@ test.describe("story room smoke", () => {
       volume_id: structure.default_volume_id,
     });
 
-    await patchChapter(request, account.session, chapter.id, {
+    await patchChapter(request, account.session, project.id, chapter.id, {
       status: "review",
       change_reason: "Playwright E2E seed review chapter",
       expected_current_version_number: chapter.current_version_number,
       create_version: false,
     });
 
-    await patchChapter(request, account.session, chapter.id, {
+    await patchChapter(request, account.session, project.id, chapter.id, {
       status: "final",
       change_reason: "Playwright E2E seed final chapter",
       expected_current_version_number: chapter.current_version_number,

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_user, get_db_session
 from core.errors import AppError
+from core.logging import get_logger
 from models.user import User
 from services.chapter_service import get_owned_chapter
 from services.project_service import get_owned_project, PROJECT_PERMISSION_READ
@@ -21,6 +22,23 @@ from tasks.state_store import task_state_store
 
 
 router = APIRouter()
+logger = get_logger(__name__)
+
+
+def _emit_legacy_chapter_task_endpoint_used(
+    endpoint_name: str,
+    *,
+    chapter_id: UUID,
+    user_id: UUID,
+) -> None:
+    logger.warning(
+        "legacy_chapter_endpoint_used",
+        extra={
+            "endpoint_name": endpoint_name,
+            "chapter_id": str(chapter_id),
+            "user_id": str(user_id),
+        },
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskState)
@@ -85,12 +103,60 @@ async def task_events(
     return [TaskEventRead.from_task_event(event) for event in events]
 
 
-@router.get("/chapters/{chapter_id}/tasks", response_model=list[TaskState])
+@router.get(
+    "/projects/{project_id}/story-engine/chapters/{chapter_id}/tasks",
+    response_model=list[TaskState],
+)
+async def tasks_for_story_engine_chapter(
+    project_id: UUID,
+    chapter_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[TaskState]:
+    await get_owned_project(
+        session,
+        project_id,
+        current_user.id,
+        permission=PROJECT_PERMISSION_READ,
+    )
+    chapter = await get_owned_chapter(
+        session,
+        chapter_id,
+        current_user.id,
+        permission=PROJECT_PERMISSION_READ,
+    )
+    if chapter.project_id != project_id:
+        raise AppError(
+            code="story_engine.chapter_project_mismatch",
+            message="Chapter does not belong to project.",
+            status_code=404,
+        )
+    task_runs = await list_task_runs_for_chapter(
+        session,
+        chapter_id,
+    )
+    states = [TaskState.from_task_run(task_run) for task_run in task_runs]
+    for state in states:
+        task_state_store.set(state)
+    return states
+
+
+@router.get(
+    "/chapters/{chapter_id}/tasks",
+    response_model=list[TaskState],
+    deprecated=True,
+    include_in_schema=False,
+)
 async def tasks_for_chapter(
     chapter_id: UUID,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[TaskState]:
+    _emit_legacy_chapter_task_endpoint_used(
+        "chapter_tasks",
+        chapter_id=chapter_id,
+        user_id=current_user.id,
+    )
     await get_owned_chapter(
         session,
         chapter_id,

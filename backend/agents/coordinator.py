@@ -126,6 +126,11 @@ class CoordinatorAgent(BaseAgent):
             },
         )
         beta_feedback = beta_response.data if beta_response.success else {}
+        integrity_report = (
+            payload.get("story_bible_integrity_report")
+            if isinstance(payload.get("story_bible_integrity_report"), dict)
+            else None
+        )
 
         pre_canon_response = await self.canon_guardian.run(
             context,
@@ -141,6 +146,10 @@ class CoordinatorAgent(BaseAgent):
             pre_canon_report = pre_canon_response.data.get("canon_report", {})
             pre_blocking = pre_canon_report.get("blocking_issue_count", 0) if isinstance(pre_canon_report, dict) else 0
             if pre_blocking > 0:
+                pre_truth_layer_context = build_truth_layer_context(
+                    integrity_report=integrity_report,
+                    canon_report=pre_canon_report if isinstance(pre_canon_report, dict) else None,
+                )
                 pre_review = {
                     "needs_revision": True,
                     "issues": pre_canon_report.get("issues", []) if isinstance(pre_canon_report, dict) else [],
@@ -156,20 +165,17 @@ class CoordinatorAgent(BaseAgent):
                         "final_canon_report": pre_canon_report,
                         "initial_canon_report": pre_canon_report,
                         "rounds_completed": 0,
-                        "initial_truth_layer_context": {},
-                        "final_truth_layer_context": {},
+                        "truth_layer_context": pre_truth_layer_context,
+                        "initial_truth_layer_context": pre_truth_layer_context,
+                        "final_truth_layer_context": pre_truth_layer_context,
                         "revision_plans": [],
                         "debate_summaries": [],
+                        "revision_focus": [],
+                        "revised": False,
                     },
                     confidence=0.3,
                     reasoning="Canon pre-check caught blocking issues before revision loop",
                 )
-
-        integrity_report = (
-            payload.get("story_bible_integrity_report")
-            if isinstance(payload.get("story_bible_integrity_report"), dict)
-            else None
-        )
 
         revision_loop_result = await self._run_revision_loop(
             context=context,
@@ -294,6 +300,8 @@ class CoordinatorAgent(BaseAgent):
         tension_data: dict[str, Any] = {}
 
         for round_num in range(1, self.max_revision_rounds + 1):
+            revision_plan: dict[str, Any] | None = None
+            debate_summary: dict[str, Any] | None = None
             canon_response = await self.canon_guardian.run(
                 context,
                 {
@@ -339,9 +347,6 @@ class CoordinatorAgent(BaseAgent):
                 initial_canon_report = canon_report
                 initial_truth_layer_context = round_truth_layer_context
 
-            if revision_plan:
-                all_revision_plans.append(revision_plan)
-
             if not review.get("needs_revision", False):
                 final_review = review
                 final_truth_layer_context = round_truth_layer_context
@@ -379,6 +384,9 @@ class CoordinatorAgent(BaseAgent):
             debate_data = debate_response.data
             revision_plan = debate_data.get("revision_plan")
             debate_summary = debate_data.get("debate_summary")
+
+            if revision_plan:
+                all_revision_plans.append(revision_plan)
 
             if debate_summary:
                 all_debate_summaries.append(debate_summary)

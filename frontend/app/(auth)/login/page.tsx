@@ -84,6 +84,7 @@ function LoginForm() {
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               required
+              data-testid="login-email-input"
             />
           </label>
 
@@ -96,6 +97,7 @@ function LoginForm() {
               onChange={(event) => setPassword(event.target.value)}
               minLength={8}
               required
+              data-testid="login-password-input"
             />
           </label>
 
@@ -109,6 +111,7 @@ function LoginForm() {
             className="rounded-2xl bg-ink px-4 py-3 text-sm font-medium text-paper transition hover:bg-copper disabled:cursor-not-allowed disabled:opacity-60"
             type="submit"
             disabled={loading}
+            data-testid="login-submit"
           >
             {loading ? "登录中..." : "登录"}
           </button>
@@ -127,7 +130,10 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <main className="flex min-h-screen items-center justify-center px-6 py-10 md:px-8">
+    <main
+      className="flex min-h-screen items-center justify-center px-6 py-10 md:px-8"
+      data-testid="login-page"
+    >
       <Suspense
         fallback={
           <div className="grid w-full max-w-6xl gap-6 lg:grid-cols-[1.05fr_0.95fr]">

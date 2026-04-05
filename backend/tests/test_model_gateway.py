@@ -4,7 +4,12 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock
 
-from agents.model_gateway import GenerationErrorInfo, GenerationRequest, ModelGateway
+from agents.model_gateway import (
+    GenerationErrorInfo,
+    GenerationRequest,
+    GenerationResult,
+    ModelGateway,
+)
 
 
 class AuthenticationError(Exception):
@@ -140,8 +145,14 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_generate_text_sync_returns_result_inside_running_loop(self) -> None:
         gateway = ModelGateway()
-        gateway.openai_api_key = None
-        gateway.anthropic_api_key = None
+        gateway.generate_text = AsyncMock(  # type: ignore[method-assign]
+            return_value=GenerationResult(
+                content="fallback content",
+                provider="local-fallback",
+                model="heuristic-v1",
+                used_fallback=True,
+            )
+        )
 
         result = gateway.generate_text_sync(
             GenerationRequest(task_name="writer.draft", prompt="hello"),

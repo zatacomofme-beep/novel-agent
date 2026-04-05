@@ -579,6 +579,7 @@ export function DraftEditorSurface({
                   <div
                     ref={editorDomRef}
                     contentEditable={!disabled}
+                    data-testid="draft-editor-surface"
                     role="textbox"
                     aria-multiline="true"
                     suppressContentEditableWarning

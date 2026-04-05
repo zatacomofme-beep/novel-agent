@@ -87,7 +87,7 @@
 - README 与 DEVELOPMENT 已改为围绕 `story-room`、正式章节主链和后台模型路由来描述
 - 开发环境文件已拆分为本机直跑和 Docker Compose 两套语义
 - 根目录 Compose 不再直接依赖 `backend/.env.example` 作为唯一真实配置
-- 生产 Compose 已补齐 Chroma，并切换到生产 Dockerfile
+- 生产 Compose 已切换到单 Qdrant 向量检索，并使用生产 Dockerfile
 
 补充：
 

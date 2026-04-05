@@ -19,12 +19,15 @@ from schemas.chapter import (
     ChapterUpdate,
 )
 from api.v1.story_engine import (
+    story_engine_chapter_beta_reader,
     story_engine_chapter_comment_create,
     story_engine_chapter_create,
+    story_engine_chapter_generate,
     story_engine_chapter_patch,
     story_engine_chapter_rewrite_selection,
     story_engine_chapter_review_workspace,
 )
+from tasks.schemas import TaskState
 
 
 def _build_chapter_read(*, project_id):
@@ -239,6 +242,71 @@ class StoryEngineChapterRouteTests(unittest.IsolatedAsyncioTestCase):
 
         mocked_update.assert_awaited_once()
         self.assertEqual(result.project_id, project_id)
+
+    async def test_chapter_generate_delegates_to_legacy_dispatch(self) -> None:
+        project_id = uuid4()
+        chapter_id = uuid4()
+        user = SimpleNamespace(id=uuid4())
+        chapter = SimpleNamespace(id=chapter_id, project_id=project_id)
+        task_state = TaskState(
+            task_id="task-123",
+            task_type="chapter_generation",
+            status="queued",
+            progress=0,
+            message="queued",
+            project_id=project_id,
+            chapter_id=chapter_id,
+        )
+
+        with patch(
+            "api.v1.story_engine.get_owned_chapter",
+            AsyncMock(return_value=chapter),
+        ), patch(
+            "api.v1.story_engine.dispatch_legacy_generation_for_chapter",
+            AsyncMock(return_value=task_state),
+        ) as mocked_dispatch:
+            result = await story_engine_chapter_generate(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                current_user=user,
+                session=SimpleNamespace(),
+            )
+
+        self.assertEqual(result.task_id, "task-123")
+        mocked_dispatch.assert_awaited_once_with(
+            unittest.mock.ANY,
+            chapter=chapter,
+            user_id=user.id,
+        )
+
+    async def test_beta_reader_delegates_to_agent_with_project_scoped_route(self) -> None:
+        project_id = uuid4()
+        chapter_id = uuid4()
+        user = SimpleNamespace(id=uuid4())
+        chapter = SimpleNamespace(id=chapter_id, project_id=project_id)
+        beta_result = SimpleNamespace(success=True, data={"summary": "ok"}, error=None)
+
+        with patch(
+            "api.v1.story_engine.get_owned_chapter",
+            AsyncMock(return_value=chapter),
+        ), patch(
+            "agents.beta_reader.BetaReaderAgent",
+        ) as mocked_beta_reader_cls, patch(
+            "agents.base.AgentRunContext",
+        ) as mocked_context_cls:
+            mocked_beta_reader = mocked_beta_reader_cls.return_value
+            mocked_beta_reader.run = AsyncMock(return_value=beta_result)
+            result = await story_engine_chapter_beta_reader(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                body={"content": "片段", "genre": "悬疑", "target_audience": "adult"},
+                current_user=user,
+                session=SimpleNamespace(),
+            )
+
+        self.assertEqual(result, {"success": True, "beta_feedback": {"summary": "ok"}})
+        mocked_context_cls.assert_called_once()
+        mocked_beta_reader.run.assert_awaited_once()
 
 
 if __name__ == "__main__":

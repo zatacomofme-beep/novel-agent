@@ -25,6 +25,7 @@ import {
 import { OutlineWorkbench } from "@/components/story-engine/outline-workbench";
 import { apiFetchWithAuth, apiStreamWithAuth } from "@/lib/api";
 import { buildUserFriendlyError } from "@/lib/errors";
+import { useTaskEventStream } from "@/hooks/use-task-event-stream";
 import {
   createLegacyChapter,
   createLegacyChapterCheckpoint,
@@ -1180,6 +1181,8 @@ export default function StoryRoomPage() {
   const bootstrapHydratedRef = useRef(false);
   const editorRef = useRef<DraftEditorHandle | null>(null);
   const reviewPanelRef = useRef<HTMLElement | null>(null);
+  const realtimePlaybackRefreshTimerRef = useRef<number | null>(null);
+  const lastRealtimeTaskEventAtRef = useRef(0);
 
   const [workspace, setWorkspace] = useState<StoryEngineWorkspace | null>(null);
   const [bootstrapState, setBootstrapState] = useState<ProjectBootstrapState | null>(null);
@@ -2314,7 +2317,7 @@ export default function StoryRoomPage() {
         setLoadingChapterReview(false);
       }
     }
-  }, []);
+  }, [projectId]);
 
   const refreshActiveChapterReviewState = useCallback(async (
     chapterId: string,
@@ -2391,6 +2394,79 @@ export default function StoryRoomPage() {
       return null;
     }
   }, [loadEntityTaskEvents, loadProjectTaskPlayback, projectId]);
+
+  const scheduleProjectTaskPlaybackRefresh = useCallback((delayMs = 700) => {
+    if (realtimePlaybackRefreshTimerRef.current !== null) {
+      window.clearTimeout(realtimePlaybackRefreshTimerRef.current);
+    }
+    realtimePlaybackRefreshTimerRef.current = window.setTimeout(() => {
+      void loadProjectTaskPlayback();
+      realtimePlaybackRefreshTimerRef.current = null;
+    }, delayMs);
+  }, [loadProjectTaskPlayback]);
+
+  const entityTaskIdsForRealtime = useMemo(() => {
+    if (!entityTaskState?.task_id) {
+      return [];
+    }
+    return [entityTaskState.task_id];
+  }, [entityTaskState?.task_id]);
+
+  const handleRealtimeTaskState = useCallback((task: TaskState) => {
+    if (task.project_id && task.project_id !== projectId) {
+      return;
+    }
+    lastRealtimeTaskEventAtRef.current = Date.now();
+    scheduleProjectTaskPlaybackRefresh();
+
+    if (!task.task_type.startsWith("entity_generation")) {
+      return;
+    }
+
+    setEntityTaskState((current) => {
+      if (!current) {
+        return task;
+      }
+      if (current.task_id === task.task_id) {
+        return task;
+      }
+
+      const currentUpdatedAt = Date.parse(current.updated_at);
+      const nextUpdatedAt = Date.parse(task.updated_at);
+      if (Number.isFinite(currentUpdatedAt) && Number.isFinite(nextUpdatedAt)) {
+        return nextUpdatedAt >= currentUpdatedAt ? task : current;
+      }
+      return task;
+    });
+
+    const shouldRefreshEntityEvents = !entityTaskState || entityTaskState.task_id === task.task_id;
+    if (
+      shouldRefreshEntityEvents
+      && (task.status === "succeeded" || task.status === "failed")
+    ) {
+      void loadEntityTaskEvents(task.task_id);
+    }
+  }, [
+    entityTaskState,
+    loadEntityTaskEvents,
+    projectId,
+    scheduleProjectTaskPlaybackRefresh,
+  ]);
+
+  useTaskEventStream({
+    enabled: Boolean(projectId),
+    projectIds: [projectId],
+    taskIds: entityTaskIdsForRealtime,
+    onTaskState: handleRealtimeTaskState,
+  });
+
+  useEffect(() => {
+    return () => {
+      if (realtimePlaybackRefreshTimerRef.current !== null) {
+        window.clearTimeout(realtimePlaybackRefreshTimerRef.current);
+      }
+    };
+  }, []);
 
   const playbackItems = useMemo<ProcessPlaybackItem[]>(() => {
     const localRuns = workflowRuns.map((run) => {
@@ -3027,8 +3103,11 @@ export default function StoryRoomPage() {
     }
 
     const intervalId = window.setInterval(() => {
+      if (Date.now() - lastRealtimeTaskEventAtRef.current < 15_000) {
+        return;
+      }
       void loadProjectEntityTaskState();
-    }, 5000);
+    }, 10_000);
 
     return () => window.clearInterval(intervalId);
   }, [entityTaskState, loadProjectEntityTaskState]);
@@ -4574,7 +4653,7 @@ export default function StoryRoomPage() {
 
   if (loading) {
     return (
-      <main className="min-h-screen px-6 py-10">
+      <main className="min-h-screen px-6 py-10" data-testid="story-room-page">
         <div className="mx-auto max-w-7xl rounded-[36px] border border-black/10 bg-white/75 p-10 text-sm text-black/55">
           正在装载你的故事工作台...
         </div>
@@ -4583,7 +4662,10 @@ export default function StoryRoomPage() {
   }
 
   return (
-    <main className="min-h-screen px-4 py-8 pb-40 md:px-6 md:pb-8">
+    <main
+      className="min-h-screen px-4 py-8 pb-40 md:px-6 md:pb-8"
+      data-testid="story-room-page"
+    >
       <div className="mx-auto max-w-7xl space-y-6">
         <section className="rounded-[42px] border border-black/10 bg-white/78 p-6 shadow-[0_24px_60px_rgba(16,20,23,0.06)] md:p-8">
           <div className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
@@ -4652,6 +4734,7 @@ export default function StoryRoomPage() {
                     return (
                       <button
                         key={card.key}
+                        data-testid={`story-room-stage-card-${card.key}`}
                         className={`rounded-[22px] border px-4 py-4 text-left transition ${
                           isActive
                             ? "border-copper/30 bg-white shadow-[0_14px_30px_rgba(176,112,53,0.1)]"
@@ -4848,7 +4931,11 @@ export default function StoryRoomPage() {
         />
 
         {activeStageValue === "outline" ? (
-          <section id="story-stage-outline" className="scroll-mt-6 space-y-4">
+          <section
+            id="story-stage-outline"
+            className="scroll-mt-6 space-y-4"
+            data-testid="story-room-stage-outline"
+          >
             <div className="flex items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-5 py-4 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
               <div>
                 <p className="text-xs uppercase tracking-[0.18em] text-copper">第一步</p>
@@ -5054,7 +5141,11 @@ export default function StoryRoomPage() {
         ) : null}
 
         {activeStageValue === "final" ? (
-          <section id="story-stage-final" className="scroll-mt-6 space-y-4">
+          <section
+            id="story-stage-final"
+            className="scroll-mt-6 space-y-4"
+            data-testid="story-room-stage-final"
+          >
             <div className="flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-4 py-3 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">

@@ -86,13 +86,6 @@ async def get_owned_chapter(
     with_versions: bool = False,
     permission: str = PROJECT_PERMISSION_READ,
 ) -> Chapter:
-    from services.cache_service import cache_service
-
-    cache_key = f"chapter:{chapter_id}"
-    cached = await cache_service.get(cache_key)
-    if cached is not None:
-        return Chapter.model_validate(cached)
-
     statement = select(Chapter).where(Chapter.id == chapter_id).options(
         selectinload(Chapter.volume),
         selectinload(Chapter.branch),
@@ -126,7 +119,6 @@ async def get_owned_chapter(
             result = await session.execute(statement)
             chapter = result.scalar_one()
     apply_chapter_gate_metadata(chapter)
-    await cache_service.set(cache_key, chapter.model_dump(mode="json"), ttl=600)
     return chapter
 
 
@@ -205,7 +197,6 @@ async def create_chapter(
         content=chapter.content,
         change_reason=payload.change_reason or "Initial version",
     )
-    await _invalidate_chapter_cache(chapter.id)
     return chapter
 
 
@@ -320,7 +311,6 @@ async def update_chapter(
             change_reason=payload.change_reason,
             previous_content=previous_content,
         )
-    await _invalidate_chapter_cache(chapter.id)
     return chapter
 
 
@@ -401,13 +391,7 @@ async def rollback_to_version(
         change_reason=restored_version.change_reason,
         previous_content=previous_content,
     )
-    await _invalidate_chapter_cache(chapter.id)
     return chapter, restored_version
-
-
-async def _invalidate_chapter_cache(chapter_id: UUID) -> None:
-    from services.cache_service import cache_service
-    await cache_service.delete(f"chapter:{chapter_id}")
 
 
 def _build_evaluation_stale_reason(

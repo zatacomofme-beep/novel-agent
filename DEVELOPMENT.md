@@ -21,7 +21,7 @@
 注意：
 
 - `backend/.env.example` 面向本机直跑，默认走 `localhost`
-- `backend/.env.compose.example` 面向容器内运行，默认走 `postgres / redis / qdrant / chroma`
+- `backend/.env.compose.example` 面向容器内运行，默认走 `postgres / redis / qdrant`
 - 不要把真实 API Key 提交进仓库
 - 不要把模型配置暴露到写手前台
 
@@ -78,7 +78,7 @@ cp frontend/.env.example frontend/.env
 cd backend
 python3.11 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 alembic upgrade head
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
@@ -113,7 +113,6 @@ docker compose -f infrastructure/docker/docker-compose.prod.yml up -d --build
 - PostgreSQL
 - Redis
 - Qdrant
-- Chroma
 - FastAPI
 - Celery Worker
 - Next.js
@@ -175,23 +174,37 @@ RUN_MODEL_VERIFY=1 bash scripts/run_delivery_checks.sh
 
 ```bash
 cd backend
-python3 -m py_compile api/main.py api/v1/router.py
-python3 -m unittest discover -s tests -p 'test_*.py' -v
+./venv/bin/python -m py_compile api/main.py api/v1/router.py
+PYTHONPATH=. ./venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 ### Story Engine 模型连通性
 
 ```bash
 cd backend
-PYTHONPATH=. python3 scripts/verify_story_engine_models.py
+PYTHONPATH=. ./venv/bin/python scripts/verify_story_engine_models.py
 ```
 
 ### Story Engine 端到端烟雾测试
 
 ```bash
 cd backend
-PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 scripts/story_engine_live_smoke.py
+PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 ./venv/bin/python scripts/story_engine_live_smoke.py
 ```
+
+### story-room 前端冒烟
+
+如果你改了首页、登录、Dashboard 或 `story-room` 主链，建议额外执行：
+
+```bash
+bash scripts/run_story_room_e2e.sh
+```
+
+这条脚本会：
+
+- 检查本机 PostgreSQL 是否可用
+- 启动本地后端
+- 运行 `frontend/tests/e2e/story-room-smoke.spec.ts`
 
 ## 当前开发约束
 
@@ -228,9 +241,9 @@ PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 sc
 
 优先检查：
 
-- `chroma` 服务是否正常启动
-- 容器内使用的 `CHROMA_HOST / CHROMA_PORT` 是否是 `chroma:8000`
-- 是否只是退回到了内存索引
+- `qdrant` 服务是否正常启动
+- 容器内使用的 `QDRANT_URL` 是否指向 `http://qdrant:6333`
+- 是否只是退回到了词法 / 内存兜底检索
 
 ### 3. `story-room` 保存了正文，但状态看起来不对
 
@@ -243,7 +256,8 @@ PYTHONPATH=. STORY_ENGINE_SMOKE_BASE_URL=http://127.0.0.1:8000/api/v1 python3 sc
 ## 推荐阅读顺序
 
 1. [README.md](./README.md)
-2. [docs/architecture/README.md](./docs/architecture/README.md)
-3. [docs/architecture/chapter-lifecycle.md](./docs/architecture/chapter-lifecycle.md)
-4. [docs/architecture/api-contract-map.md](./docs/architecture/api-contract-map.md)
-5. [docs/setup/story-engine-models.md](./docs/setup/story-engine-models.md)
+2. [docs/HANDOFF.md](./docs/HANDOFF.md)
+3. [docs/architecture/README.md](./docs/architecture/README.md)
+4. [docs/architecture/chapter-lifecycle.md](./docs/architecture/chapter-lifecycle.md)
+5. [docs/architecture/api-contract-map.md](./docs/architecture/api-contract-map.md)
+6. [docs/setup/story-engine-models.md](./docs/setup/story-engine-models.md)

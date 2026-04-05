@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
 from realtime.task_events import TaskEventBroker
+from tasks.schemas import TaskState
 
 
 class FakeRedisClient:
@@ -31,3 +33,22 @@ class TaskEventBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(fake_client.closed)
 
         await broker.stop()
+
+    async def test_subscribe_all_receives_published_state(self) -> None:
+        broker = TaskEventBroker()
+        queue = await broker.subscribe_all()
+        state = TaskState(
+            task_id="task-broadcast-1",
+            task_type="story_engine.outline_stress_test",
+            status="running",
+            progress=42,
+            message="outline in progress",
+        )
+
+        broker.publish(state)
+
+        received = await asyncio.wait_for(queue.get(), timeout=0.2)
+        self.assertEqual(received.task_id, state.task_id)
+        self.assertEqual(received.progress, state.progress)
+
+        await broker.unsubscribe_all(queue)
