@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     app_debug: bool = Field(default=True, alias="APP_DEBUG")
     api_v1_prefix: str = Field(default="/api/v1", alias="API_V1_PREFIX")
+    cors_allowed_origins: Optional[str] = Field(
+        default=None,
+        alias="CORS_ALLOWED_ORIGINS",
+        description="Comma-separated list of allowed CORS origins. Use * for all (dev only).",
+    )
 
     database_url: str = Field(alias="DATABASE_URL")
     redis_url: str = Field(alias="REDIS_URL")

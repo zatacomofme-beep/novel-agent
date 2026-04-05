@@ -47,64 +47,89 @@ async def build_context_bundle(
         )
     )
 
-    retrieval_batches = await asyncio.gather(
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.characters,
-            item_type="character",
-            limit=5,
-        ),
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.world_settings,
-            item_type="world_setting",
-            limit=5,
-        ),
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.items,
-            item_type="item",
-            limit=4,
-        ),
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.factions,
-            item_type="faction",
-            limit=4,
-        ),
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.locations,
-            item_type="location",
-            limit=4,
-        ),
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.plot_threads,
-            item_type="plot_thread",
-            limit=4,
-        ),
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.foreshadowing,
-            item_type="foreshadowing",
-            limit=3,
-        ),
-        vector_store.search(
-            project_id=str(story_bible.project_id),
-            query=query,
-            items=story_bible.timeline_events,
-            item_type="timeline_event",
-            limit=3,
-        ),
-    )
+    _search_tasks = []
+    if story_bible.characters:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.characters,
+                item_type="character",
+                limit=5,
+            )
+        )
+    if story_bible.world_settings:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.world_settings,
+                item_type="world_setting",
+                limit=5,
+            )
+        )
+    if story_bible.items:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.items,
+                item_type="item",
+                limit=4,
+            )
+        )
+    if story_bible.factions:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.factions,
+                item_type="faction",
+                limit=4,
+            )
+        )
+    if story_bible.locations:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.locations,
+                item_type="location",
+                limit=4,
+            )
+        )
+    if story_bible.plot_threads:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.plot_threads,
+                item_type="plot_thread",
+                limit=4,
+            )
+        )
+    if story_bible.foreshadowing:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.foreshadowing,
+                item_type="foreshadowing",
+                limit=3,
+            )
+        )
+    if story_bible.timeline_events:
+        _search_tasks.append(
+            vector_store.search(
+                project_id=str(story_bible.project_id),
+                query=query,
+                items=story_bible.timeline_events,
+                item_type="timeline_event",
+                limit=3,
+            )
+        )
+
+    retrieval_batches = await asyncio.gather(*_search_tasks) if _search_tasks else []
     retrieved: list[RetrievedItem] = [
         item for batch in retrieval_batches for item in batch
     ]

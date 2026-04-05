@@ -154,10 +154,33 @@ class ModelGateway:
         import concurrent.futures
 
         def _run_in_worker() -> GenerationResult:
-            return asyncio.run(self.generate_text(request, fallback=fallback))
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(
+                        self.generate_text(request, fallback=fallback)
+                    )
+                finally:
+                    new_loop.close()
+            except Exception as exc:
+                from core.logging import get_logger
+                logger = get_logger(__name__)
+                logger.warning(
+                    "model_gateway_sync_generation_failed",
+                    extra={"error": str(exc), "task_name": request.task_name},
+                )
+                return GenerationResult(
+                    content=fallback(),
+                    provider="fallback",
+                    model=request.model,
+                    usage=None,
+                    cached=False,
+                )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(_run_in_worker).result()
+            future = executor.submit(_run_in_worker)
+            return future.result(timeout=300)
 
     FALLBACK_CHAIN: dict[str, list[str]] = {
         "claude-sonnet-4": ["claude-haiku-3", "gpt-4o"],

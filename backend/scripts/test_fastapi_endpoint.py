@@ -10,8 +10,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-os.environ["DATABASE_URL"] = "postgresql+asyncpg://postgres:password@localhost:5432/novel_agent"
-os.environ["JWT_SECRET_KEY"] = "dev-secret-key-change-in-production"
+os.environ.setdefault(
+    "DATABASE_URL",
+    os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres@localhost:5432/novel_agent"),
+)
+os.environ.setdefault(
+    "JWT_SECRET_KEY",
+    os.getenv("TEST_JWT_SECRET_KEY", "dev-secret-change-in-production"),
+)
 
 from fastapi.testclient import TestClient
 from api.main import app

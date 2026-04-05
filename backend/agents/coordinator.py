@@ -249,11 +249,9 @@ class CoordinatorAgent(BaseAgent):
                 "final_review": final_review,
                 "canon_report": final_canon_report,
                 "initial_canon_report": initial_canon_report,
-                "final_canon_report": final_canon_report,
                 "story_bible_integrity_report": integrity_report,
                 "truth_layer_context": final_truth_layer_context,
                 "initial_truth_layer_context": initial_truth_layer_context,
-                "final_truth_layer_context": final_truth_layer_context,
                 "revision_focus": revision_focus,
                 "revision_plan": all_revision_plans[-1] if all_revision_plans else None,
                 "revision_plans": all_revision_plans,
@@ -354,11 +352,6 @@ class CoordinatorAgent(BaseAgent):
 
             ai_taste_score = review.get("ai_taste_score", 1.0)
             if ai_taste_score >= (1.0 - self.min_ai_taste_threshold):
-                final_review = review
-                final_truth_layer_context = round_truth_layer_context
-                break
-
-            if round_num > self.max_revision_rounds:
                 final_review = review
                 final_truth_layer_context = round_truth_layer_context
                 break

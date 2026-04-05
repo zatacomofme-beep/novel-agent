@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -33,6 +34,7 @@ class KnowledgeEntry:
 
 class L3LongTermMemory:
     _instance: L3LongTermMemory | None = None
+    _lock: threading.Lock = threading.Lock()
 
     def __init__(self) -> None:
         self._store: dict[str, KnowledgeEntry] = {}
@@ -40,7 +42,9 @@ class L3LongTermMemory:
     @classmethod
     def get_instance(cls) -> L3LongTermMemory:
         if cls._instance is None:
-            cls._instance = L3LongTermMemory()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = L3LongTermMemory()
         return cls._instance
 
     def store(self, entry: KnowledgeEntry) -> None:

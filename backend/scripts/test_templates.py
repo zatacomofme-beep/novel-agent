@@ -10,7 +10,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-os.environ["DATABASE_URL"] = "postgresql+asyncpg://postgres:password@localhost:5432/novel_agent"
+os.environ.setdefault(
+    "DATABASE_URL",
+    os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres@localhost:5432/novel_agent"),
+)
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession

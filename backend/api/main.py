@@ -41,12 +41,42 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins: list[str] = []
+_raw_origins = getattr(settings, "cors_allowed_origins", None)
+if _raw_origins:
+    if isinstance(_raw_origins, str):
+        _cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+    elif isinstance(_raw_origins, list):
+        _cors_origins = _raw_origins
+
+if not _cors_origins and settings().app_env == "development":
+    logger.warning(
+        "cors_allowing_all_origins_in_dev",
+        extra={"message": "CORS allowing all origins in development mode"},
+    )
+    _cors_origins = ["*"]
+
+if "*" in _cors_origins and settings().app_env == "production":
+    logger.error(
+        "cors_wildcard_in_production",
+        extra={
+            "message": "CORS wildcard (*) is dangerous in production with credentials enabled"
+        },
+    )
+    _cors_origins = []
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins if _cors_origins else [],
+    allow_credentials=len(_cors_origins) > 0 and "*" not in _cors_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Accept",
+        "Origin",
+    ],
 )
 
 

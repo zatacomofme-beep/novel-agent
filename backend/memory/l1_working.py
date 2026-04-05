@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
@@ -21,6 +22,7 @@ class WorkingMemoryEntry:
 
 class L1WorkingMemory:
     _instance: L1WorkingMemory | None = None
+    _lock: threading.Lock = threading.Lock()
 
     def __init__(self) -> None:
         self.entries: dict[UUID, WorkingMemoryEntry] = {}
@@ -30,7 +32,9 @@ class L1WorkingMemory:
     @classmethod
     def get_instance(cls) -> L1WorkingMemory:
         if cls._instance is None:
-            cls._instance = L1WorkingMemory()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = L1WorkingMemory()
         return cls._instance
 
     def store(self, entry: WorkingMemoryEntry) -> None:

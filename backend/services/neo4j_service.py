@@ -4,6 +4,10 @@ import uuid
 from typing import Any, Optional
 
 from core.config import get_settings
+from core.logging import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class Neo4jService:
@@ -28,12 +32,16 @@ class Neo4jService:
             self._client = driver
             self._available = True
             return driver
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_connection_failed",
+                extra={"error": str(exc), "url": self._url},
+            )
             if driver is not None:
                 try:
                     await driver.close()
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    logger.debug("neo4j_driver_close_failed", extra={"error": str(close_exc)})
             self._available = False
             return None
 
@@ -82,7 +90,16 @@ class Neo4jService:
                 )
                 record = await result.single()
                 return dict(record) if record else None
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_create_event_node_failed",
+                extra={
+                    "error": str(exc),
+                    "project_id": str(project_id),
+                    "chapter": chapter,
+                    "name": name,
+                },
+            )
             return None
 
     async def create_causal_link(
@@ -111,7 +128,11 @@ class Neo4jService:
                     confidence=confidence,
                 )
                 return True
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_create_causal_link_failed",
+                extra={"error": str(exc), "from_id": from_event_id, "to_id": to_event_id},
+            )
             return False
 
     async def create_involves_link(
@@ -141,7 +162,11 @@ class Neo4jService:
                     role=role,
                 )
                 return True
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_create_involves_link_failed",
+                extra={"error": str(exc), "event_id": event_id, "entity_id": entity_id},
+            )
             return False
 
     async def link_foreshadow_to_payoff(
@@ -165,7 +190,11 @@ class Neo4jService:
                     payoff_id=payoff_event_id,
                 )
                 return True
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_link_foreshadow_to_payoff_failed",
+                extra={"error": str(exc), "foreshadow_id": foreshadow_event_id},
+            )
             return False
 
     async def query_causal_paths(
@@ -212,7 +241,11 @@ class Neo4jService:
                         "hops": record["hops"],
                     })
                 return paths
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_query_causal_paths_failed",
+                extra={"error": str(exc), "project_id": str(project_id)},
+            )
             return []
 
     async def compute_character_influence(
@@ -242,7 +275,11 @@ class Neo4jService:
                 async for record in result:
                     records.append(dict(record))
                 return records
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_compute_character_influence_failed",
+                extra={"error": str(exc), "project_id": str(project_id)},
+            )
             return []
 
     async def detect_story_structure(
@@ -269,7 +306,11 @@ class Neo4jService:
                 async for record in result:
                     records.append(dict(record))
                 return records
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "neo4j_detect_story_structure_failed",
+                extra={"error": str(exc), "project_id": str(project_id)},
+            )
             return []
 
     @property

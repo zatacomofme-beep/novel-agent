@@ -3,10 +3,11 @@
 """
 测试获取模板列表
 """
+import os
 import requests
 
-email = "test_admin@test.com"
-password = "admin123456"
+email = os.getenv("TEST_USER_EMAIL", "test_admin@test.com")
+password = os.getenv("TEST_USER_PASSWORD", "")
 
 try:
     # 登录获取 token
