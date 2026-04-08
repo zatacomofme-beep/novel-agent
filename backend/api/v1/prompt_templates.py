@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.v1.profile import get_db_session, get_current_user
+from api.deps import get_db_session, get_current_user
 from schemas.prompt_template import (
     PromptTemplateRead,
     PromptTemplateCreate,

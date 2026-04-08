@@ -29,9 +29,6 @@ from services.truth_layer_service import build_truth_layer_context
 
 
 class CoordinatorAgent(BaseAgent):
-    DEFAULT_MAX_REVISION_ROUNDS = 2
-    DEFAULT_MIN_AI_TASTE_THRESHOLD = 0.3
-
     def __init__(
         self,
         max_revision_rounds: int | None = None,
@@ -39,8 +36,8 @@ class CoordinatorAgent(BaseAgent):
     ) -> None:
         super().__init__(name="coordinator", role="orchestrator")
         settings = get_settings()
-        self.max_revision_rounds = max_revision_rounds or self.DEFAULT_MAX_REVISION_ROUNDS
-        self.min_ai_taste_threshold = min_ai_taste_threshold or self.DEFAULT_MIN_AI_TASTE_THRESHOLD
+        self.max_revision_rounds = max_revision_rounds or settings.coordinator_max_revision_rounds
+        self.min_ai_taste_threshold = min_ai_taste_threshold or 0.3
         self.critic_score_threshold = settings.revision_min_overall_score_threshold
         self.critic_ai_taste_threshold = settings.revision_max_ai_taste_score_threshold
         self.librarian = LibrarianAgent()

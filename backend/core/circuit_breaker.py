@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -36,6 +37,9 @@ class TokenCircuitBreaker:
     DEFAULT_CHAPTER_BUDGET = 2.0
     DEFAULT_LOOP_THRESHOLD_TOKENS = 5000
     DEFAULT_LOOP_COUNT_TRIGGER = 3
+    MAX_RECORDS_PER_CHAPTER = 50
+    RECORD_TTL_SECONDS = 3600
+    GLOBAL_MAX_KEYS = 10000
 
     def __init__(
         self,
@@ -57,6 +61,24 @@ class TokenCircuitBreaker:
         self._retry_count: dict[str, int] = {}
         self._high_token_rounds: dict[str, int] = {}
         self._records: dict[str, list[TokenRecord]] = {}
+        self._last_evict_time: float = 0.0
+        self._evict_interval_seconds: float = 300.0
+
+    def _maybe_evict_expired(self) -> None:
+        now = time.monotonic()
+        if now - self._last_evict_time < self._evict_interval_seconds:
+            return
+        if len(self._records) <= self.GLOBAL_MAX_KEYS * 0.5:
+            self._last_evict_time = now
+            return
+        self._last_evict_time = now
+        cutoff = datetime.now(timezone.utc).timestamp() - self.RECORD_TTL_SECONDS
+        expired_keys: list[str] = []
+        for cid, records in self._records.items():
+            if not records or records[-1].timestamp.timestamp() < cutoff:
+                expired_keys.append(cid)
+        for cid in expired_keys:
+            self.reset(cid)
 
     def check_and_record(
         self,
@@ -64,6 +86,8 @@ class TokenCircuitBreaker:
         tokens_used: int,
         cost: float,
     ) -> CircuitBreakerResult:
+        self._maybe_evict_expired()
+
         if self._is_open.get(chapter_id):
             return CircuitBreakerResult(
                 should_break=True,
@@ -105,7 +129,8 @@ class TokenCircuitBreaker:
                     loop_count=self._retry_count[chapter_id],
                 )
 
-        self._records.setdefault(chapter_id, []).append(
+        records = self._records.setdefault(chapter_id, [])
+        records.append(
             TokenRecord(
                 chapter_id=chapter_id,
                 tokens_used=tokens_used,
@@ -113,6 +138,8 @@ class TokenCircuitBreaker:
                 timestamp=datetime.now(timezone.utc),
             )
         )
+        if len(records) > self.MAX_RECORDS_PER_CHAPTER:
+            records[:] = records[-self.MAX_RECORDS_PER_CHAPTER:]
 
         return CircuitBreakerResult(
             should_break=False,

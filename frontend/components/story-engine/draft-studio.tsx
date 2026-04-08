@@ -11,34 +11,10 @@ import {
   formatDateTime,
   formatReviewVerdict,
 } from "@/components/editor/formatters";
-import type { StoryRoomLocalDraftRecoveryState } from "@/lib/story-room-local-draft";
-import type { Chapter, FinalOptimizeResponse, RealtimeGuardResponse, StoryOutline } from "@/types/api";
-
-type RecoverableDraftCard = {
-  storageKey: string;
-  projectId: string;
-  branchId: string | null;
-  volumeId: string | null;
-  chapterNumber: number;
-  chapterTitle: string;
-  outlineId: string | null;
-  sourceChapterId: string | null;
-  sourceVersionNumber: number | null;
-  updatedAt: string;
-  excerpt: string;
-  charCount: number;
-  storageEngine: "indexeddb" | "localStorage";
-  scopeLabel: string;
-  isCurrent: boolean;
-};
-
-type PausedStreamState = {
-  pausedAtParagraph: number;
-  nextParagraphIndex: number;
-  paragraphTotal: number;
-  currentBeat: string | null;
-  remainingBeats: string[];
-};
+import {
+  useDraftStudio,
+  type RecoverableDraftCard,
+} from "@/contexts/draft-studio-context";
 
 type DraftStudioActionItem = {
   key: string;
@@ -49,58 +25,7 @@ type DraftStudioActionItem = {
 };
 
 type DraftStudioProps = {
-  chapterNumber: number;
-  chapterTitle: string;
-  draftText: string;
-  outlines: StoryOutline[];
-  scopeChapters: Chapter[];
-  outlineSelectionId: string | null;
-  activeChapter: Chapter | null;
-  scopeLabel: string;
-  savedChapterCount: number;
-  guardResult: RealtimeGuardResponse | null;
-  pausedStreamState: PausedStreamState | null;
-  activeRepairInstruction: string | null;
-  finalResult: FinalOptimizeResponse | null;
-  checkingGuard: boolean;
-  streaming: boolean;
-  streamStatus: string | null;
-  optimizing: boolean;
-  savingDraft: boolean;
-  draftDirty: boolean;
-  isOnline: boolean;
-  localDraftSavedAt: string | null;
-  localDraftRecoveredAt: string | null;
-  pendingLocalDraftUpdatedAt: string | null;
-  pendingLocalDraftRecoveryState: StoryRoomLocalDraftRecoveryState | null;
-  cloudDraftSavedAt: string | null;
-  cloudDraftRecoveredAt: string | null;
-  pendingCloudDraftUpdatedAt: string | null;
-  pendingCloudDraftRecoveryState: StoryRoomLocalDraftRecoveryState | null;
-  cloudSyncing: boolean;
-  cloudSyncEnabled: boolean;
-  recoverableDrafts: RecoverableDraftCard[];
   editorRef: MutableRefObject<DraftEditorHandle | null>;
-  onChapterNumberChange: (value: number) => void;
-  onChapterTitleChange: (value: string) => void;
-  onDraftTextChange: (value: string) => void;
-  onSelectOutlineId: (outlineId: string) => void;
-  onJumpToChapter: (chapterNumber: number) => void;
-  onSaveDraft: () => void;
-  onRunStreamGenerate: () => void;
-  onContinueWithRepair: (option: string) => void;
-  onContinueAfterManualFix: () => void;
-  onRunGuardCheck: () => void;
-  onRunOptimize: () => void;
-  onLocateSelectionInKnowledge: (selectionText: string) => void;
-  onOpenOutlineStep: () => void;
-  onOpenFinalStep: () => void;
-  onOpenReviewTool: () => void;
-  onOpenRecoverableDraft: (draft: RecoverableDraftCard) => void;
-  onRestoreLocalDraft: () => void;
-  onDismissLocalDraft: () => void;
-  onRestoreCloudDraft: () => void;
-  onDismissCloudDraft: () => void;
 };
 
 const ALERT_TONES: Record<string, string> = {
@@ -116,7 +41,7 @@ const FLOW_STEP_TONES: Record<string, string> = {
   pending: "border-black/10 bg-[#fbfaf5]",
 };
 
-function findChapterOutline(outlines: StoryOutline[], chapterNumber: number): StoryOutline | null {
+function findChapterOutline(outlines: import("@/types/api").StoryOutline[], chapterNumber: number) {
   return outlines.find((item) => item.level === "level_3" && item.node_order === chapterNumber) ?? null;
 }
 
@@ -161,7 +86,7 @@ function formatPublishStatus(status: string): string {
 }
 
 function formatLocalDraftRecoveryTitle(
-  state: StoryRoomLocalDraftRecoveryState | null,
+  state: import("@/lib/story-room-local-draft").StoryRoomLocalDraftRecoveryState | null,
 ): string {
   switch (state) {
     case "server_newer":
@@ -176,7 +101,7 @@ function formatLocalDraftRecoveryTitle(
 }
 
 function formatLocalDraftRecoveryDetail(
-  state: StoryRoomLocalDraftRecoveryState | null,
+  state: import("@/lib/story-room-local-draft").StoryRoomLocalDraftRecoveryState | null,
 ): string {
   switch (state) {
     case "server_newer":
@@ -191,7 +116,7 @@ function formatLocalDraftRecoveryDetail(
 }
 
 function formatCloudDraftRecoveryTitle(
-  state: StoryRoomLocalDraftRecoveryState | null,
+  state: import("@/lib/story-room-local-draft").StoryRoomLocalDraftRecoveryState | null,
 ): string {
   switch (state) {
     case "server_newer":
@@ -206,7 +131,7 @@ function formatCloudDraftRecoveryTitle(
 }
 
 function formatCloudDraftRecoveryDetail(
-  state: StoryRoomLocalDraftRecoveryState | null,
+  state: import("@/lib/story-room-local-draft").StoryRoomLocalDraftRecoveryState | null,
 ): string {
   switch (state) {
     case "server_newer":
@@ -220,60 +145,64 @@ function formatCloudDraftRecoveryDetail(
   }
 }
 
-export function DraftStudio({
-  chapterNumber,
-  chapterTitle,
-  draftText,
-  outlines,
-  scopeChapters,
-  outlineSelectionId,
-  activeChapter,
-  scopeLabel,
-  savedChapterCount,
-  guardResult,
-  pausedStreamState,
-  activeRepairInstruction,
-  finalResult,
-  checkingGuard,
-  streaming,
-  streamStatus,
-  optimizing,
-  savingDraft,
-  draftDirty,
-  isOnline,
-  localDraftSavedAt,
-  localDraftRecoveredAt,
-  pendingLocalDraftUpdatedAt,
-  pendingLocalDraftRecoveryState,
-  cloudDraftSavedAt,
-  cloudDraftRecoveredAt,
-  pendingCloudDraftUpdatedAt,
-  pendingCloudDraftRecoveryState,
-  cloudSyncing,
-  cloudSyncEnabled,
-  recoverableDrafts,
-  editorRef,
-  onChapterNumberChange,
-  onChapterTitleChange,
-  onDraftTextChange,
-  onSelectOutlineId,
-  onJumpToChapter,
-  onSaveDraft,
-  onRunStreamGenerate,
-  onContinueWithRepair,
-  onContinueAfterManualFix,
-  onRunGuardCheck,
-  onRunOptimize,
-  onLocateSelectionInKnowledge,
-  onOpenOutlineStep,
-  onOpenFinalStep,
-  onOpenReviewTool,
-  onOpenRecoverableDraft,
-  onRestoreLocalDraft,
-  onDismissLocalDraft,
-  onRestoreCloudDraft,
-  onDismissCloudDraft,
-}: DraftStudioProps) {
+export function DraftStudio({ editorRef }: DraftStudioProps) {
+  const { state, callbacks } = useDraftStudio();
+  const {
+    chapterNumber,
+    chapterTitle,
+    draftText,
+    outlines,
+    scopeChapters,
+    outlineSelectionId,
+    activeChapter,
+    scopeLabel,
+    savedChapterCount,
+    guardResult,
+    pausedStreamState,
+    activeRepairInstruction,
+    finalResult,
+    checkingGuard,
+    streaming,
+    streamStatus,
+    optimizing,
+    savingDraft,
+    draftDirty,
+    isOnline,
+    localDraftSavedAt,
+    localDraftRecoveredAt,
+    pendingLocalDraftUpdatedAt,
+    pendingLocalDraftRecoveryState,
+    cloudDraftSavedAt,
+    cloudDraftRecoveredAt,
+    pendingCloudDraftUpdatedAt,
+    pendingCloudDraftRecoveryState,
+    cloudSyncing,
+    cloudSyncEnabled,
+    recoverableDrafts,
+  } = state;
+  const {
+    onChapterNumberChange,
+    onChapterTitleChange,
+    onDraftTextChange,
+    onSelectOutlineId,
+    onJumpToChapter,
+    onSaveDraft,
+    onRunStreamGenerate,
+    onContinueWithRepair,
+    onContinueAfterManualFix,
+    onRunGuardCheck,
+    onRunOptimize,
+    onLocateSelectionInKnowledge,
+    onOpenOutlineStep,
+    onOpenFinalStep,
+    onOpenReviewTool,
+    onOpenRecoverableDraft,
+    onRestoreLocalDraft,
+    onDismissLocalDraft,
+    onRestoreCloudDraft,
+    onDismissCloudDraft,
+  } = callbacks;
+
   const currentOutline = findChapterOutline(outlines, chapterNumber);
   const outlineNodes = buildOutlineNodes(currentOutline?.title ?? null, currentOutline?.content ?? null);
   const level3OutlineOptions = outlines
@@ -313,7 +242,7 @@ export function DraftStudio({
         : hasFinalResult
           ? "终稿结果已经出来了，确认后就能进入下一章。"
           : "本章已保存，下一步去检查收口。";
-  // 正文区只保留一个强主动作，其他能力按当前阶段降到次操作，避免新用户判断成本过高。
+
   const primaryAction: DraftStudioActionItem =
     currentDraftStage === "final-result"
       ? {
@@ -354,6 +283,7 @@ export function DraftStudio({
                 onClick: onRunOptimize,
                 tone: "primary",
               };
+
   const secondaryActions: DraftStudioActionItem[] = [];
   if (currentDraftStage === "save" && currentOutline) {
     secondaryActions.push({
@@ -391,6 +321,7 @@ export function DraftStudio({
       tone: "secondary",
     });
   }
+
   const visibleSecondaryActions = secondaryActions.slice(0, 2);
 
   const chapterFlowSteps: Array<{
@@ -435,6 +366,7 @@ export function DraftStudio({
       state: hasFinalResult ? "done" : activeChapter && !draftDirty ? "current" : "pending",
     },
   ];
+
   const sidebarSections = (
     <>
       <section

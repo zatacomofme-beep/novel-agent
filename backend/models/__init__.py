@@ -23,6 +23,8 @@ from models.project_collaborator import ProjectCollaborator
 from models.plot_thread import PlotThread
 from models.project import Project
 from models.project_volume import ProjectVolume
+from models.prompt_template import PromptTemplate
+from models.refresh_token import RefreshToken
 from models.story_bible_version import (
     StoryBibleChangeSource,
     StoryBibleChangeType,
@@ -47,6 +49,7 @@ from models.task_run import TaskRun
 from models.timeline_event import TimelineEvent
 from models.user import User
 from models.user_preference import UserPreference
+from models.world_building_session import WorldBuildingSession
 from models.world_setting import WorldSetting
 
 __all__ = [
@@ -73,6 +76,8 @@ __all__ = [
     "PlotThread",
     "Project",
     "ProjectVolume",
+    "PromptTemplate",
+    "RefreshToken",
     "StoryBibleChangeSource",
     "StoryBibleChangeType",
     "StoryBiblePendingChange",
@@ -93,6 +98,7 @@ __all__ = [
     "TimelineEvent",
     "User",
     "UserPreference",
+    "WorldBuildingSession",
     "WorldSetting",
     "LinguisticConsistencyLog",
 ]

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import get_settings
 from core.errors import AppError
 from core.security import decode_access_token
 from db.session import AsyncSessionLocal
@@ -18,6 +20,7 @@ from tasks.state_store import task_state_store
 router = APIRouter()
 AUTH_MESSAGE_TIMEOUT_SECONDS = 5
 AUTH_TOKEN_KEY = "novel_agent_token"
+logger = logging.getLogger(__name__)
 
 
 def verify_ws_token(token: str) -> str | None:
@@ -110,9 +113,16 @@ async def verify_task_event_subscription_access(
 async def task_updates(websocket: WebSocket, task_id: str) -> None:
     await websocket.accept()
 
+    settings = get_settings()
     token = websocket.cookies.get(AUTH_TOKEN_KEY)
     if not token:
-        token = await receive_ws_token(websocket)
+        if settings.app_debug:
+            logger.warning("WebSocket: Token not found in cookies, falling back to message body (debug mode)")
+            token = await receive_ws_token(websocket)
+        else:
+            logger.warning("WebSocket: Token not found in cookies, rejecting connection (production mode)")
+            await websocket.close(code=4001)
+            return
 
     user_id = verify_ws_token(token) if token else None
     if user_id is None:
@@ -136,6 +146,8 @@ async def task_updates(websocket: WebSocket, task_id: str) -> None:
             state = await queue.get()
             await websocket.send_json(state.model_dump(mode="json"))
     except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
         await task_event_broker.unsubscribe(task_id, queue)
 
 
@@ -147,9 +159,16 @@ async def task_events(
 ) -> None:
     await websocket.accept()
 
+    settings = get_settings()
     token = websocket.cookies.get(AUTH_TOKEN_KEY)
     if not token:
-        token = await receive_ws_token(websocket)
+        if settings.app_debug:
+            logger.warning("WebSocket: Token not found in cookies, falling back to message body (debug mode)")
+            token = await receive_ws_token(websocket)
+        else:
+            logger.warning("WebSocket: Token not found in cookies, rejecting connection (production mode)")
+            await websocket.close(code=4001)
+            return
 
     user_id = verify_ws_token(token) if token else None
     if user_id is None:

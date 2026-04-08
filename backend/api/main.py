@@ -52,7 +52,7 @@ if _raw_origins:
 if not _cors_origins and settings().app_env == "development":
     logger.warning(
         "cors_allowing_all_origins_in_dev",
-        extra={"message": "CORS allowing all origins in development mode"},
+        extra={"info": "CORS allowing all origins in development mode"},
     )
     _cors_origins = ["*"]
 

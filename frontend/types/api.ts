@@ -46,7 +46,9 @@ export interface StyleTemplate {
 
 export interface TokenResponse {
   access_token: string;
+  refresh_token?: string | null;
   token_type: string;
+  expires_in?: number | null;
   user: User;
 }
 
@@ -63,6 +65,9 @@ export interface Project {
   collaborator_count: number;
   has_bootstrap_profile: boolean;
   has_novel_blueprint: boolean;
+  initial_idea?: string | null;
+  world_building_completed?: boolean;
+  current_phase?: string;
 }
 
 

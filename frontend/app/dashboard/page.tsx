@@ -14,6 +14,7 @@ import {
   trendDirectionLabel,
 } from "@/app/dashboard/_components/quality-trend";
 import { ProcessPlaybackPanel, type ProcessPlaybackItem } from "@/components/process-playback-panel";
+import { PlatformGuide } from "@/components/guided-tour";
 import { useTaskEventStream } from "@/hooks/use-task-event-stream";
 import { apiFetchWithAuth, downloadWithAuth } from "@/lib/api";
 import { clearAuthSession, loadAuthSession } from "@/lib/auth";
@@ -477,7 +478,7 @@ function DashboardPageShell() {
       setTone("");
       setTargetTotalWords(1_000_000);
       setTargetChapterWords(3_000);
-      router.push(`/dashboard/projects/${createdProject.id}/story-room?entry=new-book&stage=outline`);
+      router.push(`/dashboard/projects/${createdProject.id}/story-room?entry=new-book&stage=world-building`);
       router.refresh();
     } catch (requestError) {
       setError(
@@ -490,8 +491,8 @@ function DashboardPageShell() {
     }
   }
 
-  function handleLogout() {
-    clearAuthSession();
+  async function handleLogout() {
+    await clearAuthSession();
     setCurrentUser(null);
     setOverview(null);
   }
@@ -841,6 +842,8 @@ function DashboardPageShell() {
             </form>
           </div>
         </section>
+
+        <PlatformGuide hasProjects={recentProjectHighlights.length > 0} />
 
         {error ? (
           <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">

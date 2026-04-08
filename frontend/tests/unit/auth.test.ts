@@ -17,8 +17,8 @@ function buildToken(exp: number): string {
 }
 
 
-afterEach(() => {
-  clearAuthSession();
+afterEach(async () => {
+  await clearAuthSession();
   vi.restoreAllMocks();
 });
 

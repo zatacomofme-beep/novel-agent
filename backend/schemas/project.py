@@ -43,6 +43,9 @@ class ProjectRead(ORMModel):
     collaborator_count: int = 0
     has_bootstrap_profile: bool = False
     has_novel_blueprint: bool = False
+    initial_idea: Optional[str] = None
+    world_building_completed: bool = False
+    current_phase: str = "world-building"
 
 
 class ProjectVolumeCreate(ORMModel):

@@ -34,7 +34,7 @@ async def register_user(session: AsyncSession, payload: RegisterRequest) -> User
         password_hash=get_password_hash(payload.password),
     )
     session.add(user)
-    await session.commit()
+    await session.flush()
     await session.refresh(user)
     return user
 

@@ -14,10 +14,14 @@ from schemas.story_engine import (
 )
 from services.story_engine_import_service import bulk_import_story_payload
 from services.story_engine_workflow_service import (
+    run_final_optimize,
+)
+from services.story_engine_workflows._shared import (
     _build_workflow_id,
     _build_workflow_task_base_result,
     _resolve_workflow_task_type,
-    run_final_optimize,
+)
+from services.story_engine_workflows import (
     run_outline_stress_test,
 )
 from services.task_service import (

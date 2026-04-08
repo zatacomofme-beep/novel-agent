@@ -24,16 +24,33 @@ class RateLimiter:
         self._requests_per_hour = requests_per_hour
         self._burst_size = burst_size
         self._redis: Optional[redis.Redis] = None
+        self._pool: Optional[redis.ConnectionPool] = None
 
     async def _get_redis(self) -> redis.Redis:
         if self._redis is None:
-            self._redis = redis.from_url(self._redis_url, decode_responses=True)
+            if self._pool is None:
+                self._pool = redis.ConnectionPool.from_url(
+                    self._redis_url,
+                    decode_responses=True,
+                    max_connections=20,
+                    retry_on_timeout=True,
+                )
+            self._redis = redis.Redis(connection_pool=self._pool)
         return self._redis
 
     async def close(self) -> None:
         if self._redis:
             await self._redis.close()
             self._redis = None
+        if self._pool:
+            await self._pool.disconnect()
+            self._pool = None
+
+    async def __aenter__(self) -> RateLimiter:
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
 
     def _get_minute_key(self, identifier: str) -> str:
         minute = int(time.time() / 60)

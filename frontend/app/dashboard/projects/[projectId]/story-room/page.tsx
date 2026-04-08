@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { FinalPublishPanel } from "@/components/story-engine/final-publish-panel";
 import { DraftStudio } from "@/components/story-engine/draft-studio";
+import { DraftStudioProvider, type DraftStudioState, type DraftStudioCallbacks } from "@/contexts/draft-studio-context";
 import { FinalDiffViewer } from "@/components/story-engine/final-diff-viewer";
 import { ChapterReviewPanel } from "@/components/story-engine/chapter-review-panel";
 import {
@@ -23,7 +24,11 @@ import {
   type KnowledgeTabKey,
 } from "@/components/story-engine/knowledge-base-board";
 import { OutlineWorkbench } from "@/components/story-engine/outline-workbench";
-import { apiFetchWithAuth, apiStreamWithAuth } from "@/lib/api";
+import { WorldBuildingPanel } from "@/components/story-engine/world-building-panel";
+import { SmartRecommendPanel } from "@/components/smart-recommend-panel";
+import { resolveStoryBibleSectionFromPlugin } from "@/lib/story-bible-deeplink";
+import { PhaseProgress, HeaderInfo } from "./components";
+import { apiFetchWithAuth, apiStreamWithAuth, getActiveWorldBuildingSession, type WorldBuildingSessionData } from "@/lib/api";
 import { buildUserFriendlyError } from "@/lib/errors";
 import { useTaskEventStream } from "@/hooks/use-task-event-stream";
 import {
@@ -109,7 +114,7 @@ type StreamContinueOptions = {
   rewriteLatestParagraph?: boolean;
 };
 
-type StoryRoomStageKey = "outline" | "draft" | "final" | "knowledge";
+type StoryRoomStageKey = "outline" | "draft" | "final" | "knowledge" | "world-building";
 
 type DraftStudioRecoverableDraft = StoryRoomLocalDraftSummary & {
   scopeLabel: string;
@@ -135,7 +140,8 @@ function parseStoryRoomStage(value: string | null): StoryRoomStageKey | null {
     value === "outline" ||
     value === "draft" ||
     value === "final" ||
-    value === "knowledge"
+    value === "knowledge" ||
+    value === "world-building"
   ) {
     return value;
   }
@@ -1176,6 +1182,12 @@ export default function StoryRoomPage() {
   const requestedStage = parseStoryRoomStage(searchParams.get("stage"));
   const requestedChapterNumber = parseStoryRoomChapterNumber(searchParams.get("chapter"));
   const requestedTool = searchParams.get("tool");
+  const deeplinkPlugin = searchParams.get("plugin");
+  const deeplinkSection = searchParams.get("section");
+  const deeplinkEntityLabel = searchParams.get("entity_label");
+  const deeplinkInitialTab: KnowledgeTabKey | null =
+    (deeplinkSection as KnowledgeTabKey) ??
+    resolveStoryBibleSectionFromPlugin(deeplinkPlugin);
   const hydratedChapterKeyRef = useRef<string | null>(null);
   const queryHydratedRef = useRef<string | null>(null);
   const bootstrapHydratedRef = useRef(false);
@@ -1260,9 +1272,9 @@ export default function StoryRoomPage() {
   const [loadingChapterReview, setLoadingChapterReview] = useState(false);
   const [reviewSubmittingActionKey, setReviewSubmittingActionKey] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<KnowledgeTabKey>("characters");
+  const [activeTab, setActiveTab] = useState<KnowledgeTabKey>(deeplinkInitialTab ?? "characters");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [highlightedKnowledgeId, setHighlightedKnowledgeId] = useState<string | null>(null);
+  const [highlightedKnowledgeId, setHighlightedKnowledgeId] = useState<string | null>(deeplinkEntityLabel ?? null);
   const [formState, setFormState] = useState<Record<string, string>>({});
   const [savingKnowledge, setSavingKnowledge] = useState(false);
   const [importingKnowledge, setImportingKnowledge] = useState(false);
@@ -1281,6 +1293,9 @@ export default function StoryRoomPage() {
   const [acceptingCandidateIndex, setAcceptingCandidateIndex] = useState<number | null>(null);
   const [activeStage, setActiveStage] = useState<StoryRoomStageKey | null>(null);
   const [pendingStageScroll, setPendingStageScroll] = useState<StoryRoomStageKey | null>(null);
+  const [worldBuildingSession, setWorldBuildingSession] = useState<WorldBuildingSessionData | null>(null);
+  const [loadingWorldBuilding, setLoadingWorldBuilding] = useState(false);
+  const [generatingBlueprint, setGeneratingBlueprint] = useState(false);
   const [pendingReviewPanelFocus, setPendingReviewPanelFocus] = useState(false);
   const [scopeActionKey, setScopeActionKey] = useState<string | null>(null);
 
@@ -1468,13 +1483,20 @@ export default function StoryRoomPage() {
   const hasOutlineBlueprint = level3OutlineList.length > 0;
   const hasDraftStarted = Boolean(activeChapter) || draftText.trim().length > 0;
   const hasOptimizationResult = visibleFinalResult !== null;
-  const recommendedStage: StoryRoomStageKey = !hasOutlineBlueprint
-    ? "outline"
-    : !hasDraftStarted
-      ? "draft"
-      : hasOptimizationResult
-        ? "final"
-        : "draft";
+
+  const worldBuildingCompleted = worldBuildingSession?.status === "completed";
+  const worldBuildingInProgress = worldBuildingSession?.status === "in_progress";
+  const needsWorldBuilding = !worldBuildingCompleted && !hasOutlineBlueprint;
+
+  const recommendedStage: StoryRoomStageKey = needsWorldBuilding
+    ? "world-building"
+    : !hasOutlineBlueprint
+      ? "world-building"
+      : !hasDraftStarted
+        ? "draft"
+        : hasOptimizationResult
+          ? "final"
+          : "draft";
 
   const activeStageValue = activeStage ?? recommendedStage;
   const isDraftFocusMode = activeStageValue === "draft";
@@ -1484,6 +1506,15 @@ export default function StoryRoomPage() {
     title: string;
     status: string;
   }> = [
+    {
+      key: "world-building",
+      title: "世界观",
+      status: worldBuildingCompleted
+        ? "已完成"
+        : worldBuildingInProgress
+          ? `进行中 · 第${worldBuildingSession?.current_step ?? 1}步`
+          : "待构建",
+    },
     {
       key: "outline",
       title: "大纲",
@@ -1511,13 +1542,17 @@ export default function StoryRoomPage() {
   const recommendedStageCard =
     stageCards.find((item) => item.key === recommendedStage) ?? stageCards[0];
   const primaryStageActionLabelMap: Record<StoryRoomStageKey, string> = {
-    outline: "先定三级大纲",
+    "world-building": worldBuildingInProgress ? "继续构建世界观" : "开始构建世界观",
+    outline: hasOutlineBlueprint ? "调整大纲" : "生成三级大纲",
     draft: hasDraftStarted ? "继续写作" : "开始第一章",
     final: "去终稿收口",
     knowledge: "查看设定",
   };
   const recommendedStageSummaryMap: Record<StoryRoomStageKey, string> = {
-    outline: hasOutlineBlueprint ? "三级大纲已经在这里，可以继续调整。" : "先把三级大纲定下来，再开始第一章。",
+    "world-building": worldBuildingCompleted
+      ? "世界观已构建完成，可以继续调整或进入下一步。"
+      : "先回答8个问题，构建你的故事世界基底。",
+    outline: hasOutlineBlueprint ? "三级大纲已经在这里，可以继续调整。" : "先完成世界观构建，再生成三级大纲。",
     draft: hasDraftStarted ? "这一章可以继续往下写。" : "章纲已经有了，直接开始第一章。",
     final: hasOptimizationResult ? "终稿结果已经出来了，可以确认保存并进入下一章。" : "正文完成后，就来这里做终稿收口。",
     knowledge:
@@ -2589,6 +2624,18 @@ export default function StoryRoomPage() {
     }
   }, [projectId]);
 
+  const loadWorldBuildingSessionState = useCallback(async () => {
+    setLoadingWorldBuilding(true);
+    try {
+      const session = await getActiveWorldBuildingSession(projectId);
+      setWorldBuildingSession(session);
+    } catch {
+      setWorldBuildingSession(null);
+    } finally {
+      setLoadingWorldBuilding(false);
+    }
+  }, [projectId]);
+
   const loadWorkspace = useCallback(async (
     showSpinner = true,
     branchId: string | null = null,
@@ -2658,7 +2705,8 @@ export default function StoryRoomPage() {
     setWorkflowRuns([]);
     setProjectTaskPlayback([]);
     void loadWorkspace();
-  }, [loadWorkspace, projectId]);
+    void loadWorldBuildingSessionState();
+  }, [loadWorkspace, loadWorldBuildingSessionState, projectId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2776,8 +2824,8 @@ export default function StoryRoomPage() {
     if (!isNewBookEntry || hasOutlineBlueprint) {
       return;
     }
-    setActiveStage("outline");
-    setPendingStageScroll("outline");
+    setActiveStage("world-building");
+    setPendingStageScroll("world-building");
   }, [hasOutlineBlueprint, isNewBookEntry]);
 
   useEffect(() => {
@@ -4671,21 +4719,13 @@ export default function StoryRoomPage() {
           <div className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
             <div>
               <p className="text-xs uppercase tracking-[0.28em] text-copper">写作现场</p>
-              <h1 className="mt-2 text-3xl font-semibold">{workspace?.project.title}</h1>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                  题材：{workspace?.project.genre ?? genre ?? "未填写"}
-                </span>
-                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                  气质：{workspace?.project.tone ?? tone ?? "未填写"}
-                </span>
-                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                  设定条目：{knowledgeItemCount}
-                </span>
-                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/55">
-                  当前章节：第 {chapterNumber} 章
-                </span>
-              </div>
+              <HeaderInfo
+                projectTitle={workspace?.project.title ?? ""}
+                genre={workspace?.project.genre ?? genre}
+                tone={workspace?.project.tone ?? tone}
+                knowledgeItemCount={knowledgeItemCount}
+                chapterNumber={chapterNumber}
+              />
 
               <section className="mt-6 rounded-[28px] border border-copper/20 bg-[#fff7ef] p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
@@ -4727,58 +4767,14 @@ export default function StoryRoomPage() {
                   </div>
                 </div>
 
-                <div className="mt-5 hidden gap-3 md:grid md:grid-cols-2 xl:grid-cols-4">
-                  {stageCards.map((card, index) => {
-                    const isActive = activeStageValue === card.key;
-                    const isRecommended = recommendedStage === card.key;
-                    return (
-                      <button
-                        key={card.key}
-                        data-testid={`story-room-stage-card-${card.key}`}
-                        className={`rounded-[22px] border px-4 py-4 text-left transition ${
-                          isActive
-                            ? "border-copper/30 bg-white shadow-[0_14px_30px_rgba(176,112,53,0.1)]"
-                            : "border-black/10 bg-white/80 hover:bg-white"
-                        }`}
-                        onClick={() => openStage(card.key)}
-                        type="button"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="flex h-8 w-8 items-center justify-center rounded-full border border-black/10 bg-[#fbfaf5] text-xs font-semibold text-black/62">
-                            {index + 1}
-                          </span>
-                          {isRecommended ? (
-                            <span className="rounded-full border border-copper/20 bg-[#fff7ef] px-3 py-1 text-xs text-copper">
-                              当前
-                            </span>
-                          ) : null}
-                        </div>
-                        <p className="mt-3 text-sm font-semibold">{card.title}</p>
-                        <p className="mt-2 text-xs text-black/52">{card.status}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className="mt-5 flex gap-2 overflow-x-auto pb-1 md:hidden">
-                  {stageCards.map((card) => {
-                    const isActive = activeStageValue === card.key;
-                    return (
-                      <button
-                        key={`mobile-stage-card-${card.key}`}
-                        className={`min-w-[110px] rounded-[18px] border px-3 py-3 text-left transition ${
-                          isActive
-                            ? "border-copper/30 bg-white shadow-[0_12px_24px_rgba(176,112,53,0.1)]"
-                            : "border-black/10 bg-white/80"
-                        }`}
-                        onClick={() => openStage(card.key)}
-                        type="button"
-                      >
-                        <p className="text-sm font-semibold text-black/82">{card.title}</p>
-                        <p className="mt-1 text-[11px] text-black/52">{card.status}</p>
-                      </button>
-                    );
-                  })}
+                <div className="mt-5">
+                  <PhaseProgress
+                    worldBuildingCompleted={worldBuildingCompleted}
+                    hasOutlineBlueprint={!!hasOutlineBlueprint}
+                    hasDraftStarted={hasDraftStarted}
+                    activeStage={activeStageValue}
+                    onSelectStage={openStage}
+                  />
                 </div>
               </section>
             </div>
@@ -4930,6 +4926,33 @@ export default function StoryRoomPage() {
           emptyDescription="开始起稿、检查正文或补设定后，这里会自动记下最近几步。"
         />
 
+        {activeStageValue === "world-building" ? (
+          <WorldBuildingPanel
+            projectId={projectId ?? ""}
+            initialIdea={idea || undefined}
+            onComplete={async () => {
+              await loadWorldBuildingSessionState();
+              setActiveStage("outline");
+              setPendingStageScroll("outline");
+              if (bootstrapState?.blueprint === null) {
+                setGeneratingBlueprint(true);
+                const maxAttempts = 20;
+                for (let i = 0; i < maxAttempts; i++) {
+                  await new Promise(resolve => setTimeout(resolve, 2000));
+                  const updated = await apiFetchWithAuth<ProjectBootstrapState>(
+                    `/api/v1/projects/${projectId}/bootstrap`,
+                  ).catch(() => null);
+                  if (updated?.blueprint !== null) {
+                    setBootstrapState(updated);
+                    break;
+                  }
+                }
+                setGeneratingBlueprint(false);
+              }
+            }}
+          />
+        ) : null}
+
         {activeStageValue === "outline" ? (
           <section
             id="story-stage-outline"
@@ -4945,6 +4968,13 @@ export default function StoryRoomPage() {
                 输入想法 / 上传大纲
               </span>
             </div>
+
+            {generatingBlueprint ? (
+              <div className="flex items-center justify-center gap-3 rounded-[24px] border border-copper/20 bg-[#fff7ef] p-8">
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-copper/30 border-t-copper" />
+                <p className="text-sm text-copper">正在基于你的世界观设定生成三级大纲...</p>
+              </div>
+            ) : null}
 
             <OutlineWorkbench
               outlines={workspace?.outlines ?? []}
@@ -4977,61 +5007,72 @@ export default function StoryRoomPage() {
 
         {activeStageValue === "draft" ? (
           <section id="story-stage-draft" className="scroll-mt-6 space-y-4">
-            <DraftStudio
-              chapterNumber={chapterNumber}
-              chapterTitle={chapterTitle}
-              draftText={draftText}
-              outlines={outlineList}
-              scopeChapters={scopeChapters}
-              outlineSelectionId={currentOutline?.outline_id ?? null}
-              activeChapter={activeChapter}
-              scopeLabel={scopeLabel}
-              savedChapterCount={savedChapterCount}
-              guardResult={guardResult}
-              pausedStreamState={pausedStreamState}
-              activeRepairInstruction={activeRepairInstruction}
-              finalResult={finalResult}
-              checkingGuard={checkingGuard}
-              streaming={streamingChapter}
-              streamStatus={streamStatus}
-              optimizing={optimizing}
-              savingDraft={savingDraft}
-              draftDirty={draftDirty}
-              isOnline={isOnline}
-              localDraftSavedAt={localDraftSavedAt}
-              localDraftRecoveredAt={localDraftRecoveredAt}
-              pendingLocalDraftUpdatedAt={pendingLocalDraftSnapshot?.updatedAt ?? null}
-              pendingLocalDraftRecoveryState={pendingLocalDraftRecoveryState}
-              cloudDraftSavedAt={cloudDraftSavedAt}
-              cloudDraftRecoveredAt={cloudDraftRecoveredAt}
-              pendingCloudDraftUpdatedAt={pendingCloudDraftSnapshot?.updated_at ?? null}
-              pendingCloudDraftRecoveryState={pendingCloudDraftRecoveryState}
-              cloudSyncing={cloudSyncing}
-              cloudSyncEnabled={isOnline}
-              recoverableDrafts={recoverableDraftCards}
-              editorRef={editorRef}
-              onChapterNumberChange={handleChapterNumberChange}
-              onChapterTitleChange={handleChapterTitleInput}
-              onDraftTextChange={handleDraftTextInput}
-              onSelectOutlineId={handleSelectOutlineId}
-              onJumpToChapter={handleJumpToChapter}
-              onSaveDraft={() => void handleSaveDraft()}
-              onRunStreamGenerate={() => void handleRunStreamGenerate()}
-              onContinueWithRepair={(option) => void handleContinueWithRepair(option)}
-              onContinueAfterManualFix={() => void handleContinueAfterManualFix()}
-              onRunGuardCheck={() => void triggerGuardCheck(true)}
-              onRunOptimize={() => void handleRunOptimize()}
-              onLocateSelectionInKnowledge={(selectionText) =>
-                void handleLocateKnowledgeFromSelection(selectionText)
-              }
-              onOpenOutlineStep={() => openStage("outline")}
-              onOpenFinalStep={() => openStage("final")}
-              onOpenReviewTool={openReviewTool}
-              onOpenRecoverableDraft={handleOpenRecoverableDraft}
-              onRestoreLocalDraft={handleRestoreLocalDraft}
-              onDismissLocalDraft={handleDismissLocalDraft}
-              onRestoreCloudDraft={handleRestoreCloudDraft}
-              onDismissCloudDraft={handleDismissCloudDraft}
+            <DraftStudioProvider
+              initialState={{
+                chapterNumber,
+                chapterTitle,
+                draftText,
+                outlines: outlineList,
+                scopeChapters,
+                outlineSelectionId: currentOutline?.outline_id ?? null,
+                activeChapter,
+                scopeLabel,
+                savedChapterCount,
+                guardResult,
+                pausedStreamState,
+                activeRepairInstruction,
+                finalResult,
+                checkingGuard,
+                streaming: streamingChapter,
+                streamStatus,
+                optimizing,
+                savingDraft,
+                draftDirty,
+                isOnline,
+                localDraftSavedAt,
+                localDraftRecoveredAt,
+                pendingLocalDraftUpdatedAt: pendingLocalDraftSnapshot?.updatedAt ?? null,
+                pendingLocalDraftRecoveryState,
+                cloudDraftSavedAt,
+                cloudDraftRecoveredAt,
+                pendingCloudDraftUpdatedAt: pendingCloudDraftSnapshot?.updated_at ?? null,
+                pendingCloudDraftRecoveryState,
+                cloudSyncing,
+                cloudSyncEnabled: isOnline,
+                recoverableDrafts: recoverableDraftCards,
+              } satisfies DraftStudioState}
+              callbacks={{
+                onChapterNumberChange: handleChapterNumberChange,
+                onChapterTitleChange: handleChapterTitleInput,
+                onDraftTextChange: handleDraftTextInput,
+                onSelectOutlineId: handleSelectOutlineId,
+                onJumpToChapter: handleJumpToChapter,
+                onSaveDraft: () => void handleSaveDraft(),
+                onRunStreamGenerate: () => void handleRunStreamGenerate(),
+                onContinueWithRepair: (option) => void handleContinueWithRepair(option),
+                onContinueAfterManualFix: () => void handleContinueAfterManualFix(),
+                onRunGuardCheck: () => void triggerGuardCheck(true),
+                onRunOptimize: () => void handleRunOptimize(),
+                onLocateSelectionInKnowledge: (selectionText) =>
+                  void handleLocateKnowledgeFromSelection(selectionText),
+                onOpenOutlineStep: () => openStage("outline"),
+                onOpenFinalStep: () => openStage("final"),
+                onOpenReviewTool: openReviewTool,
+                onOpenRecoverableDraft: handleOpenRecoverableDraft,
+                onRestoreLocalDraft: handleRestoreLocalDraft,
+                onDismissLocalDraft: handleDismissLocalDraft,
+                onRestoreCloudDraft: handleRestoreCloudDraft,
+                onDismissCloudDraft: handleDismissCloudDraft,
+              } satisfies DraftStudioCallbacks}
+            >
+              <DraftStudio editorRef={editorRef} />
+            </DraftStudioProvider>
+
+            <SmartRecommendPanel
+              projectId={projectId}
+              chapterContent={draftText}
+              context={currentOutline?.content ?? undefined}
+              compact
             />
 
             <section

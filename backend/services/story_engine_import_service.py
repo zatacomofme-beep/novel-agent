@@ -30,13 +30,15 @@ from services.story_engine_unified_knowledge_service import (
     delete_story_knowledge,
     save_story_knowledge,
 )
-from services.story_engine_workflow_service import (
+from services.story_engine_workflows._shared import (
     _append_workflow_event,
     _build_workflow_id,
     _build_workflow_task_base_result,
     _create_workflow_task_state,
     _persist_workflow_task_event,
     _persist_workflow_task_failure,
+)
+from services.story_engine_workflow_service import (
     run_story_bulk_import_guard,
 )
 

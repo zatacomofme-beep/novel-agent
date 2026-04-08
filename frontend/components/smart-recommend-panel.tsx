@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { apiFetchWithAuth } from "@/lib/api";
 
 interface RecommendedTemplate {
   id: string;
@@ -42,24 +43,20 @@ export function SmartRecommendPanel({
 
       setLoading(true);
       try {
-        const response = await fetch(`/api/v1/prompt-templates/recommend`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("auth_token") || ""}`,
+        const data = await apiFetchWithAuth<{ templates: RecommendedTemplate[]; reason?: string }>(
+          `/api/v1/prompt-templates/recommend`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              project_id: projectId,
+              chapter_id: chapterId,
+              chapter_content: chapterContent,
+              context: context,
+            }),
           },
-          body: JSON.stringify({
-            project_id: projectId,
-            chapter_id: chapterId,
-            chapter_content: chapterContent,
-            context: context,
-          }),
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          setTemplates(data.templates || []);
-        }
+        );
+        setTemplates(data.templates || []);
       } catch (error) {
         console.error("Failed to fetch recommendations:", error);
       } finally {

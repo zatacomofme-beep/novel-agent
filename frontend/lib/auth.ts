@@ -37,9 +37,13 @@ export function saveAuthSession(session: TokenResponse): void {
   }
   const maxAge = getTokenRemainingSeconds(session.access_token);
   window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
-  document.cookie = `${AUTH_COOKIE_KEY}=${session.access_token}; path=/; SameSite=lax${
-    maxAge !== null ? `; max-age=${maxAge}` : ""
-  }`;
+  const cookieOptions = [
+    `${AUTH_COOKIE_KEY}=${session.access_token}`,
+    "path=/",
+    "SameSite=Strict",
+    maxAge !== null ? `; max-age=${maxAge}` : "",
+  ].filter(Boolean).join("; ");
+  document.cookie = cookieOptions;
 }
 
 export function loadAuthSession(): TokenResponse | null {
@@ -53,19 +57,30 @@ export function loadAuthSession(): TokenResponse | null {
   try {
     const session = JSON.parse(raw) as TokenResponse;
     if (isTokenExpired(session.access_token)) {
-      clearAuthSession();
+      clearAuthSession().catch(() => {});
       return null;
     }
     return session;
   } catch {
-    clearAuthSession();
+    clearAuthSession().catch(() => {});
     return null;
   }
 }
 
-export function clearAuthSession(): void {
+export async function clearAuthSession(): Promise<void> {
   if (typeof window === "undefined") {
     return;
+  }
+  const token = getAccessToken();
+  if (token) {
+    try {
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // 即使后端调用失败，也要清除本地存储
+    }
   }
   window.localStorage.removeItem(AUTH_STORAGE_KEY);
   document.cookie = `${AUTH_COOKIE_KEY}=; path=/; max-age=0`;
@@ -74,4 +89,9 @@ export function clearAuthSession(): void {
 export function getAccessToken(): string | null {
   const session = loadAuthSession();
   return session?.access_token ?? null;
+}
+
+export function getRefreshToken(): string | null {
+  const session = loadAuthSession();
+  return session?.refresh_token ?? null;
 }

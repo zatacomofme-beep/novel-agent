@@ -7,7 +7,7 @@ import asyncio
 import json
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -31,7 +31,7 @@ async def import_templates():
 
         print(f"📦 开始导入 {len(templates)} 个新模板...")
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for i, template in enumerate(templates, 1):
             # 检查是否已存在同名模板

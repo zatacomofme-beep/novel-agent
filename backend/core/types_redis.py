@@ -1,0 +1,19 @@
+from __future__ import annotations
+
+from typing import Any, AsyncIterator, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class RedisClientProtocol(Protocol):
+    async def ping(self) -> bool: ...
+    async def get(self, key: str) -> str | None: ...
+    async def setex(self, key: str, seconds: int, value: str) -> bool: ...
+    async def delete(self, *keys: str) -> int: ...
+    async def flushdb(self) -> bool: ...
+
+    async def scan_iter(
+        self,
+        *,
+        match: str = "*",
+        count: int | None = None,
+    ) -> AsyncIterator[str]: ...

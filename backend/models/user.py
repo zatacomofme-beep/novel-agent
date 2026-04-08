@@ -6,6 +6,7 @@ from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from models.refresh_token import RefreshToken
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -75,4 +76,13 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         foreign_keys="ChapterCheckpoint.decided_by_user_id",
         back_populates="decided_by",
         order_by="ChapterCheckpoint.created_at.desc()",
+    )
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="RefreshToken.created_at.desc()",
+    )
+    world_building_sessions: Mapped[list["WorldBuildingSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
     )

@@ -1,13 +1,39 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from core.config import get_settings
+from core.degraded_response import DegradedResponse
+from core.exceptions import GraphDatabaseError
 from core.logging import get_logger
+
+if TYPE_CHECKING:
+    from core.types_neo4j import Neo4jDriverProtocol
 
 
 logger = get_logger(__name__)
+
+_NEO4J_EXCEPTIONS: tuple[type[Exception], ...] = ()
+try:
+    from neo4j.exceptions import (  # type: ignore[attr-defined]
+        ClientError,
+        AuthError,
+        ServiceUnavailableError,
+        SessionExpiredError,
+        TransactionError,
+    )
+    _NEO4J_EXCEPTIONS = (
+        ClientError,
+        AuthError,
+        ServiceUnavailableError,
+        SessionExpiredError,
+        TransactionError,
+        ConnectionError,
+        OSError,
+    )
+except ImportError:
+    _NEO4J_EXCEPTIONS = (Exception,)
 
 
 class Neo4jService:
@@ -15,7 +41,7 @@ class Neo4jService:
         settings = get_settings()
         self._url = getattr(settings, "neo4j_url", "bolt://localhost:7687")
         self._auth = getattr(settings, "neo4j_auth", ("neo4j", "password"))
-        self._client: Any | None = None
+        self._client: Neo4jDriverProtocol | None = None
         self._available = False
 
     async def _get_client(self) -> Any | None:
@@ -32,18 +58,13 @@ class Neo4jService:
             self._client = driver
             self._available = True
             return driver
-        except Exception as exc:
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_connection_failed",
                 extra={"error": str(exc), "url": self._url},
             )
-            if driver is not None:
-                try:
-                    await driver.close()
-                except Exception as close_exc:
-                    logger.debug("neo4j_driver_close_failed", extra={"error": str(close_exc)})
             self._available = False
-            return None
+            driver = None
 
     async def close(self) -> None:
         if self._client:
@@ -77,9 +98,10 @@ class Neo4jService:
         CREATE (e)-[:HAPPENED_IN]->(p)
         RETURN e.id AS id, e.name AS name
         """
+        result = None
         try:
             async with driver.session() as session:
-                result = await session.run(
+                query_result = await session.run(
                     cypher,
                     project_id=str(project_id),
                     node_id=node_id,
@@ -88,9 +110,9 @@ class Neo4jService:
                     chapter=chapter,
                     event_type=event_type,
                 )
-                record = await result.single()
-                return dict(record) if record else None
-        except Exception as exc:
+                record = await query_result.single()
+                result = dict(record) if record else None
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_create_event_node_failed",
                 extra={
@@ -100,7 +122,7 @@ class Neo4jService:
                     "name": name,
                 },
             )
-            return None
+        return result
 
     async def create_causal_link(
         self,
@@ -118,6 +140,7 @@ class Neo4jService:
         SET r.confidence = $confidence
         RETURN r
         """
+        success = False
         try:
             async with driver.session() as session:
                 await session.run(
@@ -127,13 +150,13 @@ class Neo4jService:
                     cause_type=cause_type,
                     confidence=confidence,
                 )
-                return True
-        except Exception as exc:
+                success = True
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_create_causal_link_failed",
                 extra={"error": str(exc), "from_id": from_event_id, "to_id": to_event_id},
             )
-            return False
+        return success
 
     async def create_involves_link(
         self,
@@ -152,6 +175,7 @@ class Neo4jService:
         MERGE (e)-[r:INVOLVES {role: $role}]->(c)
         RETURN r
         """
+        success = False
         try:
             async with driver.session() as session:
                 await session.run(
@@ -161,13 +185,13 @@ class Neo4jService:
                     entity_name=entity_name,
                     role=role,
                 )
-                return True
-        except Exception as exc:
+                success = True
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_create_involves_link_failed",
                 extra={"error": str(exc), "event_id": event_id, "entity_id": entity_id},
             )
-            return False
+        return success
 
     async def link_foreshadow_to_payoff(
         self,
@@ -182,6 +206,7 @@ class Neo4jService:
         MERGE (f)-[r:LEADS_TO]->(p)
         RETURN r
         """
+        success = False
         try:
             async with driver.session() as session:
                 await session.run(
@@ -189,13 +214,13 @@ class Neo4jService:
                     foreshadow_id=foreshadow_event_id,
                     payoff_id=payoff_event_id,
                 )
-                return True
-        except Exception as exc:
+                success = True
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_link_foreshadow_to_payoff_failed",
                 extra={"error": str(exc), "foreshadow_id": foreshadow_event_id},
             )
-            return False
+        return success
 
     async def query_causal_paths(
         self,
@@ -203,10 +228,10 @@ class Neo4jService:
         from_chapter: int,
         to_chapter: int,
         max_hops: int = 10,
-    ) -> list[dict[str, Any]]:
+    ) -> DegradedResponse[list[dict[str, Any]]]:
         driver = await self._get_client()
         if not driver:
-            return []
+            return DegradedResponse.empty(source="neo4j", reason="driver_unavailable")
         cypher = """
         MATCH path = (start:Event {
             project_id: $project_id,
@@ -219,6 +244,7 @@ class Neo4jService:
         ORDER BY hops DESC
         LIMIT 5
         """ % max_hops
+        paths = []
         try:
             async with driver.session() as session:
                 result = await session.run(
@@ -227,7 +253,6 @@ class Neo4jService:
                     from_chapter=from_chapter,
                     to_chapter=to_chapter,
                 )
-                paths = []
                 async for record in result:
                     path_data = []
                     for node in record["path"].nodes:
@@ -240,21 +265,26 @@ class Neo4jService:
                         "nodes": path_data,
                         "hops": record["hops"],
                     })
-                return paths
-        except Exception as exc:
+                return_value = DegradedResponse.ok(paths, source="neo4j")
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_query_causal_paths_failed",
                 extra={"error": str(exc), "project_id": str(project_id)},
             )
-            return []
+            return_value = DegradedResponse.fallback(
+                [],
+                source="neo4j",
+                reason=f"query_error: {exc}",
+            )
+        return return_value
 
     async def compute_character_influence(
         self,
         project_id: uuid.UUID,
-    ) -> list[dict[str, Any]]:
+    ) -> DegradedResponse[list[dict[str, Any]]]:
         driver = await self._get_client()
         if not driver:
-            return []
+            return DegradedResponse.empty(source="neo4j", reason="driver_unavailable")
         cypher = """
         MATCH (c:Character {project_id: $project_id})
         OPTIONAL MATCH (e:Event)-[:INVOLVES]->(c)
@@ -265,30 +295,35 @@ class Neo4jService:
         ORDER BY influence_score DESC
         LIMIT 20
         """
+        records = []
         try:
             async with driver.session() as session:
                 result = await session.run(
                     cypher,
                     project_id=str(project_id),
                 )
-                records = []
                 async for record in result:
                     records.append(dict(record))
-                return records
-        except Exception as exc:
+                return_value = DegradedResponse.ok(records, source="neo4j")
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_compute_character_influence_failed",
                 extra={"error": str(exc), "project_id": str(project_id)},
             )
-            return []
+            return_value = DegradedResponse.fallback(
+                [],
+                source="neo4j",
+                reason=f"query_error: {exc}",
+            )
+        return return_value
 
     async def detect_story_structure(
         self,
         project_id: uuid.UUID,
-    ) -> list[dict[str, Any]]:
+    ) -> DegradedResponse[list[dict[str, Any]]]:
         driver = await self._get_client()
         if not driver:
-            return []
+            return DegradedResponse.empty(source="neo4j", reason="driver_unavailable")
         cypher = """
         MATCH path = (a:Event)-[:CAUSED]->(b:Event)-[:CAUSED]->(c:Event)
         WHERE a.project_id = $project_id AND b.project_id = $project_id AND c.project_id = $project_id
@@ -296,22 +331,27 @@ class Neo4jService:
                a.chapter AS ch1, b.chapter AS ch2, c.chapter AS ch3
         LIMIT 20
         """
+        records = []
         try:
             async with driver.session() as session:
                 result = await session.run(
                     cypher,
                     project_id=str(project_id),
                 )
-                records = []
                 async for record in result:
                     records.append(dict(record))
-                return records
-        except Exception as exc:
+                return_value = DegradedResponse.ok(records, source="neo4j")
+        except *_NEO4J_EXCEPTIONS as exc:
             logger.warning(
                 "neo4j_detect_story_structure_failed",
                 extra={"error": str(exc), "project_id": str(project_id)},
             )
-            return []
+            return_value = DegradedResponse.fallback(
+                [],
+                source="neo4j",
+                reason=f"query_error: {exc}",
+            )
+        return return_value
 
     @property
     def is_available(self) -> bool:

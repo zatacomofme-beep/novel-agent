@@ -1,7 +1,53 @@
 import type { ApiErrorPayload } from "@/types/api";
-import { getAccessToken } from "@/lib/auth";
+import { getAccessToken, getRefreshToken, saveAuthSession, clearAuthSession } from "@/lib/auth";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+let refreshPromise: Promise<boolean> | null = null;
+
+async function handleAuthRefresh(): Promise<boolean> {
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = doRefresh();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+async function doRefresh(): Promise<boolean> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) {
+    await clearAuthSession();
+    window.location.href = "/login";
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${API_URL}/api/v1/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+
+    if (!response.ok) {
+      await clearAuthSession();
+      window.location.href = "/login";
+      return false;
+    }
+
+    const session = (await response.json()) as import("@/types/api").TokenResponse;
+    saveAuthSession(session);
+    return true;
+  } catch {
+    await clearAuthSession();
+    window.location.href = "/login";
+    return false;
+  }
+}
 
 export function buildApiWebSocketUrl(
   path: string,
@@ -92,13 +138,53 @@ export async function apiFetchWithAuth<T>(
     throw new Error("Authentication required.");
   }
 
-  return apiFetch<T>(path, {
+  let response = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: {
+      "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
       ...(init.headers ?? {}),
     },
+    cache: "no-store",
   });
+
+  if (response.status === 401) {
+    const refreshed = await handleAuthRefresh();
+    if (refreshed) {
+      const newToken = getAccessToken();
+      response = await fetch(`${API_URL}${path}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${newToken}`,
+          ...(init.headers ?? {}),
+        },
+        cache: "no-store",
+      });
+    }
+  }
+
+  if (!response.ok) {
+    let message = `Request failed with status ${response.status}`;
+    try {
+      const payload = (await response.json()) as ApiErrorPayload;
+      message = payload.error.message;
+    } catch {
+      // Ignore JSON parse failures and fall back to generic message.
+    }
+    throw new Error(message);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return undefined as T;
+  }
+
+  return (await response.json()) as T;
 }
 
 export async function apiStreamWithAuth<T>(
@@ -206,5 +292,71 @@ export async function downloadWithAuth(
   anchor.click();
   anchor.remove();
   window.URL.revokeObjectURL(objectUrl);
+}
+
+export interface WorldBuildingSessionData {
+  id: string;
+  project_id: string;
+  user_id: string;
+  current_step: number;
+  last_active_step: number;
+  session_data: Record<string, unknown>;
+  status: string;
+  completed_steps: number[];
+}
+
+export interface WorldBuildingStartResponse {
+  session: WorldBuildingSessionData;
+  first_question: string;
+  step: number;
+  step_title: string;
+}
+
+export interface WorldBuildingStepResponse {
+  step: number;
+  step_title: string;
+  model_summary: string;
+  model_expansion: string;
+  is_awaiting_follow_up: boolean;
+  suggested_next_step: number;
+  can_skip: boolean;
+  is_complete: boolean;
+  generation_failed: boolean;
+}
+
+export async function startWorldBuildingSession(
+  projectId: string,
+  initialIdea?: string,
+): Promise<WorldBuildingStartResponse> {
+  return apiFetchWithAuth<WorldBuildingStartResponse>(
+    `/api/v1/projects/${projectId}/world-building/sessions`,
+    {
+      method: "POST",
+      body: JSON.stringify({ initial_idea: initialIdea ?? "" }),
+    },
+  );
+}
+
+export async function getActiveWorldBuildingSession(
+  projectId: string,
+): Promise<WorldBuildingSessionData | null> {
+  return apiFetchWithAuth<WorldBuildingSessionData | null>(
+    `/api/v1/projects/${projectId}/world-building/sessions`,
+  );
+}
+
+export async function processWorldBuildingStep(
+  projectId: string,
+  sessionId: string,
+  userInput: string,
+  skipToNext = false,
+): Promise<WorldBuildingStepResponse> {
+  return apiFetchWithAuth<WorldBuildingStepResponse>(
+    `/api/v1/projects/${projectId}/world-building/sessions/${sessionId}/steps`,
+    {
+      method: "POST",
+      body: JSON.stringify({ user_input: userInput, skip_to_next: skipToNext }),
+    },
+  );
 }
 

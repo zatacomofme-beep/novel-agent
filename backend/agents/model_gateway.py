@@ -156,7 +156,6 @@ class ModelGateway:
         def _run_in_worker() -> GenerationResult:
             try:
                 new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
                 try:
                     return new_loop.run_until_complete(
                         self.generate_text(request, fallback=fallback)
@@ -180,7 +179,8 @@ class ModelGateway:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_run_in_worker)
-            return future.result(timeout=300)
+            from core.config import get_settings
+            return future.result(timeout=get_settings().model_gateway_sync_timeout_seconds)
 
     FALLBACK_CHAIN: dict[str, list[str]] = {
         "claude-sonnet-4": ["claude-haiku-3", "gpt-4o"],
@@ -219,7 +219,12 @@ class ModelGateway:
                         "used_fallback": False,
                     }
                     return result, None
-            except Exception as exc:  # pragma: no cover - runtime integration path
+            except (
+                ConnectionError,
+                TimeoutError,
+                OSError,
+                asyncio.TimeoutError,
+            ) as exc:
                 last_error = self._classify_remote_error(
                     provider=provider,
                     exc=exc,
@@ -228,12 +233,6 @@ class ModelGateway:
                 if attempt < self.max_retries and last_error.retryable:
                     await asyncio.sleep(min(1.5 * (attempt + 1), 5.0))
                     continue
-            except Exception as exc:  # pragma: no cover
-                last_error = self._classify_remote_error(
-                    provider=provider,
-                    exc=exc,
-                    attempt=attempt + 1,
-                )
 
         fallback_models = self.FALLBACK_CHAIN.get(request.model or self.default_model, [])
         for fallback_model in fallback_models:
@@ -259,7 +258,7 @@ class ModelGateway:
                         "fallback_to": fallback_model,
                     }
                     return result, None
-            except Exception:  # noqa: BLE001
+            except (ConnectionError, TimeoutError, OSError, asyncio.TimeoutError):
                 continue
 
         return None, last_error

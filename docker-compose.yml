@@ -4,8 +4,8 @@ services:
     container_name: novel-agent-postgres
     environment:
       POSTGRES_DB: novel_agent
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
       - "5432:5432"
     volumes:
@@ -14,6 +14,15 @@ services:
   redis:
     image: redis:7
     container_name: novel-agent-redis
+    command: >
+      sh -c '
+        if [ -n "$${REDIS_PASSWORD:-}" ]; then
+          redis-server --requirepass "$$REDIS_PASSWORD" --port 6379
+        else
+          echo "WARNING: Redis running without authentication. Set REDIS_PASSWORD for production." >&2
+          redis-server --port 6379
+        fi
+      '
     ports:
       - "6379:6379"
     volumes:
@@ -35,7 +44,7 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      - NEO4J_AUTH=neo4j/password
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
       - APOC_EXPORT_FILE_ENABLED=true
       - APOC_GRAPH_LOADER_ENABLED=true

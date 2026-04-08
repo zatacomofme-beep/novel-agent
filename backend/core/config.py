@@ -54,6 +54,10 @@ class Settings(BaseSettings):
         default=30,
         alias="ACCESS_TOKEN_EXPIRE_MINUTES",
     )
+    refresh_token_expire_days: int = Field(
+        default=7,
+        alias="REFRESH_TOKEN_EXPIRE_DAYS",
+    )
 
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
@@ -126,6 +130,37 @@ class Settings(BaseSettings):
     legacy_chapter_routes_mode: Literal["compat", "gone"] = Field(
         default="compat",
         alias="LEGACY_CHAPTER_ROUTES_MODE",
+    )
+
+    coordinator_max_revision_rounds: int = Field(
+        default=3,
+        alias="COORDINATOR_MAX_REVISION_ROUNDS",
+        description="Maximum revision rounds in coordinator convergence loop.",
+    )
+    coordinator_max_debate_rounds: int = Field(
+        default=3,
+        alias="COORDINATOR_MAX_DEBATE_ROUNDS",
+        description="Maximum debate rounds between agents.",
+    )
+    model_gateway_sync_timeout_seconds: int = Field(
+        default=300,
+        alias="MODEL_GATEWAY_SYNC_TIMEOUT_SECONDS",
+        description="Timeout for synchronous model generation in thread pool.",
+    )
+    summary_truncate_length: int = Field(
+        default=220,
+        alias="SUMMARY_TRUNCATE_LENGTH",
+        description="Truncation length for short summaries.",
+    )
+    summary_max_length: int = Field(
+        default=300,
+        alias="SUMMARY_MAX_LENGTH",
+        description="Maximum length for long summaries.",
+    )
+    stream_enrichment_max_hops: int = Field(
+        default=5,
+        alias="STREAM_ENRICHMENT_MAX_HOPS",
+        description="Max hops for causal path queries in stream enrichment.",
     )
 
     model_config = SettingsConfigDict(

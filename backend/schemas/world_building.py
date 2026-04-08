@@ -18,7 +18,6 @@ class WorldBuildingStepData(ORMModel):
 
 
 class WorldBuildingSessionCreate(ORMModel):
-    project_id: UUID
     initial_idea: Optional[str] = Field(default="", max_length=2000)
 
 

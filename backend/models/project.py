@@ -27,6 +27,9 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     bootstrap_profile: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     novel_blueprint: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     story_engine_settings: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    initial_idea: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    world_building_completed: Mapped[bool] = mapped_column(default=False, nullable=False)
+    current_phase: Mapped[str] = mapped_column(String(50), default="world-building", nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="projects")
     characters: Mapped[list["Character"]] = relationship(
@@ -90,4 +93,8 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="StoryBiblePendingChange.created_at.desc()",
+    )
+    world_building_sessions: Mapped[list["WorldBuildingSession"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
     )

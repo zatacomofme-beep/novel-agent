@@ -44,11 +44,13 @@ class BaseAgent:
         *,
         bus: Optional[InMemoryMessageBus] = None,
         max_retries: int | None = None,
+        output_schema: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.role = role
         self.bus = bus or message_bus
         self.max_retries = max_retries if max_retries is not None else self.DEFAULT_MAX_RETRIES
+        self.output_schema = output_schema
 
     async def run(
         self,
@@ -58,8 +60,32 @@ class BaseAgent:
         last_error: str | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                return await self._run_with_tracing(context, payload)
-            except Exception as exc:  # noqa: BLE001
+                response = await self._run_with_tracing(context, payload)
+                if response.success and self.output_schema is not None and response.data is not None:
+                    from agents.output_validator import safe_validate_agent_output
+                    validated, validation_err = safe_validate_agent_output(
+                        response.data,
+                        self.output_schema,
+                        agent_name=self.name,
+                    )
+                    if validation_err:
+                        last_error = str(validation_err)
+                        if attempt < self.max_retries:
+                            import asyncio
+                            delay = self.DEFAULT_BASE_DELAY * (2 ** attempt)
+                            await asyncio.sleep(delay)
+                            continue
+                        return AgentResponse(
+                            success=False,
+                            data=None,
+                            error=last_error,
+                            confidence=0.0,
+                            reasoning=f"{self.name} output schema validation failed after {self.max_retries + 1} attempts",
+                        )
+                    if validated is not None:
+                        response.data = validated.model_dump(mode="json")
+                return response
+            except Exception as exc:
                 last_error = str(exc)
                 if attempt < self.max_retries:
                     import asyncio

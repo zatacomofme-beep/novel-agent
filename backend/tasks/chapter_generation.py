@@ -334,22 +334,48 @@ async def dispatch_generation_task(
         return state
 
 
-@celery_app.task(name="chapter_generation.process")
+@celery_app.task(
+    name="chapter_generation.process",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=5,
+    retry_backoff=2,
+    retry_backoff_max=120,
+    retry_jitter=True,
+)
 def process_generation_task_celery(
+    self,
     task_id: str,
     chapter_id: str,
     project_id: str,
     user_id: str,
 ) -> dict[str, Any]:
-    state = asyncio.run(
-        process_generation_task(
-            task_id=task_id,
-            chapter_id=chapter_id,
-            project_id=project_id,
-            user_id=user_id,
+    import asyncio
+    try:
+        state = asyncio.run(
+            process_generation_task(
+                task_id=task_id,
+                chapter_id=chapter_id,
+                project_id=project_id,
+                user_id=user_id,
+            )
         )
-    )
-    return state.model_dump()
+        return state.model_dump()
+    except (ConnectionError, TimeoutError, OSError) as exc:
+        from core.logging import get_logger
+        logger = get_logger(__name__)
+        logger.warning(
+            "chapter_generation_retryable_error",
+            extra={
+                "task_id": task_id,
+                "chapter_id": chapter_id,
+                "error": str(exc),
+                "retry_count": self.request.retries,
+            },
+        )
+        raise self.retry(exc=exc, countdown=min(2 ** self.request.retries * 5, 120))
+    except Exception as exc:
+        raise
 
 
 def _require_task(task_id: str) -> TaskState:
