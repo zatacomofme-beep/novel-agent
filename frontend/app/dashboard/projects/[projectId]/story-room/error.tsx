@@ -1,6 +1,20 @@
 "use client";
 
 import { useEffect } from "react";
+import { useParams } from "next/navigation";
+import { ApiError } from "@/lib/api";
+import { classifyError, type AppErrorCategory } from "@/lib/errors";
+
+const CATEGORY_TITLES: Record<AppErrorCategory, string> = {
+  network: "网络连接失败",
+  auth: "登录已过期",
+  permission: "没有访问权限",
+  not_found: "资源不存在",
+  conflict: "操作冲突",
+  validation: "输入有误",
+  server: "服务暂时不可用",
+  unknown: "抱歉，发生了意外错误",
+};
 
 export default function StoryRoomError({
   error,
@@ -9,9 +23,25 @@ export default function StoryRoomError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const params = useParams<{ projectId?: string }>();
+  const classified = classifyError(error);
+  const traceId = error instanceof ApiError ? error.traceId : "";
+
   useEffect(() => {
-    console.error("StoryRoom error:", error);
-  }, [error]);
+    console.error("[StoryRoom Error]", {
+      message: error.message,
+      category: classified.category,
+      digest: error.digest ?? null,
+      projectId: params.projectId ?? null,
+      stack: error.stack ?? null,
+    });
+  }, [error, classified.category, params.projectId]);
+
+  const handleReLogin = () => {
+    window.location.href = "/api/v1/auth/login";
+  };
+
+  const title = CATEGORY_TITLES[classified.category] ?? CATEGORY_TITLES.unknown;
 
   return (
     <div className="flex min-h-[60vh] items-center justify-center px-6">
@@ -31,20 +61,37 @@ export default function StoryRoomError({
             />
           </svg>
         </div>
-        <h1 className="mt-6 text-xl font-semibold text-red-800">
-          抱歉，发生了意外错误
-        </h1>
-        <p className="mt-2 text-sm text-red-600">{error.message}</p>
+        <h1 className="mt-6 text-xl font-semibold text-red-800">{title}</h1>
+        <p className="mt-2 text-sm text-red-600">{classified.userMessage}</p>
+        {error.message && classified.category !== "network" && (
+          <p className="mt-2 rounded-xl bg-red-100/60 p-3 text-left font-mono text-xs text-red-500 break-all">
+            {error.message}
+          </p>
+        )}
         {error.digest && (
           <p className="mt-1 text-xs text-red-400">错误码: {error.digest}</p>
         )}
+        {traceId && (
+          <p className="mt-1 text-xs text-red-400">
+            追踪ID: <span className="font-mono select-all">{traceId}</span>
+          </p>
+        )}
         <div className="mt-6 flex flex-col gap-3">
-          <button
-            onClick={reset}
-            className="rounded-2xl bg-red-600 px-6 py-3 text-sm font-medium text-white hover:bg-red-700"
-          >
-            重试
-          </button>
+          {classified.category === "auth" ? (
+            <button
+              onClick={handleReLogin}
+              className="rounded-2xl bg-red-600 px-6 py-3 text-sm font-medium text-white hover:bg-red-700"
+            >
+              重新登录
+            </button>
+          ) : (
+            <button
+              onClick={reset}
+              className="rounded-2xl bg-red-600 px-6 py-3 text-sm font-medium text-white hover:bg-red-700"
+            >
+              重试
+            </button>
+          )}
           <button
             onClick={() => (window.location.href = "/dashboard")}
             className="rounded-2xl border border-red-300 bg-white px-6 py-3 text-sm font-medium text-red-700 hover:bg-red-100"

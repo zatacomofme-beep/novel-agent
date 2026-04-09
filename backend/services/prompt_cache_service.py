@@ -19,7 +19,8 @@ class PromptCacheService:
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._enabled = getattr(settings, "cache_service_enabled", True)
+        self._enabled = settings.cache_service_enabled
+        self._redis_url = settings.redis_url
         self._redis_client: RedisClientProtocol | None = None
         self._memory_cache: dict[str, tuple[str, float]] = {}
         self._memory_access_order: list[str] = []
@@ -30,11 +31,8 @@ class PromptCacheService:
         if self._redis_client is not None:
             return self._redis_client
         try:
-            settings = get_settings()
-            self._redis_client = redis.Redis(
-                host=getattr(settings, "redis_host", "localhost"),
-                port=getattr(settings, "redis_port", 6379),
-                db=getattr(settings, "redis_db", 0),
+            self._redis_client = redis.from_url(
+                self._redis_url,
                 decode_responses=True,
             )
             await self._redis_client.ping()

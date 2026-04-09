@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
@@ -41,9 +45,9 @@ class CharacterLinguisticProfile(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=_utcnow, onupdate=_utcnow
     )
 
     character: Mapped[Character] = relationship("Character", back_populates="linguistic_profile")  # noqa: F821,E501
@@ -69,4 +73,4 @@ class LinguisticConsistencyLog(Base):
     issues: Mapped[list[dict]] = mapped_column(JSONB, default=list)
     detected_deviations: Mapped[list[dict]] = mapped_column(JSONB, default=list)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

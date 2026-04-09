@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from uuid import UUID
 
 from agents.model_gateway import GenerationRequest, model_gateway
@@ -10,6 +11,7 @@ from services.chapter_service import update_chapter
 from services.project_service import PROJECT_PERMISSION_EDIT, get_owned_chapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
+logger = logging.getLogger(__name__)
 
 WRITING_INTENT_SYSTEM_PROMPT = """你是一位资深的小说写作策划师，代号Architect-Writing。
 
@@ -112,9 +114,7 @@ async def generate_writing_intent(
         await _save_writing_intent(session, chapter, result.content)
         return result.content
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Writing intent generation failed for chapter {chapter_id}: {e}")
+        logger.error("Writing intent generation failed for chapter %s: %s", chapter_id, e)
         return fallback()
 
 

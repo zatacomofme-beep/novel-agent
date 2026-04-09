@@ -8,9 +8,9 @@ from core.config import get_settings
 class LangSmithTracer:
     def __init__(self) -> None:
         settings = get_settings()
-        self._enabled = getattr(settings, "langsmith_enabled", False)
-        self._api_key = getattr(settings, "langsmith_api_key", None)
-        self._project = getattr(settings, "langsmith_project", "novel-agent")
+        self._enabled = settings.langsmith_enabled
+        self._api_key = settings.langsmith_api_key
+        self._project = settings.langsmith_project
         self._client: Any | None = None
 
     def _get_client(self) -> Any | None:

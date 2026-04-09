@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import redis.asyncio as redis
 
 from core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,7 +72,8 @@ class RedisCacheService:
                 return json.loads(value)
             except (json.JSONDecodeError, TypeError):
                 return value
-        except Exception:
+        except Exception as exc:
+            logger.debug("Cache GET failed for key %s: %s", key, exc)
             return None
 
     async def set(
@@ -86,15 +90,15 @@ class RedisCacheService:
                 await client.setex(key, ttl, value)
             else:
                 await client.set(key, value)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Cache SET failed for key %s: %s", key, exc)
 
     async def delete(self, key: str) -> None:
         try:
             client = await self.get_client()
             await client.delete(key)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Cache DELETE failed for key %s: %s", key, exc)
 
     async def delete_pattern(self, pattern: str) -> None:
         try:
@@ -106,8 +110,8 @@ class RedisCacheService:
                     await client.delete(*keys)
                 if cursor == 0:
                     break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Cache DELETE_PATTERN failed for pattern %s: %s", pattern, exc)
 
     def build_key(self, cache_type: str, *parts: str) -> str:
         config = CACHE_CONFIGS.get(cache_type, CacheConfig())

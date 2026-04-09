@@ -112,7 +112,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       const id = Math.random().toString(36).slice(2, 11);
       const duration = toast.duration ?? 4000;
 
-      setToasts((prev) => [...prev.slice(-2), { ...toast, id }]);
+      setToasts((prev) => [...prev.slice(-4), { ...toast, id }]);
 
       if (duration > 0) {
         const timer = setTimeout(() => {

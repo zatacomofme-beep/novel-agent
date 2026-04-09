@@ -61,7 +61,8 @@ export function loadAuthSession(): TokenResponse | null {
       return null;
     }
     return session;
-  } catch {
+  } catch (err) {
+    console.warn("[auth] Failed to parse stored session:", err);
     clearAuthSession().catch(() => {});
     return null;
   }
@@ -78,8 +79,8 @@ export async function clearAuthSession(): Promise<void> {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
-    } catch {
-      // 即使后端调用失败，也要清除本地存储
+    } catch (err) {
+      console.warn("[auth] Logout request failed:", err);
     }
   }
   window.localStorage.removeItem(AUTH_STORAGE_KEY);

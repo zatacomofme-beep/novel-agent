@@ -28,7 +28,7 @@ def get_story_engine_role_model(
     attr_name = ROLE_MODEL_ATTR_MAP.get(role)
     if attr_name is None:
         return settings.default_model
-    return str(getattr(settings, attr_name))
+    return str(getattr(settings, attr_name, settings.default_model))
 
 
 def get_story_engine_role_reasoning(
@@ -462,6 +462,7 @@ async def generate_story_stream_paragraph(
     social_topology: Optional[dict[str, Any]] = None,
     causal_context: Optional[dict[str, Any]] = None,
     open_threads: Optional[list[dict[str, Any]]] = None,
+    constraints_text: Optional[str] = None,
 ) -> GenerationResult:
     """为单段正文生成构造真实模型请求；在写作模型失败时按候选链自动容灾。"""
 
@@ -506,6 +507,9 @@ async def generate_story_stream_paragraph(
         "4. 文风贴近给定样文，但不要模仿出戏。"
         "5. 章末段要自然留钩子。"
     )
+
+    if constraints_text and constraints_text.strip():
+        system_prompt = system_prompt + "\n\n" + constraints_text.strip()
 
     prompt = (
         f"章节：{chapter_label}\n"

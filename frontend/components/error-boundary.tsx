@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Component, useEffect, useState } from "react";
+import { ApiError } from "@/lib/api";
 
 interface ErrorDisplayProps {
   error: Error | null;
@@ -34,6 +35,11 @@ export function ErrorDisplay({ error, reset }: ErrorDisplayProps) {
           <div>
             <h3 className="text-sm font-medium text-red-800">出错了</h3>
             <p className="mt-1 text-sm text-red-600">{error.message}</p>
+            {error instanceof ApiError && error.traceId && (
+              <p className="mt-1 text-xs text-red-400">
+                追踪ID: <span className="font-mono select-all">{error.traceId}</span>
+              </p>
+            )}
           </div>
         </div>
         {reset && (
@@ -102,6 +108,11 @@ export function GlobalError({
             {error.digest && (
               <p className="mt-1 text-xs text-red-400">错误码: {error.digest}</p>
             )}
+            {error instanceof ApiError && error.traceId && (
+              <p className="mt-1 text-xs text-red-400">
+                追踪ID: <span className="font-mono select-all">{error.traceId}</span>
+              </p>
+            )}
             <div className="mt-6 flex flex-col gap-3">
               <button
                 onClick={reset}
@@ -134,10 +145,49 @@ export function GlobalError({
   );
 }
 
-export function PageErrorBoundary({
-  children,
-}: {
+interface PageErrorBoundaryProps {
   children: React.ReactNode;
-}) {
-  return <>{children}</>;
+  fallback?: React.ReactNode;
+}
+
+interface PageErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+export class PageErrorBoundary extends Component<
+  PageErrorBoundaryProps,
+  PageErrorBoundaryState
+> {
+  constructor(props: PageErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): PageErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("[PageErrorBoundary]", error, errorInfo);
+  }
+
+  handleReset = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
+  render() {
+    if (this.state.hasError && this.state.error) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+      return (
+        <ErrorDisplay
+          error={this.state.error}
+          reset={this.handleReset}
+        />
+      );
+    }
+    return this.props.children;
+  }
 }

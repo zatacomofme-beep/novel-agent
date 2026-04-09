@@ -546,58 +546,58 @@ function resolveStoryBibleItemKey(item: Record<string, unknown>): string {
   return "";
 }
 
-function renderCard(tab: KnowledgeTabKey, item: any) {
+function renderCard(tab: KnowledgeTabKey, item: Record<string, unknown>) {
   if (tab === "characters") {
-    return renderCharacterCard(item);
+    return renderCharacterCard(item as unknown as StoryCharacter);
   }
   if (tab === "foreshadows") {
-    return renderForeshadowCard(item);
+    return renderForeshadowCard(item as unknown as StoryForeshadow);
   }
   if (tab === "items") {
-    return renderItemCard(item);
+    return renderItemCard(item as unknown as StoryItem);
   }
   if (tab === "locations") {
-    return renderLocationCard(item);
+    return renderLocationCard(item as unknown as LocationItem);
   }
   if (tab === "factions") {
-    return renderFactionCard(item);
+    return renderFactionCard(item as unknown as StoryBibleFactionEntry);
   }
   if (tab === "plot_threads") {
-    return renderPlotThreadCard(item);
+    return renderPlotThreadCard(item as unknown as PlotThreadItem);
   }
   if (tab === "world_rules") {
-    return renderWorldRuleCard(item);
+    return renderWorldRuleCard(item as unknown as StoryWorldRule);
   }
-  return renderTimelineCard(item);
+  return renderTimelineCard(item as unknown as StoryTimelineMapEvent);
 }
 
 function resolveList(
   workspace: StoryEngineWorkspace | null,
   storyBible: StoryBible | null,
   activeTab: KnowledgeTabKey,
-): any[] {
+): Record<string, unknown>[] {
   if (activeTab === "characters") {
-    return workspace?.characters ?? [];
+    return (workspace?.characters ?? []) as unknown as Record<string, unknown>[];
   }
   if (activeTab === "foreshadows") {
-    return workspace?.foreshadows ?? [];
+    return (workspace?.foreshadows ?? []) as unknown as Record<string, unknown>[];
   }
   if (activeTab === "items") {
-    return workspace?.items ?? [];
+    return (workspace?.items ?? []) as unknown as Record<string, unknown>[];
   }
   if (activeTab === "locations") {
-    return storyBible?.locations ?? [];
+    return (storyBible?.locations ?? []) as unknown as Record<string, unknown>[];
   }
   if (activeTab === "factions") {
-    return storyBible?.factions ?? [];
+    return (storyBible?.factions ?? []) as unknown as Record<string, unknown>[];
   }
   if (activeTab === "plot_threads") {
-    return storyBible?.plot_threads ?? [];
+    return (storyBible?.plot_threads ?? []) as unknown as Record<string, unknown>[];
   }
   if (activeTab === "world_rules") {
-    return workspace?.world_rules ?? [];
+    return (workspace?.world_rules ?? []) as unknown as Record<string, unknown>[];
   }
-  return workspace?.timeline_events ?? [];
+  return (workspace?.timeline_events ?? []) as unknown as Record<string, unknown>[];
 }
 
 export function KnowledgeBaseBoard({
@@ -720,13 +720,14 @@ export function KnowledgeBaseBoard({
         <div className="mt-6 grid gap-4">
           {items.length > 0 ? (
             items.map((item) => {
-              const itemId =
+              const itemId = String(
                 item.character_id ??
                 item.foreshadow_id ??
                 item.item_id ??
                 item.rule_id ??
                 item.event_id ??
-                resolveStoryBibleItemKey(item);
+                resolveStoryBibleItemKey(item)
+              );
               return (
                 <article
                   key={itemId}

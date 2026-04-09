@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Optional
 from uuid import UUID
@@ -15,6 +16,8 @@ from schemas.world_building import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
+logger = logging.getLogger(__name__)
 
 STEPS = [
     {
@@ -392,8 +395,6 @@ class WorldBuildingService:
             await session.commit()
             return True
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.exception(f"Blueprint generation failed for project {project.id}: {e}")
             await session.rollback()
             wb_session.status = "in_progress"
@@ -469,8 +470,6 @@ class WorldBuildingService:
             result = await model_gateway.generate_text(request, fallback=fallback)
             return self._parse_model_response(result.content)
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.exception(f"World building step {step} failed: {e}")
             return {
                 "summary": "处理过程中出现错误，请稍后再试。",
@@ -652,6 +651,7 @@ class WorldBuildingService:
             async for chunk in model_gateway.stream_text(request):
                 yield chunk
         except Exception as e:
+            logger.warning("World building stream failed: %s", e)
             yield {"error": str(e)}
 
     async def _stream_advance_to_next_step(
@@ -742,9 +742,7 @@ class WorldBuildingService:
                 "needs_follow_up": needs_follow_up,
             }
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Model response parsing failed: {e}")
+            logger.warning("Model response parsing failed: %s", e)
             return {
                 "summary": content[:500] if content else "解析失败",
                 "expansion": "",

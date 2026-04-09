@@ -2,6 +2,8 @@ import logging
 import re
 from typing import Any
 
+from core.trace import get_trace_id
+
 SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"password\s*[:=]\s*[^\s'\"]+", re.IGNORECASE), "password=***"),
     (re.compile(r"passwd\s*[:=]\s*[^\s'\"]+", re.IGNORECASE), "passwd=***"),
@@ -47,13 +49,14 @@ def _redict_dict(d: dict[str, Any], depth: int = 0) -> dict[str, Any]:
 
 class RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        record.trace_id = get_trace_id()
         msg = super().format(record)
         return _redact_value(msg)
 
 
 LOG_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s "
-    "[%(filename)s:%(lineno)d] %(message)s"
+    "[%(trace_id)s] [%(filename)s:%(lineno)d] %(message)s"
 )
 
 

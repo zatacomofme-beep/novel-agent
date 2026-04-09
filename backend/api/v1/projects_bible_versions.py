@@ -118,7 +118,6 @@ async def story_bible_rollback(
         request,
         current_user.id,
     )
-    await session.commit()
     return StoryBibleVersionRead.model_validate(version)
 
 
@@ -184,7 +183,6 @@ async def story_bible_pending_change_create(
         request.branch_id,
         request,
     )
-    await session.commit()
     return StoryBiblePendingChangeRead.model_validate(pending)
 
 
@@ -212,7 +210,6 @@ async def story_bible_pending_change_approve(
         request.comment,
         expected_project_id=project_id,
     )
-    await session.commit()
     return StoryBiblePendingChangeRead.model_validate(pending)
 
 
@@ -246,7 +243,6 @@ async def story_bible_pending_change_reject(
         request.comment,
         expected_project_id=project_id,
     )
-    await session.commit()
     return StoryBiblePendingChangeRead.model_validate(pending)
 
 

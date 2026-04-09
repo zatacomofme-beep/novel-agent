@@ -171,6 +171,5 @@ async def logout(
         )
         .values(revoked_at=datetime.now(timezone.utc))
     )
-    await session.commit()
     return {"message": "Logged out successfully"}
 

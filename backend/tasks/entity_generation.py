@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ValidationError
 
 from db.session import AsyncSessionLocal
+from core.trace import get_trace_id, set_trace_id
 from schemas.project import (
     CharacterGenerationRequest,
     FactionGenerationRequest,
@@ -404,6 +405,7 @@ async def dispatch_entity_generation_task(
                 "project_id": project_id,
                 "user_id": user_id,
                 "generation_type": generation_type,
+                "trace_id": get_trace_id(),
             },
             task_id=task_id,
         )
@@ -465,7 +467,10 @@ def process_entity_generation_task_celery(
     project_id: str,
     user_id: str,
     generation_type: str,
+    trace_id: str = "",
 ) -> dict[str, Any]:
+    if trace_id:
+        set_trace_id(trace_id)
     state = asyncio.run(
         process_entity_generation_task(
             task_id=task_id,

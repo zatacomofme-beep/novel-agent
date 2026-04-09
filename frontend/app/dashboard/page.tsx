@@ -15,6 +15,7 @@ import {
 } from "@/app/dashboard/_components/quality-trend";
 import { ProcessPlaybackPanel, type ProcessPlaybackItem } from "@/components/process-playback-panel";
 import { PlatformGuide } from "@/components/guided-tour";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { useTaskEventStream } from "@/hooks/use-task-event-stream";
 import { apiFetchWithAuth, downloadWithAuth } from "@/lib/api";
 import { clearAuthSession, loadAuthSession } from "@/lib/auth";
@@ -407,6 +408,7 @@ function DashboardPageShell() {
   const [creating, setCreating] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{ id: string; title: string } | null>(null);
 
   useEffect(() => {
     const session = loadAuthSession();
@@ -515,12 +517,16 @@ function DashboardPageShell() {
   }
 
   async function handleDeleteProject(projectId: string, projectTitle: string) {
-    const confirmed = window.confirm(
-      `确认删除《${projectTitle}》吗？这本书的大纲、正文、设定和导出记录都会一起删除，不能恢复。`,
-    );
-    if (!confirmed) {
+    setDeleteConfirmTarget({ id: projectId, title: projectTitle });
+  }
+
+  async function confirmDeleteProject() {
+    const target = deleteConfirmTarget;
+    if (!target) {
       return;
     }
+    setDeleteConfirmTarget(null);
+    const projectId = target.id;
 
     setDeletingProjectId(projectId);
     setError(null);
@@ -547,7 +553,7 @@ function DashboardPageShell() {
       });
       router.refresh();
       await fetchOverview();
-      setSuccess(`《${projectTitle}》已经删除。`);
+      setSuccess(`《${target.title}》已经删除。`);
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -1355,6 +1361,16 @@ function DashboardPageShell() {
           </div>
         </details>
       </div>
+
+      <ConfirmDialog
+        open={deleteConfirmTarget !== null}
+        title={`确认删除《${deleteConfirmTarget?.title ?? ""}》？`}
+        description="这本书的大纲、正文、设定和导出记录都会一起删除，不能恢复。"
+        confirmLabel="确认删除"
+        variant="danger"
+        onConfirm={() => void confirmDeleteProject()}
+        onCancel={() => setDeleteConfirmTarget(null)}
+      />
     </main>
   );
 }

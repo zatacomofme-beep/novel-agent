@@ -32,11 +32,9 @@ class Settings(BaseSettings):
         alias="QDRANT_REQUEST_TIMEOUT_SECONDS",
     )
     neo4j_url: str = Field(
-        default="bolt://localhost:7687",
         alias="NEO4J_URL",
     )
     neo4j_auth: tuple[str, str] = Field(
-        default=("neo4j", "password"),
         alias="NEO4J_AUTH",
     )
     vector_embedding_dimensions: int = Field(
@@ -161,6 +159,23 @@ class Settings(BaseSettings):
         default=5,
         alias="STREAM_ENRICHMENT_MAX_HOPS",
         description="Max hops for causal path queries in stream enrichment.",
+    )
+
+    langsmith_enabled: bool = Field(
+        default=False,
+        alias="LANGSMITH_ENABLED",
+    )
+    langsmith_api_key: Optional[str] = Field(
+        default=None,
+        alias="LANGSMITH_API_KEY",
+    )
+    langsmith_project: str = Field(
+        default="novel-agent",
+        alias="LANGSMITH_PROJECT",
+    )
+    cache_service_enabled: bool = Field(
+        default=True,
+        alias="CACHE_SERVICE_ENABLED",
     )
 
     model_config = SettingsConfigDict(

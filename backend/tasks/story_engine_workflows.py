@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from db.session import AsyncSessionLocal
+from core.trace import get_trace_id, set_trace_id
 from schemas.story_engine import (
     FinalOptimizeRequest,
     OutlineStressTestRequest,
@@ -437,7 +438,10 @@ def process_outline_stress_task_celery(
     task_id: str,
     project_id: str,
     user_id: str,
+    trace_id: str = "",
 ) -> dict[str, Any]:
+    if trace_id:
+        set_trace_id(trace_id)
     state = asyncio.run(
         process_outline_stress_task(
             task_id=task_id,
@@ -453,7 +457,10 @@ def process_bulk_import_task_celery(
     task_id: str,
     project_id: str,
     user_id: str,
+    trace_id: str = "",
 ) -> dict[str, Any]:
+    if trace_id:
+        set_trace_id(trace_id)
     state = asyncio.run(
         process_bulk_import_task(
             task_id=task_id,
@@ -469,7 +476,10 @@ def process_final_optimize_task_celery(
     task_id: str,
     project_id: str,
     user_id: str,
+    trace_id: str = "",
 ) -> dict[str, Any]:
+    if trace_id:
+        set_trace_id(trace_id)
     state = asyncio.run(
         process_final_optimize_task(
             task_id=task_id,
@@ -543,6 +553,7 @@ async def _dispatch_story_engine_task(
                 "task_id": task_id,
                 "project_id": project_id,
                 "user_id": user_id,
+                "trace_id": get_trace_id(),
             },
             task_id=task_id,
         )

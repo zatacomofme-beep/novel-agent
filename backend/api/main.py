@@ -9,6 +9,7 @@ from api.ws import router as ws_router
 from api.v1.router import api_router
 from core.errors import AppError, ErrorDetail, ErrorResponse
 from core.logging import configure_logging, get_logger
+from core.trace import get_trace_id, new_trace_id, set_trace_id
 from realtime.task_events import task_event_broker
 
 
@@ -42,12 +43,9 @@ app = FastAPI(
 )
 
 _cors_origins: list[str] = []
-_raw_origins = getattr(settings, "cors_allowed_origins", None)
+_raw_origins = settings().cors_allowed_origins
 if _raw_origins:
-    if isinstance(_raw_origins, str):
-        _cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-    elif isinstance(_raw_origins, list):
-        _cors_origins = _raw_origins
+    _cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 if not _cors_origins and settings().app_env == "development":
     logger.warning(
@@ -78,6 +76,15 @@ app.add_middleware(
         "Origin",
     ],
 )
+
+
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    tid = request.headers.get("X-Trace-Id") or new_trace_id()
+    set_trace_id(tid)
+    response = await call_next(request)
+    response.headers["X-Trace-Id"] = get_trace_id()
+    return response
 
 
 @app.middleware("http")
@@ -120,7 +127,10 @@ async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
         error=ErrorDetail(
             code=exc.code,
             message=exc.message,
-            metadata=exc.metadata,
+            metadata={
+                **(exc.metadata or {}),
+                "trace_id": get_trace_id(),
+            },
         )
     )
     return JSONResponse(

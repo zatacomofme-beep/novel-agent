@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from schemas.story_engine import (
 )
 from services.chapter_service import get_owned_chapter
 from services.checkpoint_service import CheckpointService
+from services.constraint_extractor import extract_constraints
 from services.foreshadowing_lifecycle_service import foreshadowing_lifecycle_service
 from services.neo4j_service import neo4j_service
 from services.social_topology_service import social_topology_service
@@ -73,6 +75,8 @@ except ImportError:  # pragma: no cover - 开发环境缺依赖时走本地串�
     START = "__start__"
     StateGraph = None
     LANGGRAPH_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 
 _STORY_ENGINE_READ_SCHEMAS = {
@@ -210,6 +214,7 @@ async def run_outline_stress_test(
             graph = _build_outline_stress_graph()
             result = await graph.ainvoke(initial_state)
         else:
+            logger.warning("LangGraph unavailable, running outline stress test in serial fallback mode")
             result = await _run_outline_stress_fallback(initial_state)
         persisted = await _persist_outline_stress_result(
             session=session,
@@ -306,6 +311,7 @@ async def run_outline_stress_test(
             )
         return response
     except Exception as exc:
+        logger.exception("Outline stress test failed: %s", exc)
         await _persist_workflow_task_failure(
             session,
             task_state=task_state,
@@ -398,6 +404,7 @@ async def run_realtime_guard(
             graph = _build_realtime_guard_graph()
             result = await graph.ainvoke(initial_state)
         else:
+            logger.warning("LangGraph unavailable, running realtime guard in serial fallback mode")
             result = await _run_realtime_guard_fallback(initial_state)
         workflow_timeline = _build_realtime_guard_workflow_timeline(
             workflow_id=workflow_id,
@@ -445,6 +452,7 @@ async def run_realtime_guard(
                 )
         return response
     except Exception as exc:
+        logger.exception("Realtime guard failed: %s", exc)
         if persist_task:
             await _persist_workflow_task_failure(
                 session,
@@ -2535,6 +2543,15 @@ async def run_chapter_stream_generate(
         project_id=project_id,
         chapter_number=chapter_number,
     )
+    constraint_block = await extract_constraints(
+        session,
+        project_id=project_id,
+        user_id=user_id,
+        chapter_context=existing_text[-2000:] if existing_text else "",
+        chapter_number=chapter_number,
+        workspace=workspace,
+    )
+    constraints_text = constraint_block.format_for_prompt()
     stream_context = _build_stream_context(
         workspace=workspace,
         recent_chapters=recent_chapters,
@@ -2783,6 +2800,7 @@ async def run_chapter_stream_generate(
             social_topology=social_topology,
             causal_context=causal_context,
             open_threads=open_threads,
+            constraints_text=constraints_text,
         )
         _record_stream_generation_result(rewritten_paragraph_index, rewritten_result)
         running_paragraphs[rewritten_paragraph_index - 1] = rewritten_result.content.strip()
@@ -3102,6 +3120,7 @@ async def run_chapter_stream_generate(
                 social_topology=social_topology,
                 causal_context=causal_context,
                 open_threads=open_threads,
+                constraints_text=constraints_text,
             )
             paragraph_metadata = _record_stream_generation_result(paragraph_index, paragraph_result)
             paragraph = paragraph_result.content.strip()
@@ -3272,6 +3291,7 @@ async def run_chapter_stream_generate(
             "workflow_event": done_workflow_event,
         }
     except Exception as exc:
+        logger.exception("Chapter stream generate failed: %s", exc)
         await _persist_workflow_task_failure(
             session,
             task_state=task_state,
@@ -3484,6 +3504,7 @@ async def run_final_optimize(
             )
         return response
     except Exception as exc:
+        logger.exception("Final optimize failed: %s", exc)
         await _persist_workflow_task_failure(
             session,
             task_state=task_state,
@@ -3523,6 +3544,7 @@ async def _run_final_verify_once(state: FinalVerifyState) -> FinalVerifyState:
     if LANGGRAPH_AVAILABLE:
         graph = _build_final_verify_graph()
         return await graph.ainvoke(state)
+    logger.warning("LangGraph unavailable, running final verify in serial fallback mode")
     return await _run_final_verify_fallback(state)
 
 
@@ -5195,7 +5217,8 @@ async def _sync_final_optimize_side_effects(
                 importance_score=0.6,
             )
             l2_synced = True
-        except Exception:
+        except Exception as exc:
+            logger.warning("L2 episodic memory sync failed, continuing: %s", exc)
             l2_synced = False
 
     try:
@@ -5207,7 +5230,8 @@ async def _sync_final_optimize_side_effects(
             event_type="chapter_event",
         )
         neo4j_synced = True
-    except Exception:
+    except Exception as exc:
+        logger.warning("Neo4j event node sync failed, continuing: %s", exc)
         neo4j_synced = False
 
     return {
@@ -5834,7 +5858,8 @@ async def _load_stream_enrichment(
             }
             for item in open_threads
         ]
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load open threads, continuing: %s", exc)
         open_threads_payload = []
 
     try:
@@ -5848,7 +5873,8 @@ async def _load_stream_enrichment(
             "social_dynamics": social_topology.social_dynamics or {},
             "cluster_data": social_topology.cluster_data or {},
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to build social topology, continuing: %s", exc)
         social_topology_payload = {}
 
     try:
@@ -5864,7 +5890,8 @@ async def _load_stream_enrichment(
         influence = await neo4j_service.compute_character_influence(project_id)
         if influence:
             causal_context_payload["character_influence"] = influence
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load causal context, continuing: %s", exc)
         causal_context_payload = {}
 
     return open_threads_payload, social_topology_payload, causal_context_payload

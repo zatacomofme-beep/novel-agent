@@ -28,6 +28,21 @@ import { WorldBuildingPanel } from "@/components/story-engine/world-building-pan
 import { SmartRecommendPanel } from "@/components/smart-recommend-panel";
 import { resolveStoryBibleSectionFromPlugin } from "@/lib/story-bible-deeplink";
 import { PhaseProgress, HeaderInfo } from "./components";
+import {
+  WorldBuildingPhase,
+  OutlinePhase,
+  FinalPhase,
+  KnowledgePhase,
+} from "./phases";
+import type {
+  PausedStreamState,
+  StreamContinueOptions,
+  StoryRoomStageKey,
+  DraftStudioRecoverableDraft,
+  StoryRoomWorkflowRun,
+  StoryBibleKnowledgeTab,
+  ProjectRouteParams,
+} from "./types";
 import { apiFetchWithAuth, apiStreamWithAuth, getActiveWorldBuildingSession, type WorldBuildingSessionData } from "@/lib/api";
 import { buildUserFriendlyError } from "@/lib/errors";
 import { useTaskEventStream } from "@/hooks/use-task-event-stream";
@@ -96,45 +111,6 @@ import type {
   UserPreferenceProfile,
 } from "@/types/api";
 
-type ProjectRouteParams = {
-  projectId: string;
-};
-
-type PausedStreamState = {
-  pausedAtParagraph: number;
-  nextParagraphIndex: number;
-  paragraphTotal: number;
-  currentBeat: string | null;
-  remainingBeats: string[];
-};
-
-type StreamContinueOptions = {
-  resumeFromParagraph?: number | null;
-  repairInstruction?: string | null;
-  rewriteLatestParagraph?: boolean;
-};
-
-type StoryRoomStageKey = "outline" | "draft" | "final" | "knowledge" | "world-building";
-
-type DraftStudioRecoverableDraft = StoryRoomLocalDraftSummary & {
-  scopeLabel: string;
-  isCurrent: boolean;
-};
-
-type StoryRoomWorkflowRun = {
-  id: string;
-  workflowType: string;
-  stage: StoryRoomStageKey;
-  label: string;
-  title: string;
-  summary: string;
-  status: ProcessPlaybackStatus;
-  progress: number | null;
-  updatedAt: string;
-  chapterNumber: number | null;
-  steps: ProcessPlaybackStep[];
-};
-
 function parseStoryRoomStage(value: string | null): StoryRoomStageKey | null {
   if (
     value === "outline" ||
@@ -186,11 +162,6 @@ const ENTITY_GENERATION_SUCCESS_LABELS: Record<KnowledgeSuggestionKind, string> 
 };
 
 const DEFAULT_IMPORT_REPLACE_SECTIONS = Object.keys(IMPORT_SECTION_LABELS);
-
-type StoryBibleKnowledgeTab = Extract<
-  KnowledgeTabKey,
-  "locations" | "factions" | "plot_threads"
->;
 
 function parseListField(value: string): string[] {
   return value
@@ -1635,6 +1606,9 @@ export default function StoryRoomPage() {
 
   const openStage = useCallback((stage: StoryRoomStageKey, options?: { scroll?: boolean }) => {
     setActiveStage(stage);
+    const url = new URL(window.location.href);
+    url.searchParams.set("stage", stage);
+    window.history.replaceState(null, "", url.toString());
     if (options?.scroll === false) {
       return;
     }
@@ -4926,84 +4900,60 @@ export default function StoryRoomPage() {
           emptyDescription="开始起稿、检查正文或补设定后，这里会自动记下最近几步。"
         />
 
-        {activeStageValue === "world-building" ? (
-          <WorldBuildingPanel
-            projectId={projectId ?? ""}
-            initialIdea={idea || undefined}
-            onComplete={async () => {
-              await loadWorldBuildingSessionState();
-              setActiveStage("outline");
-              setPendingStageScroll("outline");
-              if (bootstrapState?.blueprint === null) {
-                setGeneratingBlueprint(true);
-                const maxAttempts = 20;
-                for (let i = 0; i < maxAttempts; i++) {
-                  await new Promise(resolve => setTimeout(resolve, 2000));
-                  const updated = await apiFetchWithAuth<ProjectBootstrapState>(
-                    `/api/v1/projects/${projectId}/bootstrap`,
-                  ).catch(() => null);
-                  if (updated?.blueprint !== null) {
-                    setBootstrapState(updated);
-                    break;
-                  }
+        <WorldBuildingPhase
+          projectId={projectId ?? ""}
+          stage={activeStageValue}
+          initialIdea={idea || undefined}
+          onComplete={async () => {
+            await loadWorldBuildingSessionState();
+            setActiveStage("outline");
+            setPendingStageScroll("outline");
+            if (bootstrapState?.blueprint === null) {
+              setGeneratingBlueprint(true);
+              const maxAttempts = 20;
+              for (let i = 0; i < maxAttempts; i++) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                const updated = await apiFetchWithAuth<ProjectBootstrapState>(
+                  `/api/v1/projects/${projectId}/bootstrap`,
+                ).catch(() => null);
+                if (updated?.blueprint !== null) {
+                  setBootstrapState(updated);
+                  break;
                 }
-                setGeneratingBlueprint(false);
               }
-            }}
-          />
-        ) : null}
+              setGeneratingBlueprint(false);
+            }
+          }}
+        />
 
-        {activeStageValue === "outline" ? (
-          <section
-            id="story-stage-outline"
-            className="scroll-mt-6 space-y-4"
-            data-testid="story-room-stage-outline"
-          >
-            <div className="flex items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-5 py-4 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <div>
-                <p className="text-xs uppercase tracking-[0.18em] text-copper">第一步</p>
-                <h2 className="mt-1 text-xl font-semibold">生成三级大纲</h2>
-              </div>
-              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
-                输入想法 / 上传大纲
-              </span>
-            </div>
-
-            {generatingBlueprint ? (
-              <div className="flex items-center justify-center gap-3 rounded-[24px] border border-copper/20 bg-[#fff7ef] p-8">
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-copper/30 border-t-copper" />
-                <p className="text-sm text-copper">正在基于你的世界观设定生成三级大纲...</p>
-              </div>
-            ) : null}
-
-            <OutlineWorkbench
-              outlines={workspace?.outlines ?? []}
-              result={stressResult}
-              idea={idea}
-              genre={genre}
-              tone={tone}
-              sourceMaterial={sourceMaterial}
-              sourceMaterialName={sourceMaterialName}
-              targetChapterWords={targetChapterWords}
-              targetTotalWords={targetTotalWords}
-              estimatedChapterCount={effectiveTargetChapterCount}
-              loading={stressLoading}
-              savingGoalProfile={savingStoryGoals}
-              updatingOutlineId={updatingOutlineId}
-              onIdeaChange={setIdea}
-              onGenreChange={setGenre}
-              onToneChange={setTone}
-              onSourceMaterialChange={handleSourceMaterialChange}
-              onClearSourceMaterial={handleClearSourceMaterial}
-              onTargetChapterWordsChange={setTargetChapterWords}
-              onTargetTotalWordsChange={setTargetTotalWords}
-              onSaveGoalProfile={() => void handleSaveStoryGoals()}
-              onRunStressTest={handleRunStressTest}
-              onUpdateOutline={(outlineId, payload) => void handleUpdateOutline(outlineId, payload)}
-              onOpenDraftStep={openDraftFromOutline}
-            />
-          </section>
-        ) : null}
+        <OutlinePhase
+          stage={activeStageValue}
+          outlines={workspace?.outlines ?? []}
+          stressResult={stressResult}
+          idea={idea}
+          genre={genre}
+          tone={tone}
+          sourceMaterial={sourceMaterial}
+          sourceMaterialName={sourceMaterialName}
+          targetChapterWords={targetChapterWords}
+          targetTotalWords={targetTotalWords}
+          estimatedChapterCount={effectiveTargetChapterCount}
+          stressLoading={stressLoading}
+          savingGoalProfile={savingStoryGoals}
+          updatingOutlineId={updatingOutlineId}
+          generatingBlueprint={generatingBlueprint}
+          onIdeaChange={setIdea}
+          onGenreChange={setGenre}
+          onToneChange={setTone}
+          onSourceMaterialChange={handleSourceMaterialChange}
+          onClearSourceMaterial={handleClearSourceMaterial}
+          onTargetChapterWordsChange={setTargetChapterWords}
+          onTargetTotalWordsChange={setTargetTotalWords}
+          onSaveGoalProfile={() => void handleSaveStoryGoals()}
+          onRunStressTest={handleRunStressTest}
+          onUpdateOutline={(outlineId, payload) => void handleUpdateOutline(outlineId, payload)}
+          onOpenDraftStep={openDraftFromOutline}
+        />
 
         {activeStageValue === "draft" ? (
           <section id="story-stage-draft" className="scroll-mt-6 space-y-4">
@@ -5181,157 +5131,91 @@ export default function StoryRoomPage() {
           </section>
         ) : null}
 
-        {activeStageValue === "final" ? (
-          <section
-            id="story-stage-final"
-            className="scroll-mt-6 space-y-4"
-            data-testid="story-room-stage-final"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-4 py-3 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
-                  第三步
-                </span>
-                <h2 className="text-lg font-semibold">终稿</h2>
-                <span
-                  className={`rounded-full border px-3 py-1 text-xs ${
-                    visibleFinalResult
-                      ? visibleFinalResult.ready_for_publish
-                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                        : "border-amber-200 bg-amber-50 text-amber-700"
-                      : "border-black/10 bg-[#fbfaf5] text-black/60"
-                  }`}
-                >
-                  {visibleFinalResult
-                    ? visibleFinalResult.ready_for_publish
-                      ? "可以交稿"
-                      : "还要确认"
-                    : "还没出结果"}
-                </span>
-              </div>
-              {!visibleFinalResult ? (
-                <button
-                  className="rounded-full bg-copper px-4 py-2 text-sm font-semibold text-white"
-                  onClick={() => openStage("draft")}
-                  type="button"
-                >
-                  回正文区继续
-                </button>
-              ) : null}
-            </div>
+        <FinalPhase
+          stage={activeStageValue}
+          visibleFinalResult={visibleFinalResult}
+          draftText={draftText}
+          activeChapter={activeChapter}
+          chapterTitle={chapterTitle}
+          resolvingSuggestionId={resolvingSuggestionId}
+          finalResult={finalResult}
+          nextChapterCandidate={nextChapterCandidate}
+          currentChapterCarryoverPreview={currentChapterCarryoverPreview}
+          exportingFormat={exportingFormat}
+          finalizingChapter={finalizingChapter}
+          finalizingAction={finalizingAction}
+          canApplyOptimizedDraft={canApplyOptimizedDraft}
+          onOpenDraftStep={() => openStage("draft")}
+          onApplyOptimizedDraft={() => handleApplyOptimizedDraft()}
+          onSaveAsFinal={() => void handleSaveAsFinal()}
+          onSaveAsFinalAndContinue={() =>
+            void handleSaveAsFinal({ continueToNextChapter: true })
+          }
+          onContinueToNextChapter={() => openNextChapterDraft(nextChapterCandidate)}
+          onExport={(format) => void handleExportChapter(format)}
+          onApplyKnowledgeSuggestion={(suggestion) =>
+            void handleResolveKnowledgeSuggestion(suggestion, "apply")
+          }
+          onIgnoreKnowledgeSuggestion={(suggestion) =>
+            void handleResolveKnowledgeSuggestion(suggestion, "ignore")
+          }
+        />
 
-            <FinalDiffViewer
-              result={visibleFinalResult}
-              hasDraftText={draftText.trim().length > 0}
-              hasSavedChapter={activeChapter !== null}
-              chapterTitle={chapterTitle}
-              resolvingSuggestionId={resolvingSuggestionId}
-              onOpenDraftStep={() => openStage("draft")}
-              onApplyKnowledgeSuggestion={(suggestion) =>
-                void handleResolveKnowledgeSuggestion(suggestion, "apply")
-              }
-              onIgnoreKnowledgeSuggestion={(suggestion) =>
-                void handleResolveKnowledgeSuggestion(suggestion, "ignore")
-              }
-            />
-
-            <FinalPublishPanel
-              activeChapter={activeChapter}
-              draftDirty={draftDirty}
-              finalResult={finalResult}
-              nextChapter={nextChapterCandidate}
-              carryoverPreview={currentChapterCarryoverPreview}
-              pendingKnowledgeCount={
-                visibleFinalResult?.kb_update_list.filter(
-                  (item) => (item.status ?? "pending") === "pending",
-                ).length ?? 0
-              }
-              exportingFormat={exportingFormat}
-              finalizingChapter={finalizingChapter}
-              finalizingAction={finalizingAction}
-              canApplyOptimizedDraft={canApplyOptimizedDraft}
-              onOpenDraftStep={() => openStage("draft")}
-              onApplyOptimizedDraft={() => handleApplyOptimizedDraft()}
-              onSaveAsFinal={() => void handleSaveAsFinal()}
-              onSaveAsFinalAndContinue={() =>
-                void handleSaveAsFinal({ continueToNextChapter: true })
-              }
-              onContinueToNextChapter={() => openNextChapterDraft(nextChapterCandidate)}
-              onExport={(format) => void handleExportChapter(format)}
-            />
-          </section>
-        ) : null}
-
-        {activeStageValue === "knowledge" ? (
-          <section id="story-stage-knowledge" className="scroll-mt-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-black/10 bg-white/82 px-4 py-3 shadow-[0_18px_40px_rgba(16,20,23,0.05)]">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
-                  第四步
-                </span>
-                <h2 className="text-lg font-semibold">设定</h2>
-              </div>
-              <span className="rounded-full border border-black/10 bg-[#fbfaf5] px-3 py-1 text-xs text-black/60">
-                待确认 {storyBiblePendingChanges.length} 条
-              </span>
-            </div>
-
-            <KnowledgeBaseBoard
-              workspace={workspace}
-              storyBible={storyBible}
-              activeTab={activeTab}
-              highlightedItemId={highlightedKnowledgeId}
-              editingId={editingId}
-              formState={formState}
-              saving={savingKnowledge}
-              importing={importingKnowledge}
-              searchQuery={searchQuery}
-              searchResults={searchResults}
-              importTemplates={importTemplates}
-              selectedTemplateKey={selectedTemplateKey}
-              importPayloadText={importPayloadText}
-              replaceSections={replaceSections}
-              generationLoadingKind={dispatchingEntityKind}
-              generationTask={entityTaskState}
-              generationTaskEvents={entityTaskEvents}
-              acceptingCandidateIndex={acceptingCandidateIndex}
-              storyBibleVersions={storyBibleVersions}
-              storyBiblePendingChanges={storyBiblePendingChanges}
-              loadingGovernance={loadingStoryBibleGovernance}
-              governanceActionKey={storyBibleGovernanceActionKey}
-              onTabChange={handleKnowledgeTabChange}
-              onFieldChange={(field, value) =>
-                setFormState((current) => ({
-                  ...current,
-                  [field]: value,
-                }))
-              }
-              onSearchQueryChange={setSearchQuery}
-              onImportTemplateChange={handleImportTemplateChange}
-              onImportPayloadChange={setImportPayloadText}
-              onToggleReplaceSection={handleToggleReplaceSection}
-              onGenerateSuggestion={(kind) => void handleGenerateSuggestion(kind)}
-              onAcceptSuggestion={(candidateIndex) => void handleAcceptSuggestion(candidateIndex)}
-              onSearch={() => void handleSearch()}
-              onSubmit={() => void handleKnowledgeSave()}
-              onSubmitImport={() => void handleSubmitImport()}
-              onStartEdit={handleStartEdit}
-              onDelete={(tab, id) => void handleDeleteKnowledge(tab, id)}
-              onJumpToRelatedChapter={handleJumpToRelatedChapter}
-              onLocateSearchResult={handleLocateSearchResult}
-              onCancelEdit={handleCancelEdit}
-              onApprovePendingChange={(changeId) =>
-                void handleApproveStoryBiblePendingChange(changeId)
-              }
-              onRejectPendingChange={(changeId) =>
-                void handleRejectStoryBiblePendingChange(changeId)
-              }
-              onRollbackVersion={(versionId, versionNumber) =>
-                void handleRollbackStoryBibleVersion(versionId, versionNumber)
-              }
-            />
-          </section>
-        ) : null}
+        <KnowledgePhase
+          stage={activeStageValue}
+          workspace={workspace}
+          storyBible={storyBible}
+          activeTab={activeTab}
+          highlightedItemId={highlightedKnowledgeId}
+          editingId={editingId}
+          formState={formState}
+          saving={savingKnowledge}
+          importing={importingKnowledge}
+          searchQuery={searchQuery}
+          searchResults={searchResults}
+          importTemplates={importTemplates}
+          selectedTemplateKey={selectedTemplateKey}
+          importPayloadText={importPayloadText}
+          replaceSections={replaceSections}
+          generationLoadingKind={dispatchingEntityKind}
+          generationTask={entityTaskState}
+          generationTaskEvents={entityTaskEvents}
+          acceptingCandidateIndex={acceptingCandidateIndex}
+          storyBibleVersions={storyBibleVersions}
+          storyBiblePendingChanges={storyBiblePendingChanges}
+          loadingGovernance={loadingStoryBibleGovernance}
+          governanceActionKey={storyBibleGovernanceActionKey}
+          onTabChange={handleKnowledgeTabChange}
+          onFieldChange={(field, value) =>
+            setFormState((current) => ({
+              ...current,
+              [field]: value,
+            }))
+          }
+          onSearchQueryChange={setSearchQuery}
+          onImportTemplateChange={handleImportTemplateChange}
+          onImportPayloadChange={setImportPayloadText}
+          onToggleReplaceSection={handleToggleReplaceSection}
+          onGenerateSuggestion={(kind) => void handleGenerateSuggestion(kind)}
+          onAcceptSuggestion={(candidateIndex) => void handleAcceptSuggestion(candidateIndex)}
+          onSearch={() => void handleSearch()}
+          onSubmit={() => void handleKnowledgeSave()}
+          onSubmitImport={() => void handleSubmitImport()}
+          onStartEdit={handleStartEdit}
+          onDelete={(tab, id) => void handleDeleteKnowledge(tab, id)}
+          onJumpToRelatedChapter={handleJumpToRelatedChapter}
+          onLocateSearchResult={handleLocateSearchResult}
+          onCancelEdit={handleCancelEdit}
+          onApprovePendingChange={(changeId) =>
+            void handleApproveStoryBiblePendingChange(changeId)
+          }
+          onRejectPendingChange={(changeId) =>
+            void handleRejectStoryBiblePendingChange(changeId)
+          }
+          onRollbackVersion={(versionId, versionNumber) =>
+            void handleRollbackStoryBibleVersion(versionId, versionNumber)
+          }
+        />
 
       </div>
 

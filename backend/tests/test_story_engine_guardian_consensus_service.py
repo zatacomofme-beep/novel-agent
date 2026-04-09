@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from agents.story_agents import build_agent_report
-from services.story_engine_workflow_service import _run_guardian_consensus_report
+from services.story_engine_workflows._shared import _run_guardian_consensus_report
 
 
 class StoryEngineGuardianConsensusServiceTests(unittest.IsolatedAsyncioTestCase):

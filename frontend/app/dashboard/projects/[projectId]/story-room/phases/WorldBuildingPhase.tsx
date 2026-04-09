@@ -1,19 +1,30 @@
 "use client";
 
+import { WorldBuildingPanel } from "@/components/story-engine/world-building-panel";
 import type { StoryRoomStageKey } from "../types";
 
 interface WorldBuildingPhaseProps {
   projectId: string;
   stage: StoryRoomStageKey;
+  initialIdea?: string;
+  onComplete: () => void;
 }
 
-export function WorldBuildingPhase({ projectId, stage }: WorldBuildingPhaseProps) {
+export function WorldBuildingPhase({
+  projectId,
+  stage,
+  initialIdea,
+  onComplete,
+}: WorldBuildingPhaseProps) {
   if (stage !== "world-building") {
     return null;
   }
+
   return (
-    <div className="world-building-phase">
-      <p>WorldBuildingPhase placeholder - 待从 page.tsx 迁移</p>
-    </div>
+    <WorldBuildingPanel
+      projectId={projectId}
+      initialIdea={initialIdea || undefined}
+      onComplete={onComplete}
+    />
   );
 }

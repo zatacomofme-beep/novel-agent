@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import string
 from typing import Final
@@ -10,6 +11,8 @@ from core.config import get_settings
 
 CAPTCHA_CODE_LENGTH: Final = 6
 CAPTCHA_CODE_EXPIRE_SECONDS: Final = 300
+
+logger = logging.getLogger(__name__)
 
 
 def _get_redis_client() -> redis.Redis:
@@ -47,9 +50,7 @@ def _send_email(email: str, code: str) -> None:
                 server.login(settings.email_username, settings.email_password)
             server.send_message(msg)
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Email sending failed: {e}")
+        logger.warning("Email sending failed: %s", e)
 
 
 def verify_code(email: str, code: str) -> bool:

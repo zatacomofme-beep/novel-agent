@@ -155,7 +155,8 @@ function parseLegacyLocalDraft(
       return null;
     }
     return buildStoryRoomLocalDraftRecord(storageKey, snapshot);
-  } catch {
+  } catch (err) {
+    console.warn("[local-draft] Failed to read localStorage draft:", err);
     return null;
   }
 }
@@ -248,7 +249,8 @@ async function readIndexedDbLocalDraft(
     const store = transaction.objectStore(STORY_ROOM_LOCAL_DRAFT_STORE_NAME);
     const result = await requestToPromise(store.get(storageKey));
     return parseStoryRoomLocalDraftRecord(result);
-  } catch {
+  } catch (err) {
+    console.warn("[local-draft] IndexedDB read failed:", err);
     return null;
   }
 }
@@ -264,7 +266,8 @@ async function writeIndexedDbLocalDraft(record: StoryRoomLocalDraftRecord): Prom
     transaction.objectStore(STORY_ROOM_LOCAL_DRAFT_STORE_NAME).put(record);
     await waitForTransaction(transaction);
     return true;
-  } catch {
+  } catch (err) {
+    console.warn("[local-draft] IndexedDB write failed:", err);
     return false;
   }
 }
@@ -279,8 +282,8 @@ async function removeIndexedDbLocalDraft(storageKey: string): Promise<void> {
     const transaction = database.transaction(STORY_ROOM_LOCAL_DRAFT_STORE_NAME, "readwrite");
     transaction.objectStore(STORY_ROOM_LOCAL_DRAFT_STORE_NAME).delete(storageKey);
     await waitForTransaction(transaction);
-  } catch {
-    // 写作保护是兜底能力，删除失败时不阻断主流程。
+  } catch (err) {
+    console.warn("[local-draft] IndexedDB delete failed:", err);
   }
 }
 
@@ -300,7 +303,8 @@ async function listIndexedDbLocalDrafts(
     return records
       .map((item) => parseStoryRoomLocalDraftRecord(item))
       .filter((item): item is StoryRoomLocalDraftRecord => item !== null);
-  } catch {
+  } catch (err) {
+    console.warn("[local-draft] IndexedDB list failed:", err);
     return [];
   }
 }

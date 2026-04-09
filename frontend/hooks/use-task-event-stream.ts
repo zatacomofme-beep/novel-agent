@@ -116,7 +116,10 @@ export function useTaskEventStream({
           return;
         }
         reconnectAttempt += 1;
-        const reconnectDelay = Math.min(8000, 600 * reconnectAttempt);
+        const baseDelay = 600 * reconnectAttempt;
+        const maxDelay = 30_000;
+        const jitter = Math.random() * 600;
+        const reconnectDelay = Math.min(maxDelay, baseDelay) + jitter;
         reconnectTimer = window.setTimeout(() => {
           connect();
         }, reconnectDelay);

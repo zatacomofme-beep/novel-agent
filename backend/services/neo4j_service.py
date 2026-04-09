@@ -39,8 +39,8 @@ except ImportError:
 class Neo4jService:
     def __init__(self) -> None:
         settings = get_settings()
-        self._url = getattr(settings, "neo4j_url", "bolt://localhost:7687")
-        self._auth = getattr(settings, "neo4j_auth", ("neo4j", "password"))
+        self._url = settings.neo4j_url
+        self._auth = settings.neo4j_auth
         self._client: Neo4jDriverProtocol | None = None
         self._available = False
 
@@ -356,6 +356,98 @@ class Neo4jService:
     @property
     def is_available(self) -> bool:
         return self._available
+
+
+    async def query_entity_relations(
+        self,
+        project_id: uuid.UUID,
+        entity_name: str,
+        max_hops: int = 3,
+    ) -> DegradedResponse[list[dict[str, Any]]]:
+        driver = await self._get_client()
+        if not driver:
+            return DegradedResponse.empty(source="neo4j", reason="driver_unavailable")
+        cypher = """
+        MATCH path = (start)-[r*1..%d]-(end)
+        WHERE start.project_id = $project_id AND start.name = $entity_name
+        RETURN [node in nodes(path) | {name: node.name, labels: labels(node)}] AS node_list,
+               [rel in relationships(path) | type(rel)] AS rel_types,
+               length(path) AS hops
+        ORDER BY hops ASC
+        LIMIT 20
+        """ % max_hops
+        paths: list[dict[str, Any]] = []
+        try:
+            async with driver.session() as session:
+                result = await session.run(
+                    cypher,
+                    project_id=str(project_id),
+                    entity_name=entity_name,
+                )
+                async for record in result:
+                    paths.append({
+                        "nodes": record["node_list"],
+                        "relation_types": record["rel_types"],
+                        "hops": record["hops"],
+                    })
+                return_value = DegradedResponse.ok(paths, source="neo4j")
+        except *_NEO4J_EXCEPTIONS as exc:
+            logger.warning(
+                "neo4j_query_entity_relations_failed",
+                extra={"error": str(exc), "project_id": str(project_id), "entity_name": entity_name},
+            )
+            return_value = DegradedResponse.fallback(
+                [],
+                source="neo4j",
+                reason=f"query_error: {exc}",
+            )
+        return return_value
+
+    async def query_multi_entity_relations(
+        self,
+        project_id: uuid.UUID,
+        entity_names: list[str],
+    ) -> DegradedResponse[list[dict[str, Any]]]:
+        driver = await self._get_client()
+        if not driver:
+            return DegradedResponse.empty(source="neo4j", reason="driver_unavailable")
+        if not entity_names:
+            return DegradedResponse.ok([], source="neo4j")
+        cypher = """
+        MATCH (a)-[r]-(b)
+        WHERE a.project_id = $project_id AND a.name IN $entity_names
+        RETURN a.name AS from_name, type(r) AS relation, b.name AS to_name,
+               labels(a) AS from_labels, labels(b) AS to_labels
+        LIMIT 50
+        """
+        relations: list[dict[str, Any]] = []
+        try:
+            async with driver.session() as session:
+                result = await session.run(
+                    cypher,
+                    project_id=str(project_id),
+                    entity_names=entity_names,
+                )
+                async for record in result:
+                    relations.append({
+                        "from": record["from_name"],
+                        "relation": record["relation"],
+                        "to": record["to_name"],
+                        "from_labels": record["from_labels"],
+                        "to_labels": record["to_labels"],
+                    })
+                return_value = DegradedResponse.ok(relations, source="neo4j")
+        except *_NEO4J_EXCEPTIONS as exc:
+            logger.warning(
+                "neo4j_query_multi_entity_relations_failed",
+                extra={"error": str(exc), "project_id": str(project_id)},
+            )
+            return_value = DegradedResponse.fallback(
+                [],
+                source="neo4j",
+                reason=f"query_error: {exc}",
+            )
+        return return_value
 
 
 neo4j_service = Neo4jService()

@@ -7,7 +7,7 @@ from fastapi.security import OAuth2PasswordBearer
 from core.config import Settings, get_settings
 from core.errors import AppError
 from core.security import decode_access_token
-from db.session import AsyncSessionLocal
+from db.session import get_session, transactional
 from models.user import User
 from services.auth_service import get_user_by_id
 
@@ -21,8 +21,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
 async def get_db_session() -> AsyncIterator:
-    async with AsyncSessionLocal() as session:
-        yield session
+    async for session in get_session():
+        async with transactional(session):
+            yield session
 
 
 async def get_current_user(

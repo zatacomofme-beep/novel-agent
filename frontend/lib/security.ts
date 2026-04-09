@@ -30,7 +30,8 @@ export function isTrustedUrl(url: string, allowedOrigins: string[] = []): boolea
       "https://yunwu.ai",
     ]);
     return allowed.has(parsed.origin);
-  } catch {
+  } catch (err) {
+    console.warn("[security] Invalid URL in origin check:", err);
     return false;
   }
 }

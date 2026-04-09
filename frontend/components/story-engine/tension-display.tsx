@@ -23,10 +23,10 @@ export function TensionDisplay({
   };
 
   const levelBg: Record<string, string> = {
-    low: "bg-green-50 dark:bg-green-950",
-    moderate: "bg-yellow-50 dark:bg-yellow-950",
-    high: "bg-orange-50 dark:bg-orange-950",
-    critical: "bg-red-50 dark:bg-red-950",
+    low: "bg-green-50",
+    moderate: "bg-yellow-50",
+    high: "bg-orange-50",
+    critical: "bg-red-50",
   };
 
   const levelLabel: Record<string, string> = {
@@ -39,7 +39,7 @@ export function TensionDisplay({
   const barWidth = Math.round(tensionScore * 100);
 
   return (
-    <div className={`rounded-lg p-3 ${levelBg[tensionLevel]} border border-gray-200 dark:border-gray-700`}>
+    <div className={`rounded-lg p-3 ${levelBg[tensionLevel]} border border-gray-200`}>
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs text-gray-500">
           {chapterNumber != null ? `第 ${chapterNumber} 章` : "本章"}张力
@@ -49,7 +49,7 @@ export function TensionDisplay({
         </span>
       </div>
 
-      <div className="relative h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden mb-1">
+      <div className="relative h-2 bg-gray-200 rounded-full overflow-hidden mb-1">
         <div
           className={`absolute left-0 top-0 h-full rounded-full transition-all duration-500 ${levelColor[tensionLevel].replace("text-", "bg-")}`}
           style={{ width: `${barWidth}%` }}

@@ -193,7 +193,8 @@ export function DraftEditorSurface({
         typeof item === "string" && outlineNodes.some((node) => node.key === item),
       );
       setCompletedNodeKeys(nextKeys);
-    } catch {
+    } catch (err) {
+      console.warn("[draft-editor] Failed to parse outline checklist:", err);
       setCompletedNodeKeys([]);
     }
   }, [outlineChecklistStorageKey, outlineNodes]);
@@ -204,8 +205,8 @@ export function DraftEditorSurface({
     }
     try {
       window.localStorage.setItem(outlineChecklistStorageKey, JSON.stringify(completedNodeKeys));
-    } catch {
-      // 本地暂存失败时不阻塞正文写作。
+    } catch (err) {
+      console.warn("[draft-editor] Failed to save outline checklist:", err);
     }
   }, [completedNodeKeys, outlineChecklistStorageKey]);
 

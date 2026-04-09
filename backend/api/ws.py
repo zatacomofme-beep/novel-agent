@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import get_settings
 from core.errors import AppError
 from core.security import decode_access_token
+from core.trace import new_trace_id, set_trace_id
 from db.session import AsyncSessionLocal
 from realtime.task_events import task_event_broker
 from services.project_service import PROJECT_PERMISSION_READ, get_owned_project
@@ -111,6 +112,7 @@ async def verify_task_event_subscription_access(
 
 @router.websocket("/tasks/{task_id}")
 async def task_updates(websocket: WebSocket, task_id: str) -> None:
+    set_trace_id(websocket.query_params.get("trace_id") or new_trace_id())
     await websocket.accept()
 
     settings = get_settings()
@@ -157,6 +159,7 @@ async def task_events(
     project_id: list[UUID] = Query(default=[]),
     task_id: list[str] = Query(default=[]),
 ) -> None:
+    set_trace_id(websocket.query_params.get("trace_id") or new_trace_id())
     await websocket.accept()
 
     settings = get_settings()

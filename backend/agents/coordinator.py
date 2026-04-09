@@ -137,6 +137,7 @@ class CoordinatorAgent(BaseAgent):
                 "chapter_number": payload.get("chapter_number"),
                 "chapter_title": payload.get("chapter_title"),
                 "project_id": payload.get("project_id"),
+                "constraint_texts": payload.get("constraint_texts") or [],
             },
         )
         if pre_canon_response.success and isinstance(pre_canon_response.data, dict):
@@ -304,6 +305,7 @@ class CoordinatorAgent(BaseAgent):
                     "content": content,
                     "chapter_number": payload["chapter_number"],
                     "chapter_title": payload.get("chapter_title"),
+                    "constraint_texts": payload.get("constraint_texts") or [],
                 },
             )
             canon_report = (

@@ -6,6 +6,7 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from db.session import AsyncSessionLocal
+from core.trace import get_trace_id, set_trace_id
 from services.legacy_generation_service import (
     StoryBibleIntegrityError,
     run_generation_pipeline,
@@ -281,6 +282,7 @@ async def dispatch_generation_task(
                 "chapter_id": chapter_id,
                 "project_id": project_id,
                 "user_id": user_id,
+                "trace_id": get_trace_id(),
             },
             task_id=task_id,
         )
@@ -349,8 +351,11 @@ def process_generation_task_celery(
     chapter_id: str,
     project_id: str,
     user_id: str,
+    trace_id: str = "",
 ) -> dict[str, Any]:
     import asyncio
+    if trace_id:
+        set_trace_id(trace_id)
     try:
         state = asyncio.run(
             process_generation_task(

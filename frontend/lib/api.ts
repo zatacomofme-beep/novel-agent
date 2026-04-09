@@ -93,6 +93,30 @@ function extractDownloadFilename(contentDisposition: string | null): string | nu
   return basicMatch?.[1] ?? null;
 }
 
+export class ApiError extends Error {
+  readonly code: string;
+  readonly traceId: string;
+  readonly status: number;
+
+  constructor(message: string, code: string, traceId: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.traceId = traceId;
+    this.status = status;
+  }
+}
+
+function throwApiError(response: Response, payload?: ApiErrorPayload): never {
+  const message = payload?.error.message ?? `Request failed with status ${response.status}`;
+  const code = payload?.error.code ?? "unknown";
+  const traceId =
+    (payload?.error.metadata?.trace_id as string) ??
+    response.headers.get("X-Trace-Id") ??
+    "";
+  throw new ApiError(message, code, traceId, response.status);
+}
+
 export async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
@@ -107,14 +131,13 @@ export async function apiFetch<T>(
   });
 
   if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
+    let payload: ApiErrorPayload | undefined;
     try {
-      const payload = (await response.json()) as ApiErrorPayload;
-      message = payload.error.message;
+      payload = (await response.json()) as ApiErrorPayload;
     } catch {
       // Ignore JSON parse failures and fall back to generic message.
     }
-    throw new Error(message);
+    throwApiError(response, payload);
   }
 
   if (response.status === 204) {
@@ -165,14 +188,13 @@ export async function apiFetchWithAuth<T>(
   }
 
   if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
+    let payload: ApiErrorPayload | undefined;
     try {
-      const payload = (await response.json()) as ApiErrorPayload;
-      message = payload.error.message;
+      payload = (await response.json()) as ApiErrorPayload;
     } catch {
       // Ignore JSON parse failures and fall back to generic message.
     }
-    throw new Error(message);
+    throwApiError(response, payload);
   }
 
   if (response.status === 204) {
@@ -208,14 +230,13 @@ export async function apiStreamWithAuth<T>(
   });
 
   if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
+    let payload: ApiErrorPayload | undefined;
     try {
-      const payload = (await response.json()) as ApiErrorPayload;
-      message = payload.error.message;
+      payload = (await response.json()) as ApiErrorPayload;
     } catch {
       // Ignore JSON parse failures and fall back to generic message.
     }
-    throw new Error(message);
+    throwApiError(response, payload);
   }
 
   if (!response.body) {
@@ -270,14 +291,13 @@ export async function downloadWithAuth(
   });
 
   if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
+    let payload: ApiErrorPayload | undefined;
     try {
-      const payload = (await response.json()) as ApiErrorPayload;
-      message = payload.error.message;
+      payload = (await response.json()) as ApiErrorPayload;
     } catch {
       // Ignore JSON parse failures and fall back to generic message.
     }
-    throw new Error(message);
+    throwApiError(response, payload);
   }
 
   const blob = await response.blob();

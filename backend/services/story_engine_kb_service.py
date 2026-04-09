@@ -241,6 +241,7 @@ async def create_entity(
     await session.commit()
     await session.refresh(entity)
     await _sync_entity_vector(project_id, entity_type, entity)
+    await _sync_entity_graph(project_id, entity_type, entity)
     return entity
 
 
@@ -305,6 +306,7 @@ async def update_entity(
     await session.commit()
     await session.refresh(entity)
     await _sync_entity_vector(project_id, entity_type, entity)
+    await _sync_entity_graph(project_id, entity_type, entity)
     return entity
 
 
@@ -1399,6 +1401,45 @@ async def _sync_entity_vector(project_id: UUID, entity_type: str, entity: Any) -
         )
     except Exception:
         # 向量层不是主真相源，索引失败不能影响结构化数据写入。
+        return
+
+
+async def _sync_entity_graph(project_id: UUID, entity_type: str, entity: Any) -> None:
+    try:
+        from services.neo4j_service import neo4j_service
+        if not neo4j_service._available:
+            return
+
+        if entity_type == "characters":
+            name = getattr(entity, "name", None)
+            if not name:
+                return
+            character_id = str(getattr(entity, "character_id", ""))
+            relationships = getattr(entity, "relationships", None) or []
+            for rel in relationships:
+                target_name = rel.get("target_name") or rel.get("target_id") or ""
+                relation_type = rel.get("relation") or rel.get("type") or ""
+                if target_name and relation_type:
+                    await neo4j_service.create_event_node(
+                        project_id=project_id,
+                        event_id=character_id,
+                        name=name,
+                        chapter=0,
+                        event_type="character",
+                    )
+        elif entity_type == "timeline_events":
+            event_id = str(getattr(entity, "id", ""))
+            event_name = getattr(entity, "event_name", None)
+            chapter = getattr(entity, "chapter_number", 0)
+            if event_name:
+                await neo4j_service.create_event_node(
+                    project_id=project_id,
+                    event_id=event_id,
+                    name=event_name,
+                    chapter=chapter or 0,
+                    event_type="timeline_event",
+                )
+    except Exception:
         return
 
 

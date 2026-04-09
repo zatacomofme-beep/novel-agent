@@ -152,7 +152,6 @@ async def resolve_thread(
     await foreshadowing_lifecycle_service.resolve(
         session, body.thread_id, 0, body.summary
     )
-    await session.commit()
     return {"success": True, "thread_id": str(body.thread_id)}
 
 
@@ -166,5 +165,4 @@ async def abandon_thread(
     await foreshadowing_lifecycle_service.abandon(
         session, body.thread_id, body.reason
     )
-    await session.commit()
     return {"success": True, "thread_id": str(body.thread_id)}
